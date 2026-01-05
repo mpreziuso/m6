@@ -1,0 +1,31 @@
+[build]
+# Default target for kernel builds
+target = "aarch64-unknown-none"
+
+[target.aarch64-unknown-none]
+# Use rust-lld as the linker
+linker = "rust-lld"
+
+# Common linker flags (kernel crate has its own linker script)
+rustflags = [
+    "-C", "link-arg=--gc-sections",
+]
+
+# Runner for QEMU (used by cargo run)
+runner = "./scripts/run-qemu.sh"
+
+[target.aarch64-unknown-uefi]
+# UEFI target for bootloader
+runner = "./scripts/run-qemu.sh"
+
+[alias]
+# Build the bootloader
+boot = "build --package m6-boot --target aarch64-unknown-uefi"
+# Build the kernel
+kernel = "build --package m6-kernel --target aarch64-unknown-none"
+# Build everything
+all = "build --workspace"
+
+[env]
+# Environment variables
+RUST_BACKTRACE = "1"

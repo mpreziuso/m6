@@ -1,0 +1,29 @@
+//! # m6-kernel
+//!
+//! The M6 microkernel for ARM64.
+//!
+//! This is a minimal kernel that receives control from the bootloader
+//! and provides basic system services.
+//!
+//! # Boot Requirements
+//!
+//! The kernel expects the following state when `_start` is called:
+//! - MMU enabled with TTBR1 pointing to kernel page tables
+//! - Stack pointer set to kernel stack (high-half virtual address)
+//! - `x0` containing physical address of [`BootInfo`](m6_common::boot::BootInfo)
+//! - Interrupts disabled (DAIF masked)
+//!
+//! # Memory Layout
+//!
+//! The kernel is linked at `KERNEL_VIRT_BASE` (0xFFFF_FFFF_8000_0000):
+//! - `.text`: Executable code
+//! - `.vectors`: Exception vector table (2KB aligned)
+//! - `.rodata`: Read-only data
+//! - `.data`: Initialized read-write data
+//! - `.bss`: Zero-initialized data
+//! - `.stack`: Kernel stack (64KB)
+
+#![no_std]
+#![deny(unsafe_op_in_unsafe_fn)]
+
+extern crate alloc;

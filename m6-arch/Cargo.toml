@@ -1,0 +1,13 @@
+[package]
+name = "m6-arch"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aarch64-cpu = { workspace = true }
+spin = { workspace = true }
+tock-registers = { workspace = true }
+m6-common = { workspace = true }

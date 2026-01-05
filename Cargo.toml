@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["m6-arch", "m6-boot", "m6-common", "m6-kernel", "m6-paging"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Michele Preziuso"]
+license = "MIT"
+repository = "https://github.com/mpreziuso/m6"
+
+[workspace.dependencies]
+m6-common = { path = "m6-common" }
+m6-paging = { path = "m6-paging" }
+m6-arch = { path = "m6-arch" }
+
+# External dependencies
+aarch64-cpu = "11.2.0"
+spin = { version = "0.10", default-features = false, features = [
+    "mutex",
+    "spin_mutex",
+    "rwlock",
+    "once",
+] }
+log = "0.4"
+tock-registers = "0.10"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = "z"

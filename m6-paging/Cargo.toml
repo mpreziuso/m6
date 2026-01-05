@@ -1,0 +1,12 @@
+[package]
+name = "m6-paging"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+tock-registers = { workspace = true }
+spin = { workspace = true }
+m6-common = { workspace = true }
