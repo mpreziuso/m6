@@ -5,7 +5,7 @@
 //! 2. Falls back to smaller sizes when alignment doesn't permit larger blocks
 //! 3. Automatically allocates intermediate tables as needed
 //!
-//! This approach minimizes TLB pressure and page table memory usage.
+//! This approach minimises TLB pressure and page table memory usage.
 
 use super::descriptors::{
     BlockPageMapper, L1Descriptor, L2Descriptor, L3Descriptor, PageTableEntry, TableMapper,

@@ -1,5 +1,5 @@
 [package]
-name = "m6-kernel"
+name = "m6-pal"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,5 +8,5 @@ repository.workspace = true
 
 [dependencies]
 m6-common = { workspace = true }
-m6-arch = { workspace = true }
-m6-pal = { workspace = true }
+once_cell_no_std = { workspace = true }
+fdt = "0.1"

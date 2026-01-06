@@ -10,6 +10,7 @@ repository.workspace = true
 m6-paging = { workspace = true }
 m6-common = { workspace = true }
 m6-arch = { workspace = true }
+m6-pal = { workspace = true }
 log = { workspace = true }
 uefi = { version = "0.36", features = ["alloc", "logger", "global_allocator"] }
 elf_rs = { version = "0.3", default-features = false }

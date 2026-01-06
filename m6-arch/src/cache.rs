@@ -22,9 +22,9 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
-/// Cached cache line size (initialized on first use).
+/// Cached cache line size (initialised on first use).
 ///
-/// Value of 0 indicates not yet initialized.
+/// Value of 0 indicates not yet initialised.
 static CACHE_LINE_SIZE: AtomicUsize = AtomicUsize::new(0);
 
 /// Get the data cache minimum line size from CTR_EL0.

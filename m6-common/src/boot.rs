@@ -16,24 +16,9 @@ pub const BOOT_INFO_VERSION: u32 = 2;
 /// Maximum number of memory regions supported
 pub const MAX_MEMORY_REGIONS: usize = 64;
 
-/// Platform identification
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum Platform {
-    /// Unknown platform
-    Unknown = 0,
-    /// QEMU ARM virt machine
-    QemuVirt = 1,
-}
-
-impl Platform {
-    pub const fn from_u32(value: u32) -> Self {
-        match value {
-            1 => Self::QemuVirt,
-            _ => Self::Unknown,
-        }
-    }
-}
+/// Virtual base address of kernel direct physical map in TTBR1
+/// All physical memory is mapped at KERNEL_PHYS_MAP_BASE + phys_addr
+pub const KERNEL_PHYS_MAP_BASE: u64 = 0xFFFF_8000_0000_0000;
 
 /// Framebuffer information for early graphics
 #[derive(Debug, Clone, Copy)]
@@ -104,8 +89,6 @@ pub struct BootInfo {
     pub magic: u64,
     /// Version of the boot info structure
     pub version: u32,
-    /// Platform identification
-    pub platform: Platform,
     /// Physical address where the kernel was loaded
     pub kernel_phys_base: PhysAddr,
     /// Virtual address where the kernel is mapped

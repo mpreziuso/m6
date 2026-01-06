@@ -19,7 +19,7 @@ use m6_boot::memory::{mark_region, translate_memory_map};
 use m6_boot::page_table::{
     setup_initial_page_tables, BootPageAllocator, MmioConfig,
 };
-use m6_common::boot::{BootInfo, FramebufferInfo, Platform, BOOT_INFO_MAGIC, BOOT_INFO_VERSION};
+use m6_common::boot::{BootInfo, FramebufferInfo, BOOT_INFO_MAGIC, BOOT_INFO_VERSION};
 use m6_common::{PhysAddr, VirtAddr};
 use m6_common::memory::MemoryType as M6MemoryType;
 use uefi::boot::{self, AllocateType, MemoryType};
@@ -54,10 +54,6 @@ fn efi_main() -> Status {
         "UEFI Firmware Revision: {:#x}",
         system::firmware_revision()
     );
-
-    // Detect platform
-    let platform = detect_platform();
-    log::info!("Detected platform: {:?}", platform);
 
     // Load the kernel
     let kernel = match load_kernel() {
@@ -127,9 +123,11 @@ fn efi_main() -> Status {
 
     // Find device tree blob (DTB) from UEFI config table
     let dtb_address = find_dtb();
-    if dtb_address != 0 {
-        log::info!("Device tree blob found at {:#x}", dtb_address);
+    if dtb_address == 0 {
+        log::error!("Device tree blob not found - cannot determine platform configuration");
+        return Status::NOT_FOUND;
     }
+    log::info!("Device tree blob found at {:#x}", dtb_address);
 
     // Set up initial page tables
     // SAFETY: We just allocated this memory
@@ -139,8 +137,8 @@ fn efi_main() -> Status {
     // Calculate stack base from stack top (stack_phys is top, we need base)
     let stack_base_phys = kernel.stack_phys - KERNEL_STACK_SIZE as u64;
 
-    // Get platform-specific MMIO physical addresses
-    let mmio = get_mmio_config(platform);
+    // Parse platform-specific MMIO physical addresses from DTB
+    let mmio = parse_mmio_from_dtb(dtb_address);
 
     // Get memory map to determine how much physical memory to map
     // We need to do this before exit_boot_services, but the map may change slightly
@@ -217,7 +215,6 @@ fn efi_main() -> Status {
 
         (*ptr).magic = BOOT_INFO_MAGIC;
         (*ptr).version = BOOT_INFO_VERSION;
-        (*ptr).platform = platform;
         (*ptr).kernel_phys_base = PhysAddr::new(kernel.phys_base);
         (*ptr).kernel_virt_base = VirtAddr::new(KERNEL_VIRT_BASE);
         (*ptr).kernel_size = kernel.size;
@@ -252,24 +249,25 @@ fn efi_main() -> Status {
     }
 }
 
-fn detect_platform() -> Platform {
-    // Until we decide on a physical hardware platform, default to QEMU virt
-    Platform::QemuVirt
-}
+/// Parse MMIO addresses from Device Tree Blob
+fn parse_mmio_from_dtb(dtb_phys: u64) -> MmioConfig {
+    const DTB_MAX_SIZE: usize = 2 * 1024 * 1024; // 2MB max
 
-/// Get platform-specific MMIO physical addresses
-fn get_mmio_config(platform: Platform) -> MmioConfig {
-    match platform {
-        Platform::QemuVirt => MmioConfig {
-            // QEMU virt machine MMIO addresses
-            gic_phys: 0x0800_0000, // GICv3 distributor
-            uart_phys: 0x0900_0000, // PL011 UART
-        },
-        Platform::Unknown => MmioConfig {
-            // Fall back to QEMU addresses
-            gic_phys: 0x0800_0000,
-            uart_phys: 0x0900_0000,
-        },
+    // Create slice from DTB physical address (UEFI identity maps everything)
+    // SAFETY: DTB address comes from UEFI config table and is valid
+    let dtb_slice = unsafe {
+        core::slice::from_raw_parts(dtb_phys as *const u8, DTB_MAX_SIZE)
+    };
+
+    let (gic, uart) = m6_pal::dtb::parse_mmio_from_slice(dtb_slice)
+        .expect("Failed to parse DTB or extract MMIO addresses");
+
+    log::info!("DTB: GIC distributor at {:#x}", gic);
+    log::info!("DTB: UART at {:#x}", uart);
+
+    MmioConfig {
+        gic_phys: gic,
+        uart_phys: uart,
     }
 }
 

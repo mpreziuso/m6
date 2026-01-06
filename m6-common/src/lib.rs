@@ -5,7 +5,6 @@
 //! This crate defines the ABI between bootloader and kernel:
 //! - [`BootInfo`](boot::BootInfo): Boot handoff structure passed from bootloader to kernel
 //! - [`MemoryMap`](memory::MemoryMap): Physical memory layout from UEFI
-//! - [`Platform`](boot::Platform): Hardware platform identification
 //! - [`FramebufferInfo`](boot::FramebufferInfo): Graphics framebuffer for early console
 //!
 //! All types use `#[repr(C)]` for stable ABI across compilation units.

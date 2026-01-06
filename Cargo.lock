@@ -46,6 +46,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "fdt"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "784a4df722dc6267a04af36895398f59d21d07dce47232adf31ec0ff2fa45e67"
+
+[[package]]
 name = "log"
 version = "0.4.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -70,6 +76,7 @@ dependencies = [
  "m6-arch",
  "m6-common",
  "m6-paging",
+ "m6-pal",
  "uefi",
 ]
 
@@ -83,6 +90,7 @@ version = "0.1.0"
 dependencies = [
  "m6-arch",
  "m6-common",
+ "m6-pal",
 ]
 
 [[package]]
@@ -95,6 +103,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "m6-pal"
+version = "0.1.0"
+dependencies = [
+ "fdt",
+ "m6-common",
+ "once_cell_no_std",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -102,6 +119,12 @@ checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "once_cell_no_std"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa32e177c2b2d33c279f41b74828c00edf20a00fefca2cb73afe61c95f1a0c68"
 
 [[package]]
 name = "proc-macro2"

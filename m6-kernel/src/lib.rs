@@ -19,8 +19,8 @@
 //! - `.text`: Executable code
 //! - `.vectors`: Exception vector table (2KB aligned)
 //! - `.rodata`: Read-only data
-//! - `.data`: Initialized read-write data
-//! - `.bss`: Zero-initialized data
+//! - `.data`: Initialised read-write data
+//! - `.bss`: Zero-initialised data
 //! - `.stack`: Kernel stack (64KB)
 
 #![no_std]

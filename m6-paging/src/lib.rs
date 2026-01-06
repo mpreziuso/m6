@@ -1,4 +1,4 @@
-//! M6 Paging - Type-safe page table abstractions
+//! Paging - Type-safe page table abstractions
 //!
 //! This crate provides type-safe abstractions for ARM64 page table management,
 //! following modern Rust best practices for compile-time safety and optimal
@@ -55,15 +55,15 @@ const _: () = assert!(
 // Physical-to-Virtual Address Translation
 // ============================================================================
 
-/// Physical-to-virtual offset (initialized once during kernel init).
+/// Physical-to-virtual offset (initialised once during kernel init).
 ///
 /// Uses `spin::Once` to ensure the offset can only be set once,
-/// preventing accidental double-initialization.
+/// preventing accidental double-initialisation.
 static PHYS_TO_VIRT_OFFSET: Once<u64> = Once::new();
 
 /// Set the offset to add to physical addresses when converting to virtual.
 ///
-/// This should be called once during kernel initialization, before any page
+/// This should be called once during kernel initialisation, before any page
 /// table operations that require accessing physical memory.
 ///
 /// # Arguments

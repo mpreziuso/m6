@@ -49,7 +49,7 @@ SECTIONS
         __data_end = .;
     }
 
-    /* BSS (uninitialized data) */
+    /* BSS (uninitialised data) */
     . = ALIGN(4096);
     .bss : AT(ADDR(.bss) - KERNEL_VIRT_BASE)
     {
