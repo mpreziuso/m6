@@ -363,7 +363,7 @@ impl core::fmt::Debug for L3Table {
 // Helper Functions
 // =============================================================================
 
-/// Initialize a page table by zeroing all entries
+/// Initialise a page table by zeroing all entries
 ///
 /// # Safety
 /// The physical address must point to a valid, writable page of memory.

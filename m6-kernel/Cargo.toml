@@ -10,3 +10,7 @@ repository.workspace = true
 m6-common = { workspace = true }
 m6-arch = { workspace = true }
 m6-pal = { workspace = true }
+
+log = { workspace = true }
+spin = { workspace = true }
+thingbuf = { workspace = true }

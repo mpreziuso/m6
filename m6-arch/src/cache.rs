@@ -7,7 +7,7 @@
 //! # Cache Line Size
 //!
 //! The cache line size is read from `CTR_EL0.DminLine` at runtime and cached.
-//! This ensures correct behavior across different ARM64 implementations.
+//! This ensures correct behaviour across different ARM64 implementations.
 //!
 //! # Coherency Model
 //! - **Clean**: Write dirty cache lines to memory (DC CVAC)

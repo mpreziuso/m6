@@ -42,7 +42,7 @@ const SMBIOS_GUID: uefi::Guid = uefi::guid!("eb9d2d31-2d88-11d3-9a16-0090273fc14
 
 #[entry]
 fn efi_main() -> Status {
-    // Initialize UEFI services
+    // Initialise UEFI services
     uefi::helpers::init().unwrap();
 
     // Verify we're running at EL1 (required for configuring EL1 system registers)

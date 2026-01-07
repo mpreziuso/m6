@@ -9,4 +9,7 @@ repository.workspace = true
 [dependencies]
 m6-common = { workspace = true }
 once_cell_no_std = { workspace = true }
+spin = { workspace = true }
+aarch64-cpu = { workspace = true }
+tock-registers = { workspace = true }
 fdt = "0.1"

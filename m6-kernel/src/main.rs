@@ -1,6 +1,6 @@
-//! Kernel Initialization
+//! Kernel Initialisation
 //!
-//! This module contains the kernel entry point and initialization sequence.
+//! This module contains the kernel entry point and initialisation sequence.
 
 #![no_std]
 #![no_main]
@@ -9,7 +9,8 @@
 use core::panic::PanicInfo;
 use m6_arch::cpu;
 use m6_common::boot::BootInfo;
-use m6_pal::platform;
+use m6_kernel::logging::logger;
+use m6_pal::{console, platform};
 
 
 /// Panic handler for the kernel
@@ -37,8 +38,32 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
     }
 
     platform::init(boot_info);
+    console::init_with_base(boot_info.uart_virt_base.0);
 
+    print_banner();
+    
+    logger::init();
+
+    log::info!("M6 Kernel starting...");
+    
     loop {
         cpu::wait_for_interrupt();
     }
+}
+
+
+fn print_banner() {
+    console::puts("\n");
+    console::puts("\x1b[36m");  // Cyan
+    console::puts("\n");
+    console::puts("  ███╗   ███╗ ██████╗ \n");
+    console::puts("  ████╗ ████║██╔════╝ \n");
+    console::puts("  ██╔████╔██║███████╗ \n");
+    console::puts("  ██║╚██╔╝██║██╔═══██╗\n");
+    console::puts("  ██║ ╚═╝ ██║╚██████╔╝\n");
+    console::puts("  ╚═╝     ╚═╝ ╚═════╝ \n");
+    console::puts("\x1b[0m");
+    console::puts("\n");
+    console::puts(" m6 - version 0.1.0\n");
+    console::puts("\n");
 }

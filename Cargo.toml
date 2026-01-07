@@ -23,6 +23,7 @@ spin = { version = "0.10", default-features = false, features = [
     "rwlock",
     "once",
 ] }
+thingbuf = { version = "0.1", default-features = false, features = ["static"] }
 log = "0.4"
 tock-registers = "0.10"
 once_cell_no_std = "0.1"

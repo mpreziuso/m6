@@ -78,10 +78,10 @@ impl Platform for DtbPlatform {
     }
 
     fn early_init(&self) {
-        // DTB platforms don't need special early initialization
+        // DTB platforms don't need special early initialisation
     }
 
     fn late_init(&self) {
-        // DTB platforms don't need special late initialization
+        // DTB platforms don't need special late initialisation
     }
 }

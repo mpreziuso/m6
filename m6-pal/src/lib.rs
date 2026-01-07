@@ -12,6 +12,9 @@
 pub mod platform;
 pub mod dtb;
 pub mod dtb_platform;
+pub mod console;
+pub mod boot_uart;
+pub mod timer;
 
 pub use platform::{Platform, PlatformInfo, current_platform};
 pub use dtb::get_parsed_dtb;

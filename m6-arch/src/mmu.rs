@@ -210,7 +210,7 @@ impl Mmu {
         self.enabled || (SCTLR_EL1.get() & 1) != 0
     }
 
-    /// Initialize the MMU with the given page tables
+    /// Initialise the MMU with the given page tables
     pub fn enable(&mut self, ttbr0: u64, ttbr1: u64) {
         // Set MAIR (Memory Attribute Indirection Register)
         // Index 0: Normal WB-RWA (0xFF)

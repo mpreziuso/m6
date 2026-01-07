@@ -176,7 +176,7 @@ fn default_serror_handler(ctx: &mut ExceptionContext) {
     panic!("System Error at ELR={:#x}, ESR={:#x}", ctx.elr, ctx.esr);
 }
 
-/// Exception vector stub macro - fits within 128 bytes (32 instructions)
+/// Exception vector stub macro - fits within 128 bytes
 ///
 /// This stub saves all context and branches to a continuation handler.
 /// ARM64 exception vectors require each entry to be exactly 128 bytes.
@@ -188,8 +188,6 @@ fn default_serror_handler(ctx: &mut ExceptionContext) {
 /// - SPSR_EL1: offset 264 (33 * 8)
 /// - ESR_EL1: offset 272 (34 * 8)
 /// - FAR_EL1: offset 280 (35 * 8)
-///
-/// Instruction count: 26 (well within 32 limit)
 macro_rules! exception_stub {
     ($continuation:ident) => {
         concat!(

@@ -88,9 +88,12 @@ version = "0.1.0"
 name = "m6-kernel"
 version = "0.1.0"
 dependencies = [
+ "log",
  "m6-arch",
  "m6-common",
  "m6-pal",
+ "spin",
+ "thingbuf",
 ]
 
 [[package]]
@@ -106,9 +109,12 @@ dependencies = [
 name = "m6-pal"
 version = "0.1.0"
 dependencies = [
+ "aarch64-cpu",
  "fdt",
  "m6-common",
  "once_cell_no_std",
+ "spin",
+ "tock-registers",
 ]
 
 [[package]]
@@ -125,6 +131,26 @@ name = "once_cell_no_std"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fa32e177c2b2d33c279f41b74828c00edf20a00fefca2cb73afe61c95f1a0c68"
+
+[[package]]
+name = "pin-project"
+version = "1.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "677f1add503faace112b9f1373e43e9e054bfdd22ff1a63c1bc485eaec6a6a8a"
+dependencies = [
+ "pin-project-internal",
+]
+
+[[package]]
+name = "pin-project-internal"
+version = "1.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e918e4ff8c4549eb882f14b3a4bc8c8bc93de829416eacf579f1207a8fbf861"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "proc-macro2"
@@ -179,6 +205,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "thingbuf"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "662b54ef6f7b4e71f683dadc787bbb2d8e8ef2f91b682ebed3164a5a7abca905"
+dependencies = [
+ "pin-project",
 ]
 
 [[package]]

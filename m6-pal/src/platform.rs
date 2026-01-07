@@ -35,10 +35,10 @@ pub trait Platform: Send + Sync {
     /// Get the RAM size (or 0 if determined by memory map)
     fn ram_size(&self) -> u64;
 
-    /// Perform early platform initialization
+    /// Perform early platform initialisation
     fn early_init(&self);
 
-    /// Perform late platform initialization (after memory management)
+    /// Perform late platform initialisation (after memory management)
     fn late_init(&self);
 }
 
@@ -51,12 +51,12 @@ impl PlatformInfo {
         // Store DtbPlatform in static storage
         static DTB_PLATFORM_STORAGE: OnceCell<DtbPlatform> = OnceCell::new();
 
-        // Initialize with the DTB platform (ignoring error if already initialized)
+        // Initialise with the DTB platform (ignoring error if already initialised)
         let _ = DTB_PLATFORM_STORAGE.set(dtb_platform);
 
         // Get the stored reference
         let platform_ref = DTB_PLATFORM_STORAGE.get()
-            .expect("DTB platform should be initialized");
+            .expect("DTB platform should be initialised");
 
         Self {
             platform: platform_ref,
@@ -70,19 +70,19 @@ impl PlatformInfo {
 
 static CURRENT_PLATFORM: OnceCell<PlatformInfo> = OnceCell::new();
 
-/// Initialize the platform abstraction layer
+/// Initialise the platform abstraction layer
 ///
 /// This function parses the Device Tree Blob to dynamically configure the platform.
-/// The DTB must be present and valid - if parsing fails, initialization will panic.
+/// The DTB must be present and valid - if parsing fails, initialisation will panic.
 pub fn init(boot_info: &'static BootInfo) {
     // DTB is required - fail if not present
     if boot_info.dtb_address.as_u64() == 0 {
-        panic!("No DTB address provided in BootInfo - cannot initialize platform");
+        panic!("No DTB address provided in BootInfo - cannot initialise platform");
     }
 
     // Parse DTB and create platform configuration
     let dtb_platform = dtb::parse_dtb(boot_info)
-        .expect("Failed to parse DTB - cannot initialize platform");
+        .expect("Failed to parse DTB - cannot initialise platform");
 
     let info = PlatformInfo::from_dtb(dtb_platform);
 
@@ -98,5 +98,5 @@ pub fn current_platform() -> Option<&'static dyn Platform> {
 }
 
 pub fn platform() -> &'static dyn Platform {
-    current_platform().expect("Platform not initialized")
+    current_platform().expect("Platform not initialised")
 }

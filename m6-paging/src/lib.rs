@@ -16,7 +16,7 @@
 //!
 //! By default, this crate assumes identity mapping (physical == virtual), which
 //! is appropriate for bootloaders. For kernels with a direct physical map at
-//! a different offset, call `set_phys_to_virt_offset()` during initialization.
+//! a different offset, call `set_phys_to_virt_offset()` during initialisation.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
