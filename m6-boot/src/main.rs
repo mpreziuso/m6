@@ -169,6 +169,38 @@ fn efi_main() -> Status {
         max_phys_addr / (1024 * 1024)
     );
 
+    // Calculate and allocate frame allocator bitmap
+    // Each bit represents one 4KB frame
+    let total_frames = max_phys_addr.div_ceil(4096);
+    let bitmap_bytes = total_frames.div_ceil(8);
+    let bitmap_size = (bitmap_bytes as usize).div_ceil(4096) * 4096; // Page-align
+    let bitmap_pages = bitmap_size / 4096;
+
+    let bitmap_phys = match boot::allocate_pages(
+        AllocateType::AnyPages,
+        MemoryType::LOADER_DATA,
+        bitmap_pages,
+    ) {
+        Ok(ptr) => {
+            // Zero the bitmap (all frames start as allocated)
+            unsafe {
+                core::ptr::write_bytes(ptr.as_ptr(), 0, bitmap_size);
+            }
+            ptr.as_ptr() as u64
+        }
+        Err(e) => {
+            log::error!("Failed to allocate frame bitmap: {:?}", e);
+            return Status::OUT_OF_RESOURCES;
+        }
+    };
+
+    log::info!(
+        "Frame bitmap allocated at {:#x} ({} KB for {} frames)",
+        bitmap_phys,
+        bitmap_size / 1024,
+        total_frames
+    );
+
     let page_tables = match setup_initial_page_tables(
         &mut pt_allocator,
         &kernel,
@@ -200,12 +232,36 @@ fn efi_main() -> Status {
     // Translate memory map to M6 format
     let mut m6_mmap = translate_memory_map(&uefi_mmap);
 
+    // Mark kernel image in memory map
+    mark_region(
+        &mut m6_mmap,
+        kernel.phys_base,
+        kernel.size,
+        M6MemoryType::KernelImage,
+    );
+
+    // Mark page tables in memory map (so kernel doesn't reclaim them)
+    mark_region(
+        &mut m6_mmap,
+        pt_phys,
+        PAGE_TABLE_ALLOC_SIZE as u64,
+        M6MemoryType::KernelPageTables,
+    );
+
     // Mark initrd region in memory map (so kernel doesn't reclaim it)
     if let Some(ref rd) = initrd {
         // Round up to page-aligned size
         let aligned_size = ((rd.size as usize).div_ceil(4096) * 4096) as u64;
         mark_region(&mut m6_mmap, rd.phys_base, aligned_size, M6MemoryType::InitRD);
     }
+
+    // Mark frame bitmap in memory map (so kernel doesn't reclaim it)
+    mark_region(
+        &mut m6_mmap,
+        bitmap_phys,
+        bitmap_size as u64,
+        M6MemoryType::Reserved,
+    );
 
     // Prepare BootInfo
     // SAFETY: We allocated this memory and it's properly aligned
@@ -218,7 +274,8 @@ fn efi_main() -> Status {
         (*ptr).kernel_phys_base = PhysAddr::new(kernel.phys_base);
         (*ptr).kernel_virt_base = VirtAddr::new(KERNEL_VIRT_BASE);
         (*ptr).kernel_size = kernel.size;
-        (*ptr).page_table_base = PhysAddr::new(page_tables.ttbr1);
+        (*ptr).page_table_base = PhysAddr::new(pt_phys);
+        (*ptr).page_table_size = PAGE_TABLE_ALLOC_SIZE as u64;
         (*ptr).memory_map = m6_mmap;
         (*ptr).framebuffer = FramebufferInfo::empty();
         (*ptr).acpi_rsdp = PhysAddr::new(acpi_rsdp);
@@ -234,6 +291,10 @@ fn efi_main() -> Status {
             (*ptr).initrd_phys_base = PhysAddr::new(0);
             (*ptr).initrd_size = 0;
         }
+        // Frame allocator bitmap (allocated by bootloader for kernel)
+        (*ptr).frame_bitmap_phys = PhysAddr::new(bitmap_phys);
+        (*ptr).frame_bitmap_size = bitmap_size as u64;
+        (*ptr).max_phys_addr = max_phys_addr;
     }
 
     // Enable MMU and jump to kernel

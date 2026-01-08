@@ -3,7 +3,7 @@
 //! Additional register definitions and helpers not covered by aarch64-cpu.
 
 use aarch64_cpu::registers::{
-    VBAR_EL1, SP_EL0, TPIDR_EL0, TPIDR_EL1, ESR_EL1, ELR_EL1, FAR_EL1, SPSR_EL1
+    VBAR_EL1, SP_EL0, TPIDR_EL0, TPIDR_EL1, ESR_EL1, ELR_EL1, FAR_EL1, SPSR_EL1, TTBR1_EL1
 };
 use tock_registers::interfaces::{Readable, Writeable};
 
@@ -88,6 +88,26 @@ pub fn read_far_el1() -> u64 {
 #[inline]
 pub fn read_spsr_el1() -> u64 {
     SPSR_EL1.get()
+}
+
+/// Read TTBR1_EL1 (Translation Table Base Register 1)
+///
+/// Returns the physical address of the L0 page table for kernel space (TTBR1).
+/// The BADDR field contains the physical address, masked by TCR_EL1 settings.
+#[must_use]
+#[inline]
+pub fn read_ttbr1_el1() -> u64 {
+    TTBR1_EL1.get()
+}
+
+/// Get TTBR1_EL1 base address (mask off ASID and other fields)
+///
+/// Returns only the physical address portion of TTBR1_EL1.
+#[must_use]
+#[inline]
+pub fn ttbr1_base_address() -> u64 {
+    // BADDR is bits [47:1] for 4KB granule, but we mask to page boundary
+    read_ttbr1_el1() & 0x0000_FFFF_FFFF_F000
 }
 
 /// Exception Syndrome Register (ESR) parsing

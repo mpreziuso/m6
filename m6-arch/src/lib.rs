@@ -33,6 +33,8 @@ pub mod cpu;
 pub mod exceptions;
 pub mod mmu;
 pub mod registers;
+pub mod sync;
 
 pub use cpu::{halt, wait_for_interrupt};
 pub use mmu::Mmu;
+pub use sync::IrqSpinMutex;

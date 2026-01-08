@@ -79,7 +79,7 @@ pub enum ExceptionOrigin {
 pub type ExceptionHandler = fn(&mut ExceptionContext);
 
 /// Exception handlers using AtomicPtr for safe concurrent access
-/// These are initialized with default handlers and can be updated atomically
+/// These are initialised with default handlers and can be updated atomically
 static SYNC_HANDLER: AtomicPtr<()> = AtomicPtr::new(default_sync_handler as *mut ());
 static IRQ_HANDLER: AtomicPtr<()> = AtomicPtr::new(default_irq_handler as *mut ());
 static FIQ_HANDLER: AtomicPtr<()> = AtomicPtr::new(default_fiq_handler as *mut ());
@@ -421,7 +421,7 @@ unsafe extern "C" fn exception_vectors() {
     );
 }
 
-/// Initialize the exception vector table
+/// Initialise the exception vector table
 ///
 pub fn init() {
     let vectors = exception_vectors as *const () as u64;

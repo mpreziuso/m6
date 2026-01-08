@@ -10,7 +10,8 @@ use core::panic::PanicInfo;
 use m6_arch::cpu;
 use m6_common::boot::BootInfo;
 use m6_kernel::logging::logger;
-use m6_pal::{console, platform};
+use m6_kernel::memory;
+use m6_pal::{console, platform, timer};
 
 
 /// Panic handler for the kernel
@@ -41,11 +42,20 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
     console::init_with_base(boot_info.uart_virt_base.0);
 
     print_banner();
-    
+
+    // Initialise timer before logging (for timestamps)
+    timer::init();
+
     logger::init();
 
     log::info!("M6 Kernel starting...");
-    
+
+    // Initialise memory management (heap + frame allocator)
+    // SAFETY: Called once during early init, boot_info is valid
+    unsafe {
+        memory::init_memory_from_boot_info(boot_info);
+    }
+
     loop {
         cpu::wait_for_interrupt();
     }

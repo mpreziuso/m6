@@ -106,7 +106,7 @@ impl Log for KernelLogger {
 /// Global logger instance
 static LOGGER: KernelLogger = KernelLogger;
 
-/// Initialize the logging system
+/// Initialise the logging system
 pub fn init() {
     // Enable the log buffer
     buffer::enable();
@@ -135,7 +135,7 @@ pub fn transition_to_userspace_console() {
     buffer::reset_read_position();
 }
 
-/// Log a message at the specified level (bypasses log crate if not initialized)
+/// Log a message at the specified level (bypasses log crate if not initialised)
 pub fn log_raw(level: Level, message: &str) {
     let level_str = match level {
         Level::Error => "[ERROR]",
@@ -151,7 +151,7 @@ pub fn log_raw(level: Level, message: &str) {
     console::puts("\n");
 }
 
-/// Early print before logging is initialized
+/// Early print before logging is initialised
 #[macro_export]
 macro_rules! early_print {
     ($($arg:tt)*) => {{
@@ -160,7 +160,7 @@ macro_rules! early_print {
     }};
 }
 
-/// Early println before logging is initialized
+/// Early println before logging is initialised
 #[macro_export]
 macro_rules! early_println {
     () => {

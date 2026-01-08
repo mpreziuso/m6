@@ -11,24 +11,24 @@ use crate::{boot_uart::drivers::pl011, current_platform};
 
 struct Console {
     base: u64,
-    initialized: bool,
+    initialised: bool,
 }
 
 impl Console {
     const fn new() -> Self {
         Self {
             base: 0,
-            initialized: false,
+            initialised: false,
         }
     }
 
     fn init(&mut self, base: u64) {
         self.base = base;
-        self.initialized = true;
+        self.initialised = true;
     }
 
     fn putc(&self, c: u8) {
-        if !self.initialized || self.base == 0 {
+        if !self.initialised || self.base == 0 {
             return;
         }
 
@@ -66,7 +66,7 @@ impl Write for Console {
 /// Global console instance
 static CONSOLE: SpinMutex<Console> = SpinMutex::new(Console::new());
 
-/// Initialize the early console
+/// Initialise the early console
 pub fn init() {
     if let Some(plat) = current_platform() {
         let mut console = CONSOLE.lock();
@@ -74,7 +74,7 @@ pub fn init() {
     }
 }
 
-/// Initialize the console with a specific base address
+/// Initialise the console with a specific base address
 pub fn init_with_base(base: u64) {
     let mut console = CONSOLE.lock();
     console.init(base);

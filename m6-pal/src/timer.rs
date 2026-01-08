@@ -53,7 +53,7 @@ mod ctl {
     pub const ISTATUS: u64 = 1 << 2;
 }
 
-/// Initialize the timer subsystem
+/// Initialise the timer subsystem
 pub fn init() {
     let freq = read_cntfrq();
     TIMER_FREQ.store(freq, Ordering::Relaxed);

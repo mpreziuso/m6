@@ -11,7 +11,8 @@ pub const BOOT_INFO_MAGIC: u64 = 0x00_00_54_4F_4F_42_36_4D;
 /// Boot info version for compatibility checking
 /// Version 1: Initial version
 /// Version 2: Added initrd support
-pub const BOOT_INFO_VERSION: u32 = 2;
+/// Version 3: Added frame bitmap and max_phys_addr for dynamic memory
+pub const BOOT_INFO_VERSION: u32 = 3;
 
 /// Maximum number of memory regions supported
 pub const MAX_MEMORY_REGIONS: usize = 64;
@@ -97,6 +98,8 @@ pub struct BootInfo {
     pub kernel_size: u64,
     /// Physical address of the initial page tables
     pub page_table_base: PhysAddr,
+    /// Size of the page table allocation in bytes
+    pub page_table_size: u64,
     /// Memory map from UEFI
     pub memory_map: MemoryMap,
     /// Optional framebuffer information
@@ -113,8 +116,15 @@ pub struct BootInfo {
     pub initrd_phys_base: PhysAddr,
     /// Size of initrd in bytes (0 if not present)
     pub initrd_size: u64,
+    /// Physical address of the frame allocator bitmap (allocated by bootloader)
+    pub frame_bitmap_phys: PhysAddr,
+    /// Size of the frame allocator bitmap in bytes
+    pub frame_bitmap_size: u64,
+    /// Maximum physical address detected from memory map
+    /// Used to configure direct physical map size and frame allocator range
+    pub max_phys_addr: u64,
     /// Reserved for future use
-    pub _reserved: [u64; 4],
+    pub _reserved: [u64; 1],
 }
 
 impl BootInfo {
