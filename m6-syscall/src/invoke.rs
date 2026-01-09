@@ -233,3 +233,178 @@ pub fn wait(src: u64) -> SyscallResult {
 pub fn poll(src: u64) -> SyscallResult {
     check_result(syscall1(Syscall::Poll, src))
 }
+
+// -- Capability Operations
+
+/// Copy a capability from one slot to another.
+///
+/// Creates a copy of the source capability at the destination slot.
+/// The CDT tracks the copy as a sibling of the source.
+///
+/// # Arguments
+///
+/// * `dest_cnode` - CPtr to the destination CNode
+/// * `dest_index` - Slot index in the destination CNode
+/// * `dest_depth` - Bits to consume resolving dest CNode (0 = auto)
+/// * `src_cnode` - CPtr to the source CNode
+/// * `src_index` - Slot index in the source CNode
+/// * `src_depth` - Bits to consume resolving src CNode (0 = auto)
+#[inline]
+pub fn cap_copy(
+    dest_cnode: u64,
+    dest_index: u64,
+    dest_depth: u64,
+    src_cnode: u64,
+    src_index: u64,
+    src_depth: u64,
+) -> SyscallResult {
+    check_result(syscall6(
+        Syscall::CapCopy,
+        dest_cnode,
+        dest_index,
+        dest_depth,
+        src_cnode,
+        src_index,
+        src_depth,
+    ))
+}
+
+/// Move a capability from one slot to another.
+///
+/// Moves the source capability to the destination slot, leaving
+/// the source slot empty. CDT membership transfers with the capability.
+///
+/// # Arguments
+///
+/// Same as `cap_copy`.
+#[inline]
+pub fn cap_move(
+    dest_cnode: u64,
+    dest_index: u64,
+    dest_depth: u64,
+    src_cnode: u64,
+    src_index: u64,
+    src_depth: u64,
+) -> SyscallResult {
+    check_result(syscall6(
+        Syscall::CapMove,
+        dest_cnode,
+        dest_index,
+        dest_depth,
+        src_cnode,
+        src_index,
+        src_depth,
+    ))
+}
+
+/// Mint a derived capability with reduced rights and optional badge.
+///
+/// Creates a derived capability at the destination slot. Rights can only
+/// be reduced, never increased. The CDT tracks the new capability as a
+/// child of the source.
+///
+/// Extended arguments (depths, rights, badge) are read from the IPC buffer
+/// at `IPC_BUFFER_ADDR`. Use [`crate::IpcBuffer::get_mut()`] to set up the
+/// mint arguments before calling this function.
+///
+/// # Arguments
+///
+/// * `dest_cnode` - CPtr to the destination CNode
+/// * `dest_index` - Slot index in the destination CNode
+/// * `src_cnode` - CPtr to the source CNode
+/// * `src_index` - Slot index in the source CNode
+///
+/// # IPC Buffer (at IPC_BUFFER_ADDR)
+///
+/// The `mint_args` field must be set with:
+/// - `dest_depth` - Bits to consume resolving dest CNode (0 = auto)
+/// - `src_depth` - Bits to consume resolving src CNode (0 = auto)
+/// - `new_rights` - Rights for the minted capability (subset of source)
+/// - `set_badge` - Whether to set a badge (0 or 1)
+/// - `badge_value` - Badge value (only used if set_badge != 0)
+#[inline]
+pub fn cap_mint(
+    dest_cnode: u64,
+    dest_index: u64,
+    src_cnode: u64,
+    src_index: u64,
+) -> SyscallResult {
+    check_result(syscall4(
+        Syscall::CapMint,
+        dest_cnode,
+        dest_index,
+        src_cnode,
+        src_index,
+    ))
+}
+
+/// Delete a capability from a slot.
+///
+/// Removes the capability from the specified slot. If the capability
+/// has children in the CDT, they are reparented to the grandparent.
+///
+/// # Arguments
+///
+/// * `cnode` - CPtr to the CNode containing the capability
+/// * `index` - Slot index to delete
+/// * `depth` - Bits to consume resolving CNode (0 = auto)
+#[inline]
+pub fn cap_delete(cnode: u64, index: u64, depth: u64) -> SyscallResult {
+    check_result(syscall3(Syscall::CapDelete, cnode, index, depth))
+}
+
+/// Revoke a capability and all its derivatives.
+///
+/// Recursively removes the capability and all capabilities derived from it
+/// in the CDT. This is used to completely remove access to a resource.
+///
+/// # Arguments
+///
+/// * `cnode` - CPtr to the CNode containing the capability
+/// * `index` - Slot index to revoke
+/// * `depth` - Bits to consume resolving CNode (0 = auto)
+///
+/// # Returns
+///
+/// On success, returns the number of capabilities revoked (including the target).
+#[inline]
+pub fn cap_revoke(cnode: u64, index: u64, depth: u64) -> SyscallResult {
+    check_result(syscall3(Syscall::CapRevoke, cnode, index, depth))
+}
+
+/// Reduce the rights of a capability in-place.
+///
+/// Modifies the capability to have reduced rights. The new rights must
+/// be a subset of the current rights. This does not create a new CDT node.
+///
+/// # Arguments
+///
+/// * `cnode` - CPtr to the CNode containing the capability
+/// * `index` - Slot index to mutate
+/// * `depth` - Bits to consume resolving CNode (0 = auto)
+/// * `new_rights` - New rights (must be subset of current)
+#[inline]
+pub fn cap_mutate(cnode: u64, index: u64, depth: u64, new_rights: u64) -> SyscallResult {
+    check_result(syscall4(Syscall::CapMutate, cnode, index, depth, new_rights))
+}
+
+/// Atomically rotate capabilities between three slots.
+///
+/// Performs a three-way rotation:
+/// - slot1 -> slot2
+/// - slot2 -> slot3
+/// - slot3 -> slot1
+///
+/// All slots must be in the same CNode.
+///
+/// # Arguments
+///
+/// * `cnode` - CPtr to the CNode containing all three slots
+/// * `slot1` - First slot index
+/// * `slot2` - Second slot index
+/// * `slot3` - Third slot index
+/// * `depth` - Bits to consume resolving CNode (0 = auto)
+#[inline]
+pub fn cap_rotate(cnode: u64, slot1: u64, slot2: u64, slot3: u64, depth: u64) -> SyscallResult {
+    check_result(syscall5(Syscall::CapRotate, cnode, slot1, slot2, slot3, depth))
+}

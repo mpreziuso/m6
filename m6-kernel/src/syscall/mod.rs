@@ -15,6 +15,7 @@
 //! vector routes to [`handle_syscall`], which extracts arguments and
 //! dispatches to the appropriate handler.
 
+pub mod cap_ops;
 pub mod error;
 pub mod numbers;
 
@@ -132,14 +133,14 @@ fn dispatch_syscall(
         Syscall::Wait => handle_wait(args, ctx),
         Syscall::Poll => handle_poll(args, ctx),
 
-        // Capability operations (stubs)
-        Syscall::CapCopy => todo_syscall("CapCopy"),
-        Syscall::CapMove => todo_syscall("CapMove"),
-        Syscall::CapMint => todo_syscall("CapMint"),
-        Syscall::CapDelete => todo_syscall("CapDelete"),
-        Syscall::CapRevoke => todo_syscall("CapRevoke"),
-        Syscall::CapMutate => todo_syscall("CapMutate"),
-        Syscall::CapRotate => todo_syscall("CapRotate"),
+        // Capability operations
+        Syscall::CapCopy => cap_ops::handle_cap_copy(args),
+        Syscall::CapMove => cap_ops::handle_cap_move(args),
+        Syscall::CapMint => cap_ops::handle_cap_mint(args),
+        Syscall::CapDelete => cap_ops::handle_cap_delete(args),
+        Syscall::CapRevoke => cap_ops::handle_cap_revoke(args),
+        Syscall::CapMutate => cap_ops::handle_cap_mutate(args),
+        Syscall::CapRotate => cap_ops::handle_cap_rotate(args),
 
         // Object invocation (stub)
         Syscall::Invoke => todo_syscall("Invoke"),

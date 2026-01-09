@@ -43,7 +43,7 @@ pub use queue::{ipc_dequeue, ipc_enqueue, ipc_remove};
 
 use m6_cap::{CapRights, ObjectRef, ObjectType};
 
-use crate::cap::object_table::{self, KernelObjectType};
+use crate::cap::cspace;
 use crate::syscall::error::SyscallError;
 
 /// Capability lookup result.
@@ -58,13 +58,12 @@ pub struct CapLookupResult {
 
 /// Look up a capability by CPtr for IPC operations.
 ///
-/// For now, this implements a simple flat CSpace lookup where the CPtr
-/// is just the slot index. A full implementation would walk the CNode
-/// hierarchy.
+/// Resolves the CPtr through the hierarchical CSpace using guard-based
+/// addressing, then validates the capability type and rights.
 ///
 /// # Arguments
 ///
-/// * `cptr` - Capability pointer (slot index for flat CSpace)
+/// * `cptr` - Capability pointer resolved through CNode hierarchy
 /// * `expected_type` - Expected object type (Endpoint or Notification)
 /// * `required_rights` - Rights required for the operation
 ///
@@ -79,36 +78,11 @@ pub fn lookup_cap(
     expected_type: ObjectType,
     required_rights: CapRights,
 ) -> Result<CapLookupResult, SyscallError> {
-    // Get current task's CSpace root
-    let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
+    // Resolve CPtr through hierarchical CSpace (depth 0 = auto)
+    let loc = cspace::resolve_cptr(cptr, 0)?;
 
-    let cspace_root: ObjectRef = object_table::with_tcb(current, |tcb| tcb.tcb.cspace_root);
-
-    if !cspace_root.is_valid() {
-        return Err(SyscallError::InvalidCap);
-    }
-
-    // For flat CSpace, cptr is the slot index
-    let slot_index = cptr as usize;
-
-    // Look up the slot in the CNode
-    let result = object_table::with_object(cspace_root, |obj| {
-        if obj.obj_type != KernelObjectType::CNode {
-            return Err(SyscallError::InvalidCap);
-        }
-
-        // SAFETY: We verified the object type.
-        let cnode_ptr = unsafe { obj.data.cnode_ptr };
-        if cnode_ptr.is_null() {
-            return Err(SyscallError::InvalidCap);
-        }
-
-        // SAFETY: CNode was allocated properly.
-        let cnode = unsafe { &*cnode_ptr };
-
-        use m6_cap::CNodeOps;
-        let slot = cnode.get_slot(slot_index).ok_or(SyscallError::InvalidCap)?;
-
+    // Access the resolved slot and validate
+    cspace::with_slot(&loc, |slot| {
         // Check if slot is empty
         if slot.is_empty() {
             return Err(SyscallError::EmptySlot);
@@ -130,7 +104,5 @@ pub fn lookup_cap(
             badge: slot.badge().value(),
             rights: slot_rights,
         })
-    });
-
-    result.ok_or(SyscallError::InvalidCap)?
+    })
 }
