@@ -353,12 +353,12 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         BootstrapError::VSpaceSetupFailed
     })?;
 
-    // 6. Update VSpace object with L0 table and ASID
+    // 6. Update VSpace object with L0 table and ASID (including generation)
     object_table::with_object_mut(vspace_ref, |obj| {
         // SAFETY: We just created this VSpace object.
         let vspace = unsafe { &mut *core::ptr::addr_of_mut!(obj.data.vspace) };
         vspace.root_table = l0_phys;
-        vspace.asid = Asid::new(asid);
+        vspace.assign_asid_with_generation(Asid::new(asid.asid), asid.generation);
     });
 
     // 7. Populate root CNode with initial capabilities

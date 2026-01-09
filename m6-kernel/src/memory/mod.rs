@@ -23,23 +23,28 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 // Submodule declarations
-pub mod layout;
-pub mod translate;
+pub mod asid;
 pub mod frame;
 pub mod heap;
 pub mod init;
+pub mod layout;
+pub mod translate;
 
 // Re-export public API
-pub use init::init_memory_from_boot_info;
+pub use asid::{
+    allocate_asid, current_generation, init_asid_allocator, is_asid_valid,
+    refresh_asid_if_needed, AllocatedAsid,
+};
 pub use frame::{
     alloc_frame, alloc_frame_zeroed, alloc_frames, alloc_frames_zeroed,
     free_frame, memory_stats,
 };
+pub use init::init_memory_from_boot_info;
+pub use layout::virt;
 pub use translate::{
     phys_to_virt, phys_to_virt_checked, virt_to_phys, virt_to_phys_checked,
     phys_to_ptr, phys_to_ptr_checked,
 };
-pub use layout::virt;
 
 // -- Dynamic Physical Map Size
 

@@ -62,6 +62,12 @@ pub struct VSpaceObject {
     pub root_table: PhysAddr,
     /// Assigned ASID.
     pub asid: Asid,
+    /// ASID generation (for TLB invalidation tracking).
+    ///
+    /// When ASIDs are exhausted and recycled, the generation counter
+    /// increments. VSpaces with stale generations require TLB invalidation
+    /// before their ASID can be safely reused.
+    pub asid_generation: u64,
     /// Reference to the root page table capability.
     pub root_table_cap: ObjectRef,
     /// Number of mapped frames.
@@ -80,6 +86,7 @@ impl VSpaceObject {
         Self {
             root_table,
             asid: Asid::INVALID,
+            asid_generation: 0,
             root_table_cap,
             mapped_frames: 0,
             page_table_count: 1, // Count the root table
@@ -98,6 +105,26 @@ impl VSpaceObject {
     #[inline]
     pub fn assign_asid(&mut self, asid: Asid) {
         self.asid = asid;
+    }
+
+    /// Assign an ASID with generation to this VSpace.
+    ///
+    /// The generation is used to detect when an ASID has been recycled
+    /// and TLB invalidation is required.
+    #[inline]
+    pub fn assign_asid_with_generation(&mut self, asid: Asid, generation: u64) {
+        self.asid = asid;
+        self.asid_generation = generation;
+    }
+
+    /// Check if the ASID generation is current.
+    ///
+    /// Returns `true` if the ASID generation matches the provided current
+    /// generation, meaning no TLB invalidation is needed.
+    #[inline]
+    #[must_use]
+    pub const fn is_asid_generation_current(&self, current_gen: u64) -> bool {
+        self.asid_generation == current_gen
     }
 
     /// Increment the mapped frame count.

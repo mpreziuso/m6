@@ -3,8 +3,6 @@
 //! Provides utilities for creating and configuring user address spaces,
 //! including loading ELF binaries and setting up initial mappings.
 
-use core::sync::atomic::{AtomicU16, Ordering};
-
 use m6_common::PhysAddr;
 use m6_paging::{
     address::{PA, TPA, VA},
@@ -16,13 +14,11 @@ use m6_paging::{
 };
 
 use crate::initrd::elf_loader::{ElfLoadError, PagePerms};
+use crate::memory::asid::{allocate_asid, AllocatedAsid};
 use crate::memory::frame::alloc_frame_zeroed;
 use crate::memory::translate::phys_to_virt;
 
 use super::layout;
-
-/// Next ASID to assign (0 is reserved for kernel).
-static NEXT_ASID: AtomicU16 = AtomicU16::new(1);
 
 /// Error during VSpace setup.
 #[derive(Debug)]
@@ -65,21 +61,21 @@ impl PageAllocator for KernelPageAllocator {
 
 /// Create a new user VSpace (L0 page table and ASID).
 ///
-/// Returns the physical address of the L0 table and the assigned ASID.
-pub fn create_user_vspace() -> Result<(PhysAddr, u16), VSpaceSetupError> {
+/// Returns the physical address of the L0 table and the allocated ASID
+/// (including generation information for TLB management).
+pub fn create_user_vspace() -> Result<(PhysAddr, AllocatedAsid), VSpaceSetupError> {
     // Allocate L0 table (zeroed)
     let l0_phys = alloc_frame_zeroed().ok_or(VSpaceSetupError::L0AllocationFailed)?;
 
-    // Assign ASID (simple incrementing, wraps at 65535)
-    // ASID 0 is reserved for kernel
-    let asid = NEXT_ASID.fetch_add(1, Ordering::Relaxed);
-    let asid = if asid == 0 {
-        NEXT_ASID.fetch_add(1, Ordering::Relaxed)
-    } else {
-        asid
-    };
+    // Allocate ASID from the global allocator (handles generation tracking)
+    let asid = allocate_asid();
 
-    log::debug!("Created user VSpace: L0={:#x}, ASID={}", l0_phys, asid);
+    log::debug!(
+        "Created user VSpace: L0={:#x}, ASID={}, gen={}",
+        l0_phys,
+        asid.asid,
+        asid.generation
+    );
 
     Ok((PhysAddr::new(l0_phys), asid))
 }
@@ -261,11 +257,11 @@ pub fn map_user_boot_info(
 ///
 /// # Returns
 ///
-/// A tuple of (L0 physical address, ASID, entry point, stack pointer).
+/// A tuple of (L0 physical address, AllocatedAsid, entry point, stack pointer).
 pub fn setup_root_vspace(
     elf_data: &[u8],
     boot_info_phys: PhysAddr,
-) -> Result<(PhysAddr, u16, u64, u64), VSpaceSetupError> {
+) -> Result<(PhysAddr, AllocatedAsid, u64, u64), VSpaceSetupError> {
     // Create the VSpace
     let (l0_phys, asid) = create_user_vspace()?;
 
@@ -279,9 +275,10 @@ pub fn setup_root_vspace(
     map_user_boot_info(l0_phys, boot_info_phys)?;
 
     log::info!(
-        "Root VSpace ready: L0={:#x} ASID={} entry={:#x} SP={:#x}",
+        "Root VSpace ready: L0={:#x} ASID={} gen={} entry={:#x} SP={:#x}",
         l0_phys.0,
-        asid,
+        asid.asid,
+        asid.generation,
         entry,
         stack_top
     );

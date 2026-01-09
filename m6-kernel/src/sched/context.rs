@@ -3,7 +3,19 @@
 //! Handles the low-level details of switching between tasks:
 //! - Register save/restore via ExceptionContext
 //! - VSpace (TTBR0) switching
-//! - ASID management
+//! - ASID management with generation tracking
+//!
+//! # TLB Invalidation Strategy
+//!
+//! ARM64 TLB entries are tagged with ASIDs, allowing multiple address spaces
+//! to coexist in the TLB. This means:
+//!
+//! - When switching between VSpaces with different ASIDs, no TLB invalidation
+//!   is typically needed (entries are naturally isolated)
+//! - When an ASID is recycled (generation changes), we must invalidate all
+//!   TLB entries for that ASID before reuse
+//! - We use ASID-specific invalidation (`tlbi aside1is`) when possible,
+//!   which is much cheaper than full TLB invalidation
 
 use m6_arch::exceptions::ExceptionContext;
 use m6_arch::mmu::mmu;
@@ -13,6 +25,7 @@ use m6_cap::objects::ThreadState;
 use super::run_queue::{with_tcb, with_tcb_mut};
 use super::{eevdf, PerCpuSched};
 use crate::cap::object_table::{self, KernelObjectType};
+use crate::memory::asid::current_generation;
 
 /// Perform a context switch.
 ///
@@ -69,6 +82,11 @@ pub fn context_switch(sched: &mut PerCpuSched, ctx: &mut ExceptionContext) {
 }
 
 /// Switch to a new virtual address space.
+///
+/// This function handles TTBR0 switching with optimised TLB invalidation:
+/// - If the VSpace's ASID generation is current, no TLB invalidation needed
+/// - If the generation is stale (ASID was recycled), invalidate ASID-specific
+///   entries before reuse
 fn switch_vspace(vspace_ref: Option<ObjectRef>) {
     let vspace_ref = match vspace_ref {
         Some(r) if r.is_valid() => r,
@@ -84,21 +102,66 @@ fn switch_vspace(vspace_ref: Option<ObjectRef>) {
             // The VSpace stores the physical address of the L0 page table
             let ttbr0 = vspace.root_table.as_u64();
             let asid = vspace.asid.value() as u64;
+            let vspace_gen = vspace.asid_generation;
+
+            // Check if we need TLB invalidation due to ASID recycling
+            let current_gen = current_generation();
+            let needs_tlb_invalidation = vspace_gen != current_gen;
 
             // Combine ASID and table base
             // TTBR0_EL1 format: [ASID:16][BADDR:48]
             let ttbr0_with_asid = (asid << 48) | (ttbr0 & 0x0000_FFFF_FFFF_FFFF);
 
+            if needs_tlb_invalidation {
+                // ASID was recycled - invalidate all TLB entries for this ASID
+                // before switching to prevent stale translations
+                //
+                // We use ASID-specific invalidation which is more efficient
+                // than full TLB invalidation. The `aside1is` instruction
+                // invalidates all TLB entries with the given ASID across
+                // all CPUs in the inner shareable domain.
+                invalidate_tlb_by_asid(asid);
+
+                // Note: In a more complete implementation, we would update
+                // the VSpace's generation here. However, this requires
+                // mutable access which we don't have in this context.
+                // The generation mismatch will continue to trigger
+                // invalidation until the VSpace is updated (e.g., on next
+                // ASID allocation). This is safe but slightly inefficient.
+            }
+
             mmu().set_ttbr0(ttbr0_with_asid);
 
-            // TLB invalidation strategy:
-            // - All user page table entries have the NG (Not Global) bit set
-            // - Different ASIDs cannot share TLB entries when NG=1
-            // - We may need to invalidate if ASID was reused
-            // For now, do a full TLB invalidate to be safe
-            mmu().invalidate_tlb_all();
+            // Instruction barrier to ensure TTBR0 change is visible
+            // before any instruction fetches occur
+            // SAFETY: ISB is always safe to execute
+            unsafe {
+                core::arch::asm!("isb", options(nostack, preserves_flags));
+            }
         }
     });
+}
+
+/// Invalidate all TLB entries for a specific ASID.
+///
+/// Uses `tlbi aside1is` to invalidate all TLB entries tagged with the
+/// given ASID across all CPUs in the inner shareable domain.
+#[inline]
+fn invalidate_tlb_by_asid(asid: u64) {
+    // TLBI ASIDE1IS: Invalidate all TLB entries by ASID, Inner Shareable
+    // The ASID is in bits [63:48] of the operand
+    let tlbi_operand = asid << 48;
+
+    // SAFETY: TLBI is safe to execute - it only affects TLB caching, not memory
+    unsafe {
+        core::arch::asm!(
+            "tlbi aside1is, {0}",
+            "dsb ish",  // Wait for invalidation to complete
+            "isb",      // Ensure subsequent instructions see the invalidation
+            in(reg) tlbi_operand,
+            options(nostack, preserves_flags)
+        );
+    }
 }
 
 /// Perform a context switch from the timer interrupt handler.
