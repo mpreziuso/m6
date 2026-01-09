@@ -20,8 +20,9 @@ use m6_arch::IrqSpinMutex;
 use m6_cap::{
     ObjectRef,
     objects::{
-        DmaPoolObject, EndpointObject, FrameObject, IOSpaceObject, NotificationObject, ReplyObject,
-        SmmuControlObject, UntypedObject, VSpaceObject,
+        DmaPoolObject, EndpointObject, FrameObject, IOSpaceObject, IrqControlObject,
+        IrqHandlerObject, NotificationObject, PageTableObject, ReplyObject, SmmuControlObject,
+        UntypedObject, VSpaceObject,
     },
 };
 use spin::Once;
@@ -111,6 +112,12 @@ pub union KernelObjectData {
     pub dma_pool: ManuallyDrop<DmaPoolObject>,
     /// SMMU control pointer (heap-allocated due to large bitmap).
     pub smmu_control_ptr: *mut SmmuControlObject,
+    /// IRQ handler metadata.
+    pub irq_handler: ManuallyDrop<IrqHandlerObject>,
+    /// IRQ control pointer (heap-allocated due to large bitmap).
+    pub irq_control_ptr: *mut IrqControlObject,
+    /// Page table metadata.
+    pub page_table: ManuallyDrop<PageTableObject>,
 }
 
 // SAFETY: Pointers are only accessed with object table lock held.
@@ -568,6 +575,101 @@ where
                 // We hold the object table lock so no concurrent access.
                 return Some(f(unsafe { &mut *ptr }));
             }
+        }
+    }
+    None
+}
+
+/// Access an IRQ handler with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the IRQ handler.
+/// Does nothing if the object is not a valid IRQ handler.
+pub fn with_irq_handler_mut<F, R>(handler_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut IrqHandlerObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(handler_ref) {
+        if obj.obj_type == KernelObjectType::IrqHandler {
+            // SAFETY: We verified the object type, so irq_handler is the active variant.
+            return Some(f(unsafe { &mut obj.data.irq_handler }));
+        }
+    }
+    None
+}
+
+/// Access an IRQ control with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the IRQ control.
+/// Does nothing if the object is not a valid IRQ control.
+pub fn with_irq_control_mut<F, R>(control_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut IrqControlObject) -> R,
+{
+    let table = get_table().lock();
+    if let Some(obj) = table.get(control_ref) {
+        if obj.obj_type == KernelObjectType::IrqControl {
+            // SAFETY: We verified the object type, so irq_control_ptr is the active variant.
+            let ptr = unsafe { obj.data.irq_control_ptr };
+            if !ptr.is_null() {
+                // SAFETY: The IrqControl was heap-allocated and is valid.
+                // We hold the object table lock so no concurrent access.
+                return Some(f(unsafe { &mut *ptr }));
+            }
+        }
+    }
+    None
+}
+
+/// Access a VSpace with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the VSpace.
+/// Does nothing if the object is not a valid VSpace.
+pub fn with_vspace_mut<F, R>(vspace_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut VSpaceObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(vspace_ref) {
+        if obj.obj_type == KernelObjectType::VSpace {
+            // SAFETY: We verified the object type, so vspace is the active variant.
+            return Some(f(unsafe { &mut obj.data.vspace }));
+        }
+    }
+    None
+}
+
+/// Access a VSpace with a closure (read-only).
+///
+/// Executes the closure with a reference to the VSpace.
+/// Does nothing if the object is not a valid VSpace.
+pub fn with_vspace<F, R>(vspace_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&VSpaceObject) -> R,
+{
+    let table = get_table().lock();
+    if let Some(obj) = table.get(vspace_ref) {
+        if obj.obj_type == KernelObjectType::VSpace {
+            // SAFETY: We verified the object type, so vspace is the active variant.
+            return Some(f(unsafe { &obj.data.vspace }));
+        }
+    }
+    None
+}
+
+/// Access a PageTable with a closure (read-only).
+///
+/// Executes the closure with a reference to the PageTable.
+/// Does nothing if the object is not a valid PageTable.
+pub fn with_page_table<F, R>(pt_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&PageTableObject) -> R,
+{
+    let table = get_table().lock();
+    if let Some(obj) = table.get(pt_ref) {
+        if obj.obj_type == KernelObjectType::PageTable {
+            // SAFETY: We verified the object type, so page_table is the active variant.
+            return Some(f(unsafe { &obj.data.page_table }));
         }
     }
     None

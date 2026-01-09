@@ -17,6 +17,7 @@ extern crate alloc;
 use core::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
 use m6_arch::IrqSpinMutex;
+use m6_arch::cpu::cpu_id;
 use m6_cap::ObjectRef;
 use spin::Once;
 
@@ -164,11 +165,9 @@ pub fn get_sched_state() -> &'static [IrqSpinMutex<PerCpuSched>; MAX_CPUS] {
 }
 
 /// Get the current CPU ID.
-///
-/// TODO: Read from MPIDR_EL1 or similar on ARM64.
 #[inline]
 fn current_cpu_id() -> usize {
-    0 // Single CPU for now
+    cpu_id()
 }
 
 // -- Public API

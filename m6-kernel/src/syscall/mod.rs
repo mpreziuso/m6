@@ -18,7 +18,10 @@
 pub mod cap_ops;
 pub mod error;
 pub mod iommu_ops;
+pub mod irq_ops;
+pub mod mem_ops;
 pub mod numbers;
+pub mod tcb_ops;
 
 use m6_arch::exceptions::ExceptionContext;
 use m6_arch::registers::{esr, spsr};
@@ -146,25 +149,25 @@ fn dispatch_syscall(
         // Object invocation (stub)
         Syscall::Invoke => todo_syscall("Invoke"),
 
-        // Memory operations (stubs)
-        Syscall::Retype => todo_syscall("Retype"),
-        Syscall::MapFrame => todo_syscall("MapFrame"),
-        Syscall::UnmapFrame => todo_syscall("UnmapFrame"),
-        Syscall::MapPageTable => todo_syscall("MapPageTable"),
+        // Memory operations
+        Syscall::Retype => mem_ops::handle_retype(args),
+        Syscall::MapFrame => mem_ops::handle_map_frame(args),
+        Syscall::UnmapFrame => mem_ops::handle_unmap_frame(args),
+        Syscall::MapPageTable => mem_ops::handle_map_page_table(args),
 
-        // TCB operations (stubs)
-        Syscall::TcbConfigure => todo_syscall("TcbConfigure"),
-        Syscall::TcbWriteRegisters => todo_syscall("TcbWriteRegisters"),
-        Syscall::TcbReadRegisters => todo_syscall("TcbReadRegisters"),
-        Syscall::TcbResume => todo_syscall("TcbResume"),
-        Syscall::TcbSuspend => todo_syscall("TcbSuspend"),
-        Syscall::TcbSetPriority => todo_syscall("TcbSetPriority"),
-        Syscall::TcbBindNotification => todo_syscall("TcbBindNotification"),
+        // TCB operations
+        Syscall::TcbConfigure => tcb_ops::handle_tcb_configure(args),
+        Syscall::TcbWriteRegisters => tcb_ops::handle_tcb_write_registers(args, ctx),
+        Syscall::TcbReadRegisters => tcb_ops::handle_tcb_read_registers(args, ctx),
+        Syscall::TcbResume => tcb_ops::handle_tcb_resume(args),
+        Syscall::TcbSuspend => tcb_ops::handle_tcb_suspend(args),
+        Syscall::TcbSetPriority => tcb_ops::handle_tcb_set_priority(args),
+        Syscall::TcbBindNotification => tcb_ops::handle_tcb_bind_notification(args),
 
-        // IRQ operations (stubs)
-        Syscall::IrqAck => todo_syscall("IrqAck"),
-        Syscall::IrqSetHandler => todo_syscall("IrqSetHandler"),
-        Syscall::IrqClearHandler => todo_syscall("IrqClearHandler"),
+        // IRQ operations
+        Syscall::IrqAck => irq_ops::handle_irq_ack(args),
+        Syscall::IrqSetHandler => irq_ops::handle_irq_set_handler(args),
+        Syscall::IrqClearHandler => irq_ops::handle_irq_clear_handler(args),
 
         // IOMMU operations
         Syscall::IOSpaceCreate => iommu_ops::handle_iospace_create(args),
