@@ -32,11 +32,13 @@
 //! - Call requires WRITE + GRANT_REPLY rights
 
 pub mod endpoint;
+pub mod fault;
 pub mod message;
 pub mod notification;
 pub mod queue;
 
 pub use endpoint::{do_call, do_recv, do_reply_recv, do_send};
+pub use fault::{classify_fault, deliver_fault, handle_user_fault, FaultDeliveryError};
 pub use message::IpcMessage;
 pub use notification::{do_poll, do_signal, do_wait};
 pub use queue::{ipc_dequeue, ipc_enqueue, ipc_remove};

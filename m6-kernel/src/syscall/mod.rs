@@ -520,72 +520,76 @@ fn sync_exception_handler(ctx: &mut ExceptionContext) {
             }
         }
 
-        // Data aborts
+        // Data aborts from user mode - deliver as page fault
         esr::ec::DATA_ABORT_LOWER => {
-            dump_exception_context(ctx);
-            // TODO: Deliver fault to thread's fault endpoint
-            panic!("Unhandled user data abort");
+            handle_user_exception(ctx, ec);
         }
 
+        // Data aborts from kernel mode - fatal
         esr::ec::DATA_ABORT_SAME => {
             dump_exception_context(ctx);
             panic!("Kernel data abort - this is a kernel bug");
         }
 
-        // Instruction aborts
+        // Instruction aborts from user mode - deliver as instruction fault
         esr::ec::INSTRUCTION_ABORT_LOWER => {
-            dump_exception_context(ctx);
-            // TODO: Deliver fault to thread's fault endpoint
-            panic!("Unhandled user instruction abort");
+            handle_user_exception(ctx, ec);
         }
 
+        // Instruction aborts from kernel mode - fatal
         esr::ec::INSTRUCTION_ABORT_SAME => {
             dump_exception_context(ctx);
             panic!("Kernel instruction abort - this is a kernel bug");
         }
 
-        // Alignment faults
-        esr::ec::PC_ALIGNMENT => {
-            dump_exception_context(ctx);
-            panic!("PC alignment fault at {:#x}", ctx.elr);
+        // Alignment faults - deliver to user fault handler
+        esr::ec::PC_ALIGNMENT | esr::ec::SP_ALIGNMENT => {
+            if ctx.from_el0() {
+                handle_user_exception(ctx, ec);
+            } else {
+                dump_exception_context(ctx);
+                panic!("Kernel alignment fault at {:#x}", ctx.elr);
+            }
         }
 
-        esr::ec::SP_ALIGNMENT => {
-            dump_exception_context(ctx);
-            panic!("SP alignment fault at {:#x}", ctx.elr);
-        }
-
-        // Debug exceptions
+        // Debug exceptions from user mode
         esr::ec::BRK_AARCH64 => {
-            let imm = esr::iss(ctx.esr) & 0xFFFF;
-            dump_exception_context(ctx);
-            panic!("BRK #{} at {:#x}", imm, ctx.elr);
+            if ctx.from_el0() {
+                handle_user_exception(ctx, ec);
+            } else {
+                let imm = esr::iss(ctx.esr) & 0xFFFF;
+                dump_exception_context(ctx);
+                panic!("Kernel BRK #{} at {:#x}", imm, ctx.elr);
+            }
         }
 
-        esr::ec::BREAKPOINT_LOWER | esr::ec::BREAKPOINT_SAME => {
-            dump_exception_context(ctx);
-            panic!("Hardware breakpoint at {:#x}", ctx.elr);
+        esr::ec::BREAKPOINT_LOWER | esr::ec::WATCHPOINT_LOWER | esr::ec::SOFTWARE_STEP_LOWER => {
+            handle_user_exception(ctx, ec);
         }
 
-        esr::ec::WATCHPOINT_LOWER | esr::ec::WATCHPOINT_SAME => {
+        esr::ec::BREAKPOINT_SAME | esr::ec::WATCHPOINT_SAME | esr::ec::SOFTWARE_STEP_SAME => {
             dump_exception_context(ctx);
-            panic!("Watchpoint hit, FAR={:#x}", ctx.far);
+            panic!("Kernel debug exception at {:#x}", ctx.elr);
         }
 
-        esr::ec::SOFTWARE_STEP_LOWER | esr::ec::SOFTWARE_STEP_SAME => {
-            dump_exception_context(ctx);
-            panic!("Software step exception at {:#x}", ctx.elr);
-        }
-
-        // Other exceptions
+        // Illegal execution - deliver to user if from EL0
         esr::ec::ILLEGAL_EXECUTION => {
-            dump_exception_context(ctx);
-            panic!("Illegal execution state at {:#x}", ctx.elr);
+            if ctx.from_el0() {
+                handle_user_exception(ctx, ec);
+            } else {
+                dump_exception_context(ctx);
+                panic!("Kernel illegal execution state at {:#x}", ctx.elr);
+            }
         }
 
+        // Floating-point exception - deliver to user if from EL0
         esr::ec::FP_EXCEPTION => {
-            dump_exception_context(ctx);
-            panic!("Floating-point exception at {:#x}", ctx.elr);
+            if ctx.from_el0() {
+                handle_user_exception(ctx, ec);
+            } else {
+                dump_exception_context(ctx);
+                panic!("Kernel floating-point exception at {:#x}", ctx.elr);
+            }
         }
 
         esr::ec::SVE_SIMD_FP => {
@@ -607,5 +611,33 @@ fn sync_exception_handler(ctx: &mut ExceptionContext) {
                 ec
             );
         }
+    }
+}
+
+/// Handle a user-mode exception by delivering it to the fault handler.
+///
+/// This function is called for all user-mode exceptions that should be
+/// delivered to a fault handler (page faults, instruction faults, etc.).
+///
+/// If the thread has no fault endpoint configured, the thread is terminated.
+fn handle_user_exception(ctx: &mut ExceptionContext, ec: u8) {
+    use crate::ipc::fault::{classify_fault, handle_user_fault};
+
+    // Get current task
+    let tcb_ref = match crate::sched::current_task() {
+        Some(t) => t,
+        None => {
+            dump_exception_context(ctx);
+            panic!("User exception with no current task");
+        }
+    };
+
+    // Classify the fault and deliver it
+    let fault_type = classify_fault(ec);
+    let needs_dispatch = handle_user_fault(tcb_ref, ctx, fault_type);
+
+    // If fault delivery blocked the thread or terminated it, dispatch next task
+    if needs_dispatch {
+        crate::sched::dispatch::dispatch_task(ctx);
     }
 }
