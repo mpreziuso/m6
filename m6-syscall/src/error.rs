@@ -51,6 +51,10 @@ pub enum SyscallError {
     LastCapability = -19,
     /// Circular dependency detected.
     CircularDependency = -20,
+    /// Address already mapped.
+    AlreadyMapped = -21,
+    /// Address not mapped.
+    NotMapped = -22,
 }
 
 impl SyscallError {
@@ -96,6 +100,8 @@ impl SyscallError {
             -18 => Some(Self::ObjectInUse),
             -19 => Some(Self::LastCapability),
             -20 => Some(Self::CircularDependency),
+            -21 => Some(Self::AlreadyMapped),
+            -22 => Some(Self::NotMapped),
             _ => None,
         }
     }
@@ -124,6 +130,8 @@ impl SyscallError {
             Self::ObjectInUse => "ObjectInUse",
             Self::LastCapability => "LastCapability",
             Self::CircularDependency => "CircularDependency",
+            Self::AlreadyMapped => "AlreadyMapped",
+            Self::NotMapped => "NotMapped",
         }
     }
 }

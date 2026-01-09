@@ -477,6 +477,24 @@ where
     None
 }
 
+/// Access an untyped object with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the untyped object.
+/// Does nothing if the object is not a valid untyped.
+pub fn with_untyped_mut<F, R>(untyped_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut UntypedObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(untyped_ref) {
+        if obj.obj_type == KernelObjectType::Untyped {
+            // SAFETY: We verified the object type, so untyped is the active variant.
+            return Some(f(unsafe { &mut obj.data.untyped }));
+        }
+    }
+    None
+}
+
 /// Access a frame with a closure (mutable).
 ///
 /// Executes the closure with a mutable reference to the frame.

@@ -189,6 +189,16 @@ impl SmmuInstance {
         self.submit_cmd_sync(CommandEntry::tlbi_nh_asid(asid))
     }
 
+    /// Invalidate a single IOTLB entry by VA and ASID.
+    ///
+    /// # Arguments
+    /// - `asid`: The IOASID to invalidate
+    /// - `iova`: The I/O virtual address to invalidate
+    pub fn invalidate_va(&mut self, asid: u16, iova: u64) -> Result<(), SmmuError> {
+        // leaf=true since we're invalidating a page mapping
+        self.submit_cmd_sync(CommandEntry::tlbi_nh_va(asid, iova, true))
+    }
+
     /// Process pending events in the event queue.
     ///
     /// Returns the number of events processed.

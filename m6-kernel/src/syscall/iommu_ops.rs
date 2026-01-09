@@ -22,13 +22,290 @@
 //! - IOSpace: represents an IOMMU translation domain
 //! - DmaPool: provides IOVA allocation for a driver
 
-use m6_cap::{CapRights, ObjectType};
+use core::mem::ManuallyDrop;
+
+use m6_cap::objects::{DmaPoolObject, IOSpaceObject, Ioasid};
+use m6_cap::{Badge, CapRights, CapSlot, ObjectType, SlotFlags};
 
 use crate::cap::cspace::{self, SlotLocation};
-use crate::cap::object_table;
+use crate::cap::object_table::{self, KernelObjectType};
+use crate::memory::frame::alloc_frame_zeroed;
+use crate::memory::translate::phys_to_virt;
 use crate::smmu::{self, SmmuError};
 use crate::syscall::error::{SyscallError, SyscallResult};
 use crate::syscall::SyscallArgs;
+
+// -- I/O page table constants (same as CPU page tables)
+
+/// Page size (4KB).
+const PAGE_SIZE: u64 = 4096;
+/// Index mask (9 bits).
+const INDEX_MASK: u64 = 0x1FF;
+
+/// Shifts for extracting table indices from IOVA.
+const L0_SHIFT: u32 = 39;
+const L1_SHIFT: u32 = 30;
+const L2_SHIFT: u32 = 21;
+const L3_SHIFT: u32 = 12;
+
+/// Table descriptor: valid=1, type=1 (0b11).
+const TABLE_DESCRIPTOR: u64 = 0b11;
+/// Page descriptor: valid=1, type=1 (0b11 for L3).
+const PAGE_DESCRIPTOR: u64 = 0b11;
+
+// -- I/O page table helpers
+
+/// Extract L0 index from IOVA.
+#[inline]
+fn l0_index(iova: u64) -> usize {
+    ((iova >> L0_SHIFT) & INDEX_MASK) as usize
+}
+
+/// Extract L1 index from IOVA.
+#[inline]
+fn l1_index(iova: u64) -> usize {
+    ((iova >> L1_SHIFT) & INDEX_MASK) as usize
+}
+
+/// Extract L2 index from IOVA.
+#[inline]
+fn l2_index(iova: u64) -> usize {
+    ((iova >> L2_SHIFT) & INDEX_MASK) as usize
+}
+
+/// Extract L3 index from IOVA.
+#[inline]
+fn l3_index(iova: u64) -> usize {
+    ((iova >> L3_SHIFT) & INDEX_MASK) as usize
+}
+
+/// Check if a descriptor is valid.
+#[inline]
+fn is_valid(desc: u64) -> bool {
+    desc & 0b1 != 0
+}
+
+/// Check if a descriptor is a table pointer (not a block).
+#[inline]
+fn is_table(desc: u64) -> bool {
+    desc & 0b11 == TABLE_DESCRIPTOR
+}
+
+/// Extract next-level table physical address from a table descriptor.
+#[inline]
+fn table_address(desc: u64) -> u64 {
+    desc & 0x0000_FFFF_FFFF_F000
+}
+
+/// Create a table descriptor pointing to a page table.
+#[inline]
+fn make_table_descriptor(table_phys: u64) -> u64 {
+    (table_phys & 0x0000_FFFF_FFFF_F000) | TABLE_DESCRIPTOR
+}
+
+/// Create an L3 page descriptor for a 4KB page.
+///
+/// Creates a descriptor with:
+/// - Valid bit set
+/// - AF (Access Flag) set
+/// - Normal memory attributes
+/// - Inner Shareable
+/// - Read/write permissions based on `writable`
+#[inline]
+fn make_page_descriptor(frame_phys: u64, writable: bool) -> u64 {
+    let mut desc = (frame_phys & 0x0000_FFFF_FFFF_F000) | PAGE_DESCRIPTOR;
+
+    // Set Access Flag (bit 10)
+    desc |= 1 << 10;
+
+    // Set shareability to Inner Shareable (bits [9:8] = 0b11)
+    desc |= 0b11 << 8;
+
+    // Set permissions
+    if !writable {
+        // AP = 0b10 (read-only at EL1)
+        desc |= 0b10 << 6;
+    }
+    // else AP = 0b00 (read/write at EL1) which is the default
+
+    // Disable execution (UXN=1, PXN=1) - DMA buffers shouldn't be executable
+    desc |= 1 << 54; // UXN
+    desc |= 1 << 53; // PXN
+
+    desc
+}
+
+/// Walk I/O page tables and map a frame at the given IOVA.
+///
+/// Allocates intermediate page tables as needed.
+///
+/// # Arguments
+/// - `root_table_phys`: Physical address of the root (L0) page table
+/// - `iova`: I/O virtual address to map at (must be page-aligned)
+/// - `frame_phys`: Physical address of the frame to map (must be page-aligned)
+/// - `writable`: Whether the mapping should be writable
+///
+/// # Returns
+/// - `Ok(())` on success
+/// - `Err(SyscallError::NoMemory)` if intermediate table allocation fails
+/// - `Err(SyscallError::AlreadyMapped)` if IOVA is already mapped
+fn iospace_map_page(
+    root_table_phys: u64,
+    iova: u64,
+    frame_phys: u64,
+    writable: bool,
+) -> Result<(), SyscallError> {
+    // Get indices for each level
+    let l0_idx = l0_index(iova);
+    let l1_idx = l1_index(iova);
+    let l2_idx = l2_index(iova);
+    let l3_idx = l3_index(iova);
+
+    // Walk L0 -> L1
+    let l0_table = phys_to_virt(root_table_phys) as *mut u64;
+    // SAFETY: root_table_phys is a valid page table allocated by IOSpaceCreate
+    let l0_entry = unsafe { l0_table.add(l0_idx).read_volatile() };
+
+    let l1_table_phys = if is_valid(l0_entry) {
+        if !is_table(l0_entry) {
+            // L0 cannot have block entries
+            return Err(SyscallError::InvalidArg);
+        }
+        table_address(l0_entry)
+    } else {
+        // Allocate L1 table
+        let new_table = alloc_frame_zeroed().ok_or(SyscallError::NoMemory)?;
+        let desc = make_table_descriptor(new_table);
+        // SAFETY: Writing to a valid page table entry
+        unsafe { l0_table.add(l0_idx).write_volatile(desc) };
+        new_table
+    };
+
+    // Walk L1 -> L2
+    let l1_table = phys_to_virt(l1_table_phys) as *mut u64;
+    // SAFETY: l1_table_phys points to a valid page table
+    let l1_entry = unsafe { l1_table.add(l1_idx).read_volatile() };
+
+    let l2_table_phys = if is_valid(l1_entry) {
+        if !is_table(l1_entry) {
+            // Block entry at L1 would conflict with our 4KB mapping
+            return Err(SyscallError::AlreadyMapped);
+        }
+        table_address(l1_entry)
+    } else {
+        // Allocate L2 table
+        let new_table = alloc_frame_zeroed().ok_or(SyscallError::NoMemory)?;
+        let desc = make_table_descriptor(new_table);
+        // SAFETY: Writing to a valid page table entry
+        unsafe { l1_table.add(l1_idx).write_volatile(desc) };
+        new_table
+    };
+
+    // Walk L2 -> L3
+    let l2_table = phys_to_virt(l2_table_phys) as *mut u64;
+    // SAFETY: l2_table_phys points to a valid page table
+    let l2_entry = unsafe { l2_table.add(l2_idx).read_volatile() };
+
+    let l3_table_phys = if is_valid(l2_entry) {
+        if !is_table(l2_entry) {
+            // Block entry at L2 would conflict with our 4KB mapping
+            return Err(SyscallError::AlreadyMapped);
+        }
+        table_address(l2_entry)
+    } else {
+        // Allocate L3 table
+        let new_table = alloc_frame_zeroed().ok_or(SyscallError::NoMemory)?;
+        let desc = make_table_descriptor(new_table);
+        // SAFETY: Writing to a valid page table entry
+        unsafe { l2_table.add(l2_idx).write_volatile(desc) };
+        new_table
+    };
+
+    // Install L3 entry
+    let l3_table = phys_to_virt(l3_table_phys) as *mut u64;
+    // SAFETY: l3_table_phys points to a valid page table
+    let l3_entry = unsafe { l3_table.add(l3_idx).read_volatile() };
+
+    if is_valid(l3_entry) {
+        return Err(SyscallError::AlreadyMapped);
+    }
+
+    let page_desc = make_page_descriptor(frame_phys, writable);
+    // SAFETY: Writing to a valid page table entry
+    unsafe { l3_table.add(l3_idx).write_volatile(page_desc) };
+
+    // Memory barrier to ensure visibility
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+    Ok(())
+}
+
+/// Walk I/O page tables and unmap a frame at the given IOVA.
+///
+/// # Arguments
+/// - `root_table_phys`: Physical address of the root (L0) page table
+/// - `iova`: I/O virtual address to unmap (must be page-aligned)
+///
+/// # Returns
+/// - `Ok(frame_phys)` with the unmapped frame's physical address
+/// - `Err(SyscallError::NotMapped)` if IOVA is not mapped
+fn iospace_unmap_page(root_table_phys: u64, iova: u64) -> Result<u64, SyscallError> {
+    // Get indices for each level
+    let l0_idx = l0_index(iova);
+    let l1_idx = l1_index(iova);
+    let l2_idx = l2_index(iova);
+    let l3_idx = l3_index(iova);
+
+    // Walk L0 -> L1
+    let l0_table = phys_to_virt(root_table_phys) as *mut u64;
+    // SAFETY: root_table_phys is a valid page table
+    let l0_entry = unsafe { l0_table.add(l0_idx).read_volatile() };
+
+    if !is_valid(l0_entry) || !is_table(l0_entry) {
+        return Err(SyscallError::NotMapped);
+    }
+    let l1_table_phys = table_address(l0_entry);
+
+    // Walk L1 -> L2
+    let l1_table = phys_to_virt(l1_table_phys) as *mut u64;
+    // SAFETY: l1_table_phys points to a valid page table
+    let l1_entry = unsafe { l1_table.add(l1_idx).read_volatile() };
+
+    if !is_valid(l1_entry) || !is_table(l1_entry) {
+        return Err(SyscallError::NotMapped);
+    }
+    let l2_table_phys = table_address(l1_entry);
+
+    // Walk L2 -> L3
+    let l2_table = phys_to_virt(l2_table_phys) as *mut u64;
+    // SAFETY: l2_table_phys points to a valid page table
+    let l2_entry = unsafe { l2_table.add(l2_idx).read_volatile() };
+
+    if !is_valid(l2_entry) || !is_table(l2_entry) {
+        return Err(SyscallError::NotMapped);
+    }
+    let l3_table_phys = table_address(l2_entry);
+
+    // Read and clear L3 entry
+    let l3_table = phys_to_virt(l3_table_phys) as *mut u64;
+    // SAFETY: l3_table_phys points to a valid page table
+    let l3_entry = unsafe { l3_table.add(l3_idx).read_volatile() };
+
+    if !is_valid(l3_entry) {
+        return Err(SyscallError::NotMapped);
+    }
+
+    let frame_phys = table_address(l3_entry); // Same mask works for page address
+
+    // Clear the entry (0 = invalid descriptor)
+    // SAFETY: Writing to a valid page table entry
+    unsafe { l3_table.add(l3_idx).write_volatile(0) };
+
+    // Memory barrier
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+
+    Ok(frame_phys)
+}
 
 /// Convert SMMU errors to syscall errors.
 fn smmu_error_to_syscall(err: SmmuError) -> SyscallError {
@@ -69,7 +346,7 @@ fn verify_slot_empty(loc: &SlotLocation) -> Result<(), SyscallError> {
 /// 0 on success, negative error code on failure.
 pub fn handle_iospace_create(args: &SyscallArgs) -> SyscallResult {
     let smmu_cptr = args.arg0;
-    let _untyped_cptr = args.arg1;
+    let untyped_cptr = args.arg1;
     let dest_cnode_cptr = args.arg2;
     let dest_index = args.arg3 as usize;
     let dest_depth = args.arg4 as u8;
@@ -79,9 +356,9 @@ pub fn handle_iospace_create(args: &SyscallArgs) -> SyscallResult {
         return Err(SyscallError::NotSupported);
     }
 
-    // Verify SmmuControl capability
+    // Verify SmmuControl capability and get object ref
     let smmu_loc = cspace::resolve_cptr(smmu_cptr, 0)?;
-    cspace::with_slot(&smmu_loc, |slot| {
+    let smmu_ref = cspace::with_slot(&smmu_loc, |slot| {
         if slot.is_empty() {
             return Err(SyscallError::EmptySlot);
         }
@@ -91,7 +368,22 @@ pub fn handle_iospace_create(args: &SyscallArgs) -> SyscallResult {
         if !slot.rights().contains(CapRights::WRITE) {
             return Err(SyscallError::NoRights);
         }
-        Ok(())
+        Ok(slot.object_ref())
+    })?;
+
+    // Verify untyped capability and get object ref
+    let untyped_loc = cspace::resolve_cptr(untyped_cptr, 0)?;
+    let untyped_ref = cspace::with_slot(&untyped_loc, |slot| {
+        if slot.is_empty() {
+            return Err(SyscallError::EmptySlot);
+        }
+        if slot.cap_type() != ObjectType::Untyped {
+            return Err(SyscallError::TypeMismatch);
+        }
+        if !slot.rights().contains(CapRights::WRITE) {
+            return Err(SyscallError::NoRights);
+        }
+        Ok(slot.object_ref())
     })?;
 
     // Resolve destination slot
@@ -100,10 +392,73 @@ pub fn handle_iospace_create(args: &SyscallArgs) -> SyscallResult {
     // Verify destination slot is empty
     verify_slot_empty(&dest_loc)?;
 
-    // TODO: Retype untyped memory into IOSpace object
-    // For now, return NotSupported until retype infrastructure is complete
-    log::warn!("IOSpaceCreate: retype infrastructure not yet implemented");
-    Err(SyscallError::NotSupported)
+    // Allocate 4KB from untyped for root page table
+    let root_table_phys = object_table::with_untyped_mut(untyped_ref, |ut| {
+        ut.try_allocate(4096, 4096)
+    })
+    .ok_or(SyscallError::Revoked)?
+    .map_err(|_| SyscallError::NoMemory)?;
+
+    // Zero the page table memory (important for invalid PTEs)
+    let root_table_virt = phys_to_virt(root_table_phys.as_u64());
+    // SAFETY: We just allocated this memory and it's mapped via direct physical map
+    unsafe {
+        core::ptr::write_bytes(root_table_virt as *mut u8, 0, 4096);
+    }
+
+    // Get SMMU index from SmmuControl
+    let smmu_index = object_table::with_smmu_control_mut(smmu_ref, |smmu_ctrl| smmu_ctrl.smmu_index)
+        .ok_or(SyscallError::Revoked)?;
+
+    // Allocate IOASID from SmmuControl
+    let ioasid = object_table::with_smmu_control_mut(smmu_ref, |smmu_ctrl| {
+        smmu_ctrl.alloc_ioasid()
+    })
+    .ok_or(SyscallError::Revoked)?
+    .ok_or(SyscallError::NoMemory)?;
+
+    // Allocate object table entry for IOSpace
+    let iospace_ref = object_table::alloc(KernelObjectType::IOSpace)
+        .ok_or(SyscallError::NoMemory)?;
+
+    // Create IOSpaceObject with allocated page table and IOASID
+    object_table::with_object_mut(iospace_ref, |obj| {
+        obj.data.iospace = ManuallyDrop::new(IOSpaceObject {
+            root_table: root_table_phys,
+            ioasid: Ioasid::new(ioasid),
+            root_table_cap: untyped_ref, // Track source untyped for revocation
+            mapped_frames: 0,
+            stream_count: 0,
+            is_active: false,
+            smmu_index,
+        });
+    });
+
+    // Install capability in destination slot
+    cspace::with_slot_mut(&dest_loc, |slot| {
+        *slot = CapSlot::new(
+            iospace_ref,
+            ObjectType::IOSpace,
+            CapRights::ALL,
+            Badge::NONE,
+            SlotFlags::IS_ORIGINAL,
+        );
+        Ok(())
+    })?;
+
+    // Increment SmmuControl IOSpace count
+    object_table::with_smmu_control_mut(smmu_ref, |smmu_ctrl| {
+        smmu_ctrl.increment_iospaces();
+    });
+
+    log::debug!(
+        "Created IOSpace: ref={:?} root_table={:#x} ioasid={}",
+        iospace_ref,
+        root_table_phys.as_u64(),
+        ioasid
+    );
+
+    Ok(0)
 }
 
 /// Handle IOSpaceMapFrame syscall.
@@ -162,25 +517,49 @@ pub fn handle_iospace_map_frame(args: &SyscallArgs) -> SyscallResult {
         Ok(slot.object_ref())
     })?;
 
+    // Validate IOVA alignment
+    if (iova & (PAGE_SIZE - 1)) != 0 {
+        return Err(SyscallError::InvalidArg);
+    }
+
     // Get physical address from frame object
     let frame_phys = object_table::with_frame_mut(frame_ref, |frame| frame.phys_addr.as_u64())
         .ok_or(SyscallError::Revoked)?;
 
-    // Get IOSpace and perform mapping
-    object_table::with_iospace_mut(iospace_ref, |iospace| {
-        // TODO: Add frame to IOSpace page tables
-        // This requires:
-        // 1. Walking/creating I/O page tables
-        // 2. Installing PTE with frame_phys at iova
-        // 3. Invalidating IOTLB for the ASID
-
-        let _ = (iova, frame_phys); // Suppress unused warnings
-        let _ = iospace;
-
-        log::warn!("IOSpaceMapFrame: page table manipulation not yet implemented");
-        Err(SyscallError::NotSupported)
+    // Get IOSpace details for mapping and IOTLB invalidation
+    let (root_table, ioasid, smmu_index) = object_table::with_iospace_mut(iospace_ref, |iospace| {
+        (
+            iospace.root_table.as_u64(),
+            iospace.ioasid.value(),
+            iospace.smmu_index,
+        )
     })
-    .ok_or(SyscallError::Revoked)?
+    .ok_or(SyscallError::Revoked)?;
+
+    // Determine if mapping should be writable
+    let writable = (rights_bits & CapRights::WRITE.bits()) != 0;
+
+    // Map the frame in I/O page tables
+    iospace_map_page(root_table, iova, frame_phys, writable)?;
+
+    // Invalidate IOTLB for the mapping
+    smmu::with_smmu(smmu_index, |smmu| {
+        smmu.invalidate_va(ioasid, iova)
+    })
+    .map_err(smmu_error_to_syscall)?
+    .map_err(smmu_error_to_syscall)?;
+
+    // Update mapped frames count (already validated iospace_ref above)
+    let _ = object_table::with_iospace_mut(iospace_ref, |iospace| {
+        iospace.mapped_frames = iospace.mapped_frames.saturating_add(1);
+    });
+
+    log::debug!(
+        "IOSpace map: iova={:#x} -> frame={:#x} writable={}",
+        iova, frame_phys, writable
+    );
+
+    Ok(0)
 }
 
 /// Handle IOSpaceUnmapFrame syscall.
@@ -219,21 +598,39 @@ pub fn handle_iospace_unmap_frame(args: &SyscallArgs) -> SyscallResult {
         Ok(slot.object_ref())
     })?;
 
-    // Get IOSpace and perform unmapping
-    object_table::with_iospace_mut(iospace_ref, |iospace| {
-        // TODO: Remove mapping from IOSpace page tables
-        // This requires:
-        // 1. Walking I/O page tables to find PTE
-        // 2. Clearing the PTE
-        // 3. Invalidating IOTLB for the ASID
+    // Validate IOVA alignment
+    if (iova & (PAGE_SIZE - 1)) != 0 {
+        return Err(SyscallError::InvalidArg);
+    }
 
-        let _ = iova; // Suppress unused warning
-        let _ = iospace;
-
-        log::warn!("IOSpaceUnmapFrame: page table manipulation not yet implemented");
-        Err(SyscallError::NotSupported)
+    // Get IOSpace details for unmapping and IOTLB invalidation
+    let (root_table, ioasid, smmu_index) = object_table::with_iospace_mut(iospace_ref, |iospace| {
+        (
+            iospace.root_table.as_u64(),
+            iospace.ioasid.value(),
+            iospace.smmu_index,
+        )
     })
-    .ok_or(SyscallError::Revoked)?
+    .ok_or(SyscallError::Revoked)?;
+
+    // Unmap the frame from I/O page tables
+    let _frame_phys = iospace_unmap_page(root_table, iova)?;
+
+    // Invalidate IOTLB for the unmapped page
+    smmu::with_smmu(smmu_index, |smmu| {
+        smmu.invalidate_va(ioasid, iova)
+    })
+    .map_err(smmu_error_to_syscall)?
+    .map_err(smmu_error_to_syscall)?;
+
+    // Update mapped frames count (already validated iospace_ref above)
+    let _ = object_table::with_iospace_mut(iospace_ref, |iospace| {
+        iospace.mapped_frames = iospace.mapped_frames.saturating_sub(1);
+    });
+
+    log::debug!("IOSpace unmap: iova={:#x}", iova);
+
+    Ok(0)
 }
 
 /// Handle IOSpaceBindStream syscall.
@@ -328,6 +725,7 @@ pub fn handle_iospace_bind_stream(args: &SyscallArgs) -> SyscallResult {
 
         Ok::<(), SmmuError>(())
     })
+    .map_err(smmu_error_to_syscall)?
     .map_err(smmu_error_to_syscall)?;
 
     // Mark stream as claimed
@@ -421,6 +819,7 @@ pub fn handle_iospace_unbind_stream(args: &SyscallArgs) -> SyscallResult {
         smmu.configure_ste(stream_id, ste)?;
         Ok::<(), SmmuError>(())
     })
+    .map_err(smmu_error_to_syscall)?
     .map_err(smmu_error_to_syscall)?;
 
     // Release stream
@@ -458,8 +857,8 @@ pub fn handle_iospace_unbind_stream(args: &SyscallArgs) -> SyscallResult {
 /// 0 on success, negative error code on failure.
 pub fn handle_dma_pool_create(args: &SyscallArgs) -> SyscallResult {
     let iospace_cptr = args.arg0;
-    let _iova_base = args.arg1;
-    let _iova_size = args.arg2;
+    let iova_base = args.arg1;
+    let iova_size = args.arg2;
     let dest_cnode_cptr = args.arg3;
     let dest_index = args.arg4 as usize;
     let dest_depth = args.arg5 as u8;
@@ -469,9 +868,22 @@ pub fn handle_dma_pool_create(args: &SyscallArgs) -> SyscallResult {
         return Err(SyscallError::NotSupported);
     }
 
-    // Verify IOSpace capability
+    // Validate IOVA parameters
+    if iova_base == 0 || iova_size == 0 {
+        return Err(SyscallError::InvalidArg);
+    }
+    // Require page alignment
+    if (iova_base & 0xFFF) != 0 || (iova_size & 0xFFF) != 0 {
+        return Err(SyscallError::InvalidArg);
+    }
+    // Check for overflow
+    if iova_base.checked_add(iova_size).is_none() {
+        return Err(SyscallError::InvalidArg);
+    }
+
+    // Verify IOSpace capability and get object ref
     let iospace_loc = cspace::resolve_cptr(iospace_cptr, 0)?;
-    cspace::with_slot(&iospace_loc, |slot| {
+    let iospace_ref = cspace::with_slot(&iospace_loc, |slot| {
         if slot.is_empty() {
             return Err(SyscallError::EmptySlot);
         }
@@ -481,7 +893,7 @@ pub fn handle_dma_pool_create(args: &SyscallArgs) -> SyscallResult {
         if !slot.rights().contains(CapRights::WRITE) {
             return Err(SyscallError::NoRights);
         }
-        Ok(())
+        Ok(slot.object_ref())
     })?;
 
     // Resolve destination slot
@@ -490,9 +902,40 @@ pub fn handle_dma_pool_create(args: &SyscallArgs) -> SyscallResult {
     // Verify destination slot is empty
     verify_slot_empty(&dest_loc)?;
 
-    // TODO: Create DmaPool object and install capability
-    log::warn!("DmaPoolCreate: object creation not yet implemented");
-    Err(SyscallError::NotSupported)
+    // Allocate object table entry for DmaPool
+    let pool_ref = object_table::alloc(KernelObjectType::DmaPool)
+        .ok_or(SyscallError::NoMemory)?;
+
+    // Create DmaPoolObject
+    object_table::with_object_mut(pool_ref, |obj| {
+        obj.data.dma_pool = ManuallyDrop::new(DmaPoolObject::new(
+            iospace_ref,
+            iova_base,
+            iova_size,
+        ));
+    });
+
+    // Install capability in destination slot
+    cspace::with_slot_mut(&dest_loc, |slot| {
+        *slot = CapSlot::new(
+            pool_ref,
+            ObjectType::DmaPool,
+            CapRights::ALL,
+            Badge::NONE,
+            SlotFlags::IS_ORIGINAL,
+        );
+        Ok(())
+    })?;
+
+    log::debug!(
+        "Created DmaPool: ref={:?} iospace={:?} base={:#x} size={:#x}",
+        pool_ref,
+        iospace_ref,
+        iova_base,
+        iova_size
+    );
+
+    Ok(0)
 }
 
 /// Handle DmaPoolAlloc syscall.
