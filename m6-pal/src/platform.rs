@@ -3,7 +3,7 @@
 //! Provides a unified interface for different hardware platforms.
 
 use crate::dtb;
-use crate::dtb_platform::DtbPlatform;
+use crate::dtb_platform::{DtbPlatform, SmmuConfig};
 use m6_common::boot::BootInfo;
 use once_cell_no_std::OnceCell;
 
@@ -43,6 +43,21 @@ pub trait Platform: Send + Sync {
 
     /// Perform late platform initialisation (after memory management)
     fn late_init(&self);
+
+    /// Get the SMMU base address (None if no SMMU present).
+    fn smmu_base(&self) -> Option<u64> {
+        None
+    }
+
+    /// Get the SMMU configuration (None if no SMMU present).
+    fn smmu_config(&self) -> Option<&SmmuConfig> {
+        None
+    }
+
+    /// Check if IOMMU is available (required for userspace drivers).
+    fn has_iommu(&self) -> bool {
+        false
+    }
 }
 
 pub struct PlatformInfo {

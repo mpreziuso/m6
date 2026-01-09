@@ -34,6 +34,7 @@ pub mod ipc;
 pub mod logging;
 pub mod memory;
 pub mod sched;
+pub mod smmu;
 pub mod syscall;
 pub mod task;
 pub mod user;

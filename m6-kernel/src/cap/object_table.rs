@@ -19,7 +19,10 @@ use alloc::boxed::Box;
 use m6_arch::IrqSpinMutex;
 use m6_cap::{
     ObjectRef,
-    objects::{EndpointObject, NotificationObject, ReplyObject, UntypedObject, VSpaceObject},
+    objects::{
+        DmaPoolObject, EndpointObject, FrameObject, IOSpaceObject, NotificationObject, ReplyObject,
+        SmmuControlObject, UntypedObject, VSpaceObject,
+    },
 };
 use spin::Once;
 
@@ -68,12 +71,18 @@ pub enum KernelObjectType {
     SchedContext = 15,
     /// Scheduling control (singleton).
     SchedControl = 16,
+    /// I/O address space (IOMMU domain).
+    IOSpace = 17,
+    /// DMA memory pool.
+    DmaPool = 18,
+    /// SMMU control (singleton per SMMU).
+    SmmuControl = 19,
 }
 
 /// Union of all kernel object data.
 ///
-/// Small objects are stored inline. Large objects (TCB, CNode) use
-/// heap-allocated storage with a pointer here.
+/// Small objects are stored inline. Large objects (TCB, CNode, SmmuControl)
+/// use heap-allocated storage with a pointer here.
 ///
 /// Non-Copy types are wrapped in ManuallyDrop to satisfy union requirements.
 #[repr(C)]
@@ -90,10 +99,18 @@ pub union KernelObjectData {
     pub reply: ManuallyDrop<ReplyObject>,
     /// VSpace metadata.
     pub vspace: ManuallyDrop<VSpaceObject>,
+    /// Frame metadata.
+    pub frame: ManuallyDrop<FrameObject>,
     /// TCB pointer (heap-allocated).
     pub tcb_ptr: *mut TcbFull,
     /// CNode pointer (heap-allocated).
     pub cnode_ptr: *mut CNodeStorage,
+    /// IOSpace metadata.
+    pub iospace: ManuallyDrop<IOSpaceObject>,
+    /// DMA pool metadata.
+    pub dma_pool: ManuallyDrop<DmaPoolObject>,
+    /// SMMU control pointer (heap-allocated due to large bitmap).
+    pub smmu_control_ptr: *mut SmmuControlObject,
 }
 
 // SAFETY: Pointers are only accessed with object table lock held.
@@ -455,6 +472,84 @@ where
         if obj.obj_type == KernelObjectType::Reply {
             // SAFETY: We verified the object type, so reply is the active variant.
             return Some(f(unsafe { &mut obj.data.reply }));
+        }
+    }
+    None
+}
+
+/// Access a frame with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the frame.
+/// Does nothing if the object is not a valid frame.
+pub fn with_frame_mut<F, R>(frame_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut FrameObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(frame_ref) {
+        if obj.obj_type == KernelObjectType::Frame || obj.obj_type == KernelObjectType::DeviceFrame
+        {
+            // SAFETY: We verified the object type, so frame is the active variant.
+            return Some(f(unsafe { &mut obj.data.frame }));
+        }
+    }
+    None
+}
+
+/// Access an IOSpace with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the IOSpace.
+/// Does nothing if the object is not a valid IOSpace.
+pub fn with_iospace_mut<F, R>(iospace_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut IOSpaceObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(iospace_ref) {
+        if obj.obj_type == KernelObjectType::IOSpace {
+            // SAFETY: We verified the object type, so iospace is the active variant.
+            return Some(f(unsafe { &mut obj.data.iospace }));
+        }
+    }
+    None
+}
+
+/// Access a DmaPool with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the DmaPool.
+/// Does nothing if the object is not a valid DmaPool.
+pub fn with_dma_pool_mut<F, R>(pool_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut DmaPoolObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(pool_ref) {
+        if obj.obj_type == KernelObjectType::DmaPool {
+            // SAFETY: We verified the object type, so dma_pool is the active variant.
+            return Some(f(unsafe { &mut obj.data.dma_pool }));
+        }
+    }
+    None
+}
+
+/// Access an SmmuControl with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the SmmuControl.
+/// Does nothing if the object is not a valid SmmuControl.
+pub fn with_smmu_control_mut<F, R>(smmu_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut SmmuControlObject) -> R,
+{
+    let table = get_table().lock();
+    if let Some(obj) = table.get(smmu_ref) {
+        if obj.obj_type == KernelObjectType::SmmuControl {
+            // SAFETY: We verified the object type, so smmu_control_ptr is the active variant.
+            let ptr = unsafe { obj.data.smmu_control_ptr };
+            if !ptr.is_null() {
+                // SAFETY: The SmmuControl was heap-allocated and is valid.
+                // We hold the object table lock so no concurrent access.
+                return Some(f(unsafe { &mut *ptr }));
+            }
         }
     }
     None

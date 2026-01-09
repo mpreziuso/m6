@@ -89,6 +89,24 @@ pub enum Syscall {
     /// Clear IRQ handler.
     IrqClearHandler = 82,
 
+    // === IOMMU Operations ===
+    /// Create IOSpace from untyped memory.
+    IOSpaceCreate = 96,
+    /// Map frame into IOSpace for DMA.
+    IOSpaceMapFrame = 97,
+    /// Unmap frame from IOSpace.
+    IOSpaceUnmapFrame = 98,
+    /// Bind stream ID to IOSpace.
+    IOSpaceBindStream = 99,
+    /// Unbind stream ID from IOSpace.
+    IOSpaceUnbindStream = 100,
+    /// Create DmaPool from IOSpace.
+    DmaPoolCreate = 104,
+    /// Allocate DMA buffer from pool.
+    DmaPoolAlloc = 105,
+    /// Free DMA buffer.
+    DmaPoolFree = 106,
+
     // === Debug (development only) ===
     /// Debug print character.
     DebugPutChar = 255,
@@ -130,6 +148,14 @@ impl Syscall {
             80 => Some(Self::IrqAck),
             81 => Some(Self::IrqSetHandler),
             82 => Some(Self::IrqClearHandler),
+            96 => Some(Self::IOSpaceCreate),
+            97 => Some(Self::IOSpaceMapFrame),
+            98 => Some(Self::IOSpaceUnmapFrame),
+            99 => Some(Self::IOSpaceBindStream),
+            100 => Some(Self::IOSpaceUnbindStream),
+            104 => Some(Self::DmaPoolCreate),
+            105 => Some(Self::DmaPoolAlloc),
+            106 => Some(Self::DmaPoolFree),
             255 => Some(Self::DebugPutChar),
             _ => None,
         }
@@ -170,6 +196,14 @@ impl Syscall {
             Self::IrqAck => "IrqAck",
             Self::IrqSetHandler => "IrqSetHandler",
             Self::IrqClearHandler => "IrqClearHandler",
+            Self::IOSpaceCreate => "IOSpaceCreate",
+            Self::IOSpaceMapFrame => "IOSpaceMapFrame",
+            Self::IOSpaceUnmapFrame => "IOSpaceUnmapFrame",
+            Self::IOSpaceBindStream => "IOSpaceBindStream",
+            Self::IOSpaceUnbindStream => "IOSpaceUnbindStream",
+            Self::DmaPoolCreate => "DmaPoolCreate",
+            Self::DmaPoolAlloc => "DmaPoolAlloc",
+            Self::DmaPoolFree => "DmaPoolFree",
             Self::DebugPutChar => "DebugPutChar",
         }
     }

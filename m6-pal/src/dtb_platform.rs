@@ -25,6 +25,43 @@ pub enum UartType {
     Unknown,
 }
 
+/// SMMU (System Memory Management Unit) configuration
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SmmuConfig {
+    /// Physical base address of the SMMU registers.
+    pub base_addr: u64,
+    /// Size of the SMMU register region.
+    pub size: u64,
+    /// Event queue interrupt (SPI number, not including offset).
+    pub event_irq: u32,
+    /// Global error interrupt.
+    pub gerror_irq: u32,
+    /// Command queue sync interrupt.
+    pub cmdq_sync_irq: u32,
+}
+
+impl SmmuConfig {
+    /// Create a new SMMU configuration.
+    #[inline]
+    #[must_use]
+    pub const fn new(base_addr: u64, size: u64) -> Self {
+        Self {
+            base_addr,
+            size,
+            event_irq: 0,
+            gerror_irq: 0,
+            cmdq_sync_irq: 0,
+        }
+    }
+
+    /// Check if this configuration is valid.
+    #[inline]
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.base_addr != 0
+    }
+}
+
 /// Platform configuration derived from Device Tree Blob
 pub struct DtbPlatform {
     pub(crate) name: &'static str,
@@ -37,6 +74,8 @@ pub struct DtbPlatform {
     pub(crate) uart_type: UartType,
     pub(crate) ram_base: u64,
     pub(crate) ram_size: u64,
+    /// SMMU configuration (None if no SMMU detected).
+    pub(crate) smmu_config: Option<SmmuConfig>,
 }
 
 impl Platform for DtbPlatform {
@@ -87,5 +126,17 @@ impl Platform for DtbPlatform {
 
     fn late_init(&self) {
         // DTB platforms don't need special late initialisation
+    }
+
+    fn smmu_base(&self) -> Option<u64> {
+        self.smmu_config.as_ref().map(|c| c.base_addr)
+    }
+
+    fn smmu_config(&self) -> Option<&SmmuConfig> {
+        self.smmu_config.as_ref()
+    }
+
+    fn has_iommu(&self) -> bool {
+        self.smmu_config.as_ref().is_some_and(|c| c.is_valid())
     }
 }

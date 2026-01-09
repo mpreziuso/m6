@@ -149,6 +149,14 @@ pub enum ObjectType {
     SchedContext = 18,
     /// Scheduling control.
     SchedControl = 19,
+
+    // IOMMU objects
+    /// I/O address space (IOMMU translation domain).
+    IOSpace = 20,
+    /// DMA buffer pool.
+    DmaPool = 21,
+    /// SMMU control (singleton).
+    SmmuControl = 22,
 }
 
 impl ObjectType {
@@ -176,6 +184,9 @@ impl ObjectType {
             Self::IRQControl => "IRQControl",
             Self::SchedContext => "SchedContext",
             Self::SchedControl => "SchedControl",
+            Self::IOSpace => "IOSpace",
+            Self::DmaPool => "DmaPool",
+            Self::SmmuControl => "SmmuControl",
         }
     }
 

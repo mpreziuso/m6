@@ -107,6 +107,31 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
     }
     log::info!("GIC initialised");
 
+    // Initialise SMMU if present
+    if let Some(smmu_config) = platform::platform().smmu_config() {
+        log::info!(
+            "SMMU detected at {:#x}, size {:#x}",
+            smmu_config.base_addr,
+            smmu_config.size
+        );
+        // Map SMMU registers to kernel address space
+        let smmu_virt = memory::translate::phys_to_virt(smmu_config.base_addr);
+        // SAFETY: Called once during init with valid platform-provided SMMU address
+        match unsafe { m6_kernel::smmu::init(smmu_config.base_addr, smmu_virt) } {
+            Ok(()) => {
+                log::info!("SMMU initialised successfully");
+                // TODO: Register event queue IRQ handler
+                // gic::register_handler(smmu_config.event_irq, smmu_event_handler);
+                // gic::enable_irq(smmu_config.event_irq);
+            }
+            Err(e) => {
+                log::error!("SMMU initialisation failed: {:?}", e);
+            }
+        }
+    } else {
+        log::info!("No SMMU detected");
+    }
+
     // Set up timer IRQ
     let timer_irq = platform::platform().timer_irq();
     gic::register_handler(timer_irq, timer_irq_handler);

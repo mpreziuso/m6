@@ -87,7 +87,7 @@ echo ""
 
 # Run QEMU
 exec $QEMU \
-    -machine virt,gic-version=3,acpi=off \
+    -machine virt,gic-version=3,acpi=off,iommu=smmuv3 \
     -cpu cortex-a72 \
     -smp $CPUS \
     -m $MEMORY \

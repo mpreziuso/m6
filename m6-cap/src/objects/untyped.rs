@@ -229,6 +229,11 @@ pub const fn object_size(obj_type: ObjectType, size_bits: u8) -> Result<usize, C
         ObjectType::IRQControl => Ok(64),
         ObjectType::SchedContext => Ok(256),
         ObjectType::SchedControl => Ok(64),
+
+        // IOMMU objects
+        ObjectType::IOSpace => Ok(4096),    // I/O page table root
+        ObjectType::DmaPool => Ok(64),      // Pool metadata
+        ObjectType::SmmuControl => Ok(128), // SMMU control state
     }
 }
 

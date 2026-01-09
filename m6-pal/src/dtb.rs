@@ -8,7 +8,7 @@
 use fdt::Fdt;
 use m6_common::boot::{BootInfo, KERNEL_PHYS_MAP_BASE};
 use once_cell_no_std::OnceCell;
-use crate::dtb_platform::{DtbPlatform, GicVersion, UartType};
+use crate::dtb_platform::{DtbPlatform, GicVersion, SmmuConfig, UartType};
 
 /// Maximum DTB size (2MB should accommodate most device trees)
 const DTB_MAX_SIZE: usize = 2 * 1024 * 1024;
@@ -73,6 +73,7 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
     let (ram_base, ram_size) = parse_memory(&fdt)?;
     let timer_irq = parse_timer(&fdt)?;
     let name = parse_platform_name(&fdt)?;
+    let smmu_config = parse_smmu(&fdt);
 
     Ok(DtbPlatform {
         name,
@@ -85,6 +86,7 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
         uart_type: UartType::Pl011,
         ram_base,
         ram_size,
+        smmu_config,
     })
 }
 
@@ -265,4 +267,49 @@ fn parse_platform_name(fdt: &Fdt) -> Result<&'static str, DtbError> {
     }
 
     Ok("Unknown Platform")
+}
+
+/// Parse SMMU (System Memory Management Unit) configuration
+///
+/// Returns Some(SmmuConfig) if an SMMUv3 is found, None otherwise.
+/// SMMU is optional - the system can run without it (but userspace drivers
+/// will be disabled for security).
+fn parse_smmu(fdt: &Fdt) -> Option<SmmuConfig> {
+    for node in fdt.all_nodes() {
+        if let Some(compatible) = node.compatible() {
+            // Check for ARM SMMUv3
+            if compatible.all().any(|c| c == "arm,smmu-v3") {
+                let reg = node.reg()?.next()?;
+                let base_addr = reg.starting_address as u64;
+                let size = reg.size.unwrap_or(0x20000) as u64;
+
+                // Parse interrupts (SMMUv3 typically has: eventq, gerror, cmdq-sync)
+                // The interrupt property format depends on the interrupt controller
+                let mut event_irq = 0u32;
+                let mut gerror_irq = 0u32;
+                let mut cmdq_sync_irq = 0u32;
+
+                if let Some(mut interrupts) = node.interrupts() {
+                    if let Some(irq) = interrupts.next() {
+                        event_irq = irq as u32;
+                    }
+                    if let Some(irq) = interrupts.next() {
+                        gerror_irq = irq as u32;
+                    }
+                    if let Some(irq) = interrupts.next() {
+                        cmdq_sync_irq = irq as u32;
+                    }
+                }
+
+                return Some(SmmuConfig {
+                    base_addr,
+                    size,
+                    event_irq,
+                    gerror_irq,
+                    cmdq_sync_irq,
+                });
+            }
+        }
+    }
+    None
 }

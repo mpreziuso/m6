@@ -31,26 +31,37 @@
 //! - [`IRQControl`]: Root authority to create IRQ handlers
 //! - [`SchedContext`]: CPU time budget authority
 //! - [`SchedControl`]: Authority to create scheduling contexts
+//!
+//! ## IOMMU Objects
+//! - [`IOSpace`]: IOMMU translation domain for DMA isolation
+//! - [`DmaPool`]: IOVA allocation pool for DMA buffers
+//! - [`SmmuControl`]: Root authority to manage the SMMU
 
 // Object metadata submodules
 pub mod asid;
 pub mod cnode_obj;
+pub mod dma_pool;
 pub mod endpoint;
 pub mod frame;
+pub mod iospace;
 pub mod irq;
 pub mod page_table;
 pub mod sched;
+pub mod smmu;
 pub mod tcb;
 pub mod untyped;
 pub mod vspace;
 
 pub use asid::{ASIDS_PER_POOL, AsidControlObject, AsidPoolObject};
 pub use cnode_obj::CNodeObject;
+pub use dma_pool::{DmaDirection, DmaPoolObject};
 pub use endpoint::{EndpointObject, EndpointState, NotificationObject, ReplyObject};
 pub use frame::FrameObject;
+pub use iospace::{Ioasid, IOSpaceObject};
 pub use irq::{IrqControlObject, IrqHandlerObject, IrqNumber, IrqState, MAX_IRQ};
 pub use page_table::{PageTableLevel, PageTableObject};
 pub use sched::{Microseconds, SchedContextObject, SchedControlObject};
+pub use smmu::{SmmuControlObject, StreamBinding, StreamId, MAX_INLINE_STREAMS, MAX_STREAM_ID};
 pub use tcb::{DEFAULT_PRIORITY, MAX_PRIORITY, Priority, TcbObject, ThreadState};
 pub use untyped::{RetypeParams, UntypedObject};
 pub use vspace::{Asid, VSpaceObject};
@@ -350,6 +361,49 @@ pub struct SchedControl;
 impl private::Sealed for SchedControl {}
 impl CapObjectType for SchedControl {
     const NAME: &'static str = "SchedControl";
+    const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
+}
+
+// -- IOMMU Objects
+
+/// I/O address space capability.
+///
+/// Represents an IOMMU translation domain. Each userspace driver that
+/// performs DMA requires an IOSpace for isolation. Analogous to VSpace
+/// for CPU translations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct IOSpace;
+
+impl private::Sealed for IOSpace {}
+impl CapObjectType for IOSpace {
+    const NAME: &'static str = "IOSpace";
+    const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
+}
+
+/// DMA pool capability.
+///
+/// Provides IOVA (I/O Virtual Address) allocation for userspace drivers.
+/// A DmaPool manages a region of the I/O address space and tracks allocations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct DmaPool;
+
+impl private::Sealed for DmaPool {}
+impl CapObjectType for DmaPool {
+    const NAME: &'static str = "DmaPool";
+    const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
+}
+
+/// SMMU control capability.
+///
+/// Root authority to manage the SMMU (System Memory Management Unit).
+/// There is one SmmuControl capability per SMMU in the system,
+/// given to the root task at boot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SmmuControl;
+
+impl private::Sealed for SmmuControl {}
+impl CapObjectType for SmmuControl {
+    const NAME: &'static str = "SmmuControl";
     const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
 }
 

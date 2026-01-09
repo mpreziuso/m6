@@ -17,6 +17,7 @@
 
 pub mod cap_ops;
 pub mod error;
+pub mod iommu_ops;
 pub mod numbers;
 
 use m6_arch::exceptions::ExceptionContext;
@@ -164,6 +165,16 @@ fn dispatch_syscall(
         Syscall::IrqAck => todo_syscall("IrqAck"),
         Syscall::IrqSetHandler => todo_syscall("IrqSetHandler"),
         Syscall::IrqClearHandler => todo_syscall("IrqClearHandler"),
+
+        // IOMMU operations
+        Syscall::IOSpaceCreate => iommu_ops::handle_iospace_create(args),
+        Syscall::IOSpaceMapFrame => iommu_ops::handle_iospace_map_frame(args),
+        Syscall::IOSpaceUnmapFrame => iommu_ops::handle_iospace_unmap_frame(args),
+        Syscall::IOSpaceBindStream => iommu_ops::handle_iospace_bind_stream(args),
+        Syscall::IOSpaceUnbindStream => iommu_ops::handle_iospace_unbind_stream(args),
+        Syscall::DmaPoolCreate => iommu_ops::handle_dma_pool_create(args),
+        Syscall::DmaPoolAlloc => iommu_ops::handle_dma_pool_alloc(args),
+        Syscall::DmaPoolFree => iommu_ops::handle_dma_pool_free(args),
 
         // Debug syscall
         Syscall::DebugPutChar => {
