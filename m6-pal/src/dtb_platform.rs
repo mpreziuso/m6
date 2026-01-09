@@ -61,6 +61,10 @@ impl Platform for DtbPlatform {
         self.gic_redistributor_base
     }
 
+    fn gic_version(&self) -> GicVersion {
+        self.gic_version
+    }
+
     fn timer_irq(&self) -> u32 {
         self.timer_irq
     }

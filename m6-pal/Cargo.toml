@@ -12,4 +12,5 @@ once_cell_no_std = { workspace = true }
 spin = { workspace = true }
 aarch64-cpu = { workspace = true }
 tock-registers = { workspace = true }
+arm-gic = { workspace = true }
 fdt = "0.1"

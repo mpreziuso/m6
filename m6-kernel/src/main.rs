@@ -7,11 +7,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use core::panic::PanicInfo;
-use m6_arch::cpu;
+use m6_arch::{cpu, exceptions};
 use m6_common::boot::BootInfo;
 use m6_kernel::logging::logger;
 use m6_kernel::memory;
-use m6_pal::{console, platform, timer};
+use m6_pal::{console, gic, platform, timer};
 
 
 /// Panic handler for the kernel
@@ -56,6 +56,38 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
         memory::init_memory_from_boot_info(boot_info);
     }
 
+    // Initialise exception vectors
+    exceptions::init();
+    log::info!(
+        "Exception vectors installed at {:#x}",
+        exceptions::vector_table_address()
+    );
+
+    // Initialise GIC with kernel virtual address from bootloader
+    // SAFETY: Called once during init, gic_virt_base is valid kernel-mapped address
+    unsafe {
+        gic::init(boot_info.gic_virt_base.0);
+    }
+    log::info!("GIC initialised");
+
+    // Set up timer IRQ
+    let timer_irq = platform::platform().timer_irq();
+    gic::register_handler(timer_irq, timer_irq_handler);
+    gic::set_priority(timer_irq, 0x80);
+    gic::enable_irq(timer_irq);
+    log::info!("Timer IRQ {} enabled", timer_irq);
+
+    // Register IRQ dispatcher with exception system
+    exceptions::set_irq_handler(irq_handler);
+
+    // Enable IRQs at CPU level
+    gic::irq_enable();
+
+    // Arm the timer
+    timer::set_timer_ms(10);
+
+    log::info!("Entering idle loop with interrupts enabled");
+
     loop {
         cpu::wait_for_interrupt();
     }
@@ -76,4 +108,22 @@ fn print_banner() {
     console::puts("\n");
     console::puts(" m6 - version 0.1.0\n");
     console::puts("\n");
+}
+
+
+/// Main IRQ handler called from exception vector
+fn irq_handler(_ctx: &mut exceptions::ExceptionContext) {
+    gic::dispatch_irq();
+}
+
+
+/// Timer interrupt handler
+fn timer_irq_handler(_intid: u32) {
+    // Clear the timer interrupt
+    timer::clear_timer();
+
+    // Re-arm for 10ms tick
+    timer::set_timer_ms(10);
+
+    // TODO: Process sleeping tasks that need to be woken
 }

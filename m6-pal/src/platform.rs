@@ -23,6 +23,9 @@ pub trait Platform: Send + Sync {
     /// Get the GIC redistributor base address (for GICv3+)
     fn gic_redistributor_base(&self) -> u64;
 
+    /// Get the GIC version detected from DTB
+    fn gic_version(&self) -> crate::dtb_platform::GicVersion;
+
     /// Get the timer IRQ number
     fn timer_irq(&self) -> u32;
 

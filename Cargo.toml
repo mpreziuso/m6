@@ -17,6 +17,7 @@ m6-pal = { path = "m6-pal" }
 
 # External dependencies
 aarch64-cpu = "11.2.0"
+arm-gic = "0.7"
 spin = { version = "0.10", default-features = false, features = [
     "mutex",
     "spin_mutex",
