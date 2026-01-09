@@ -28,5 +28,7 @@
 
 #![feature(alloc_error_handler)]
 
+pub mod cap;
 pub mod logging;
 pub mod memory;
+pub mod syscall;

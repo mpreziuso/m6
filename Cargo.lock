@@ -111,6 +111,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "m6-cap"
+version = "0.1.0"
+dependencies = [
+ "m6-common",
+]
+
+[[package]]
 name = "m6-common"
 version = "0.1.0"
 
@@ -121,6 +128,7 @@ dependencies = [
  "buddy_system_allocator",
  "log",
  "m6-arch",
+ "m6-cap",
  "m6-common",
  "m6-paging",
  "m6-pal",

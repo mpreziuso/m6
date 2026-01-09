@@ -126,4 +126,11 @@ fn timer_irq_handler(_intid: u32) {
     timer::set_timer_ms(10);
 
     // TODO: Process sleeping tasks that need to be woken
+    // sched::sleep::process_wakeups();
+
+    // TODO: Process expired Timer kernel objects
+    // sched::timer_queue::process_timer_expirations();
+
+    // TODO: Request reschedule
+    // sched::request_reschedule();
 }
