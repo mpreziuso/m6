@@ -31,6 +31,7 @@
 //! - Recv/NBRecv/Wait/Poll require READ right
 //! - Call requires WRITE + GRANT_REPLY rights
 
+pub mod cap_transfer;
 pub mod endpoint;
 pub mod fault;
 pub mod message;

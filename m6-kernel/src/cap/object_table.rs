@@ -20,9 +20,9 @@ use m6_arch::IrqSpinMutex;
 use m6_cap::{
     ObjectRef,
     objects::{
-        DmaPoolObject, EndpointObject, FrameObject, IOSpaceObject, IrqControlObject,
-        IrqHandlerObject, NotificationObject, PageTableObject, ReplyObject, SmmuControlObject,
-        UntypedObject, VSpaceObject,
+        AsidPoolObject, DmaPoolObject, EndpointObject, FrameObject, IOSpaceObject,
+        IrqControlObject, IrqHandlerObject, NotificationObject, PageTableObject, ReplyObject,
+        SmmuControlObject, UntypedObject, VSpaceObject,
     },
 };
 use spin::Once;
@@ -118,6 +118,8 @@ pub union KernelObjectData {
     pub irq_control_ptr: *mut IrqControlObject,
     /// Page table metadata.
     pub page_table: ManuallyDrop<PageTableObject>,
+    /// ASID pool pointer (heap-allocated due to large arrays).
+    pub asid_pool_ptr: *mut AsidPoolObject,
 }
 
 // SAFETY: Pointers are only accessed with object table lock held.
@@ -652,6 +654,27 @@ where
         if obj.obj_type == KernelObjectType::VSpace {
             // SAFETY: We verified the object type, so vspace is the active variant.
             return Some(f(unsafe { &obj.data.vspace }));
+        }
+    }
+    None
+}
+
+/// Access an ASID pool with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the ASID pool.
+/// Does nothing if the object is not a valid ASID pool.
+pub fn with_asid_pool_mut<F, R>(asid_pool_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut AsidPoolObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(asid_pool_ref) {
+        if obj.obj_type == KernelObjectType::AsidPool {
+            let asid_pool_ptr = unsafe { obj.data.asid_pool_ptr };
+            if !asid_pool_ptr.is_null() {
+                // SAFETY: We verified the object type and null checked the pointer.
+                return Some(f(unsafe { &mut *asid_pool_ptr }));
+            }
         }
     }
     None

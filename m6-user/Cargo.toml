@@ -12,3 +12,5 @@ path = "src/main.rs"
 
 [dependencies]
 m6-syscall = { path = "../m6-syscall", features = ["userspace"] }
+m6-cap = { path = "../m6-cap" }
+m6-common = { path = "../m6-common" }

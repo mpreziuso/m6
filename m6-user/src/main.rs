@@ -7,7 +7,9 @@
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod elf;
 mod io;
+pub mod process;
 
 use core::panic::PanicInfo;
 use m6_syscall::{

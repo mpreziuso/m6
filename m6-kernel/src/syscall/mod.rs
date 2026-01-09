@@ -15,6 +15,7 @@
 //! vector routes to [`handle_syscall`], which extracts arguments and
 //! dispatches to the appropriate handler.
 
+pub mod asid_ops;
 pub mod cap_ops;
 pub mod error;
 pub mod iommu_ops;
@@ -154,6 +155,7 @@ fn dispatch_syscall(
         Syscall::MapFrame => mem_ops::handle_map_frame(args),
         Syscall::UnmapFrame => mem_ops::handle_unmap_frame(args),
         Syscall::MapPageTable => mem_ops::handle_map_page_table(args),
+        Syscall::AsidPoolAssign => asid_ops::handle_asid_pool_assign(args),
 
         // TCB operations
         Syscall::TcbConfigure => tcb_ops::handle_tcb_configure(args),
@@ -210,8 +212,11 @@ fn handle_send(args: &SyscallArgs, ctx: &ExceptionContext, blocking: bool) -> Sy
     // Get current task
     let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
 
+    // Check if endpoint has Grant right for capability transfer
+    let has_grant = cap.rights.contains(CapRights::GRANT);
+
     // Perform send
-    match ipc::do_send(current, cap.obj_ref, cap.badge, &msg, blocking) {
+    match ipc::do_send(current, cap.obj_ref, cap.badge, &msg, blocking, has_grant) {
         Ok(_) => Ok(0),
         Err(SyscallError::WouldBlock) if !blocking => Err(SyscallError::WouldBlock),
         Err(e) => Err(e),
@@ -235,8 +240,11 @@ fn handle_recv(
     // Get current task
     let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
 
+    // Check if endpoint has Grant right for capability transfer
+    let has_grant = cap.rights.contains(CapRights::GRANT);
+
     // Perform receive
-    match ipc::do_recv(current, cap.obj_ref, blocking)? {
+    match ipc::do_recv(current, cap.obj_ref, blocking, has_grant)? {
         Some((badge, msg)) => {
             // Message received - write to context
             msg.to_context(ctx);
@@ -266,8 +274,11 @@ fn handle_call(args: &SyscallArgs, ctx: &ExceptionContext) -> SyscallResult {
     // Get current task
     let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
 
+    // Check if endpoint has Grant right for capability transfer
+    let has_grant = cap.rights.contains(CapRights::GRANT);
+
     // Perform call (send + block waiting for reply)
-    ipc::do_call(current, cap.obj_ref, cap.badge, &msg)?;
+    ipc::do_call(current, cap.obj_ref, cap.badge, &msg, has_grant)?;
 
     // Reply will be delivered directly to our context when it arrives
     Ok(0)
@@ -288,8 +299,11 @@ fn handle_reply_recv(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallR
     // Get current task
     let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
 
+    // Check if endpoint has Grant right for capability transfer
+    let has_grant = cap.rights.contains(CapRights::GRANT);
+
     // Reply to previous caller (if any) and receive next message
-    match ipc::do_reply_recv(current, cap.obj_ref, &reply_msg)? {
+    match ipc::do_reply_recv(current, cap.obj_ref, &reply_msg, has_grant)? {
         Some((badge, msg)) => {
             msg.to_context(ctx);
             ctx.gpr[6] = badge;

@@ -168,6 +168,8 @@ version = "0.1.0"
 name = "m6-user"
 version = "0.1.0"
 dependencies = [
+ "m6-cap",
+ "m6-common",
  "m6-syscall",
 ]
 

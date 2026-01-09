@@ -11,6 +11,7 @@
 
 use crate::error::{SyscallResult, check_result};
 use crate::numbers::Syscall;
+use crate::IpcBuffer;
 
 /// Raw syscall with 0 arguments.
 #[inline]
@@ -407,4 +408,271 @@ pub fn cap_mutate(cnode: u64, index: u64, depth: u64, new_rights: u64) -> Syscal
 #[inline]
 pub fn cap_rotate(cnode: u64, slot1: u64, slot2: u64, slot3: u64, depth: u64) -> SyscallResult {
     check_result(syscall5(Syscall::CapRotate, cnode, slot1, slot2, slot3, depth))
+}
+
+// -- Memory Operations
+
+/// Retype untyped memory into new kernel objects.
+///
+/// Creates typed objects from a region of untyped memory. Multiple objects
+/// can be created in a single call if they fit in the untyped region.
+///
+/// # Arguments
+///
+/// * `untyped` - CPtr to the untyped memory capability
+/// * `object_type` - Type of objects to create (see ObjectType enum)
+/// * `size_bits` - Log2 size for variable-size objects (e.g., CNode radix)
+/// * `dest_cnode` - CPtr to the CNode for new capabilities
+/// * `dest_index` - Starting slot index in the destination CNode
+/// * `count` - Number of objects to create
+///
+/// # Returns
+///
+/// On success, returns the number of objects created.
+#[inline]
+pub fn retype(
+    untyped: u64,
+    object_type: u64,
+    size_bits: u64,
+    dest_cnode: u64,
+    dest_index: u64,
+    count: u64,
+) -> SyscallResult {
+    check_result(syscall6(
+        Syscall::Retype,
+        untyped,
+        object_type,
+        size_bits,
+        dest_cnode,
+        dest_index,
+        count,
+    ))
+}
+
+/// Map a frame into a VSpace.
+///
+/// # Arguments
+///
+/// * `vspace` - CPtr to the VSpace capability
+/// * `frame` - CPtr to the frame capability
+/// * `vaddr` - Virtual address to map at (must be aligned to frame size)
+/// * `rights` - Access rights (bitmap: R=1, W=2, X=4)
+/// * `attr` - Memory attributes (0=normal, 1=device)
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn map_frame(vspace: u64, frame: u64, vaddr: u64, rights: u64, attr: u64) -> SyscallResult {
+    check_result(syscall5(Syscall::MapFrame, vspace, frame, vaddr, rights, attr))
+}
+
+/// Unmap a frame from a VSpace.
+///
+/// # Arguments
+///
+/// * `frame` - CPtr to the frame capability to unmap
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn unmap_frame(frame: u64) -> SyscallResult {
+    check_result(syscall1(Syscall::UnmapFrame, frame))
+}
+
+/// Map a page table into a VSpace.
+///
+/// # Arguments
+///
+/// * `vspace` - CPtr to the VSpace capability
+/// * `page_table` - CPtr to the page table capability
+/// * `vaddr` - Virtual address covered by this page table
+/// * `level` - Page table level (1=L1, 2=L2, 3=L3)
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn map_page_table(vspace: u64, page_table: u64, vaddr: u64, level: u64) -> SyscallResult {
+    check_result(syscall4(Syscall::MapPageTable, vspace, page_table, vaddr, level))
+}
+
+/// Assign an ASID from a pool to a VSpace.
+///
+/// # Arguments
+///
+/// * `asid_pool` - CPtr to the ASID pool capability
+/// * `vspace` - CPtr to the VSpace capability
+///
+/// # Returns
+///
+/// The assigned ASID on success, negative error code on failure.
+#[inline]
+pub fn asid_pool_assign(asid_pool: u64, vspace: u64) -> SyscallResult {
+    check_result(syscall2(Syscall::AsidPoolAssign, asid_pool, vspace))
+}
+
+// -- TCB Operations
+
+/// Configure a TCB with its execution environment.
+///
+/// Sets the CSpace root, VSpace, IPC buffer, and fault endpoint for a TCB.
+/// The TCB must be in the Inactive state.
+///
+/// # Arguments
+///
+/// * `tcb` - CPtr to the TCB capability
+/// * `fault_ep` - CPtr to the fault endpoint (or 0 for none)
+/// * `cspace` - CPtr to the CSpace root CNode
+/// * `vspace` - CPtr to the VSpace
+/// * `ipc_buf_addr` - Virtual address of the IPC buffer
+/// * `ipc_buf_frame` - CPtr to the frame containing the IPC buffer
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn tcb_configure(
+    tcb: u64,
+    fault_ep: u64,
+    cspace: u64,
+    vspace: u64,
+    ipc_buf_addr: u64,
+    ipc_buf_frame: u64,
+) -> SyscallResult {
+    check_result(syscall6(
+        Syscall::TcbConfigure,
+        tcb,
+        fault_ep,
+        cspace,
+        vspace,
+        ipc_buf_addr,
+        ipc_buf_frame,
+    ))
+}
+
+/// Write registers to a TCB.
+///
+/// Sets the initial register state for a TCB. Typically used to set the
+/// program counter (PC) and stack pointer (SP) before resuming a thread.
+///
+/// # Arguments
+///
+/// * `tcb` - CPtr to the TCB capability
+/// * `pc` - Program counter (entry point)
+/// * `sp` - Stack pointer
+/// * `arg0` - Value for x0 register (first argument)
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn tcb_write_registers(tcb: u64, pc: u64, sp: u64, arg0: u64) -> SyscallResult {
+    check_result(syscall4(Syscall::TcbWriteRegisters, tcb, pc, sp, arg0))
+}
+
+/// Resume a TCB, transitioning it to the Running state.
+///
+/// The TCB will be scheduled and begin executing at its configured PC.
+///
+/// # Arguments
+///
+/// * `tcb` - CPtr to the TCB capability
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn tcb_resume(tcb: u64) -> SyscallResult {
+    check_result(syscall1(Syscall::TcbResume, tcb))
+}
+
+/// Suspend a TCB, removing it from the scheduler.
+///
+/// # Arguments
+///
+/// * `tcb` - CPtr to the TCB capability
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn tcb_suspend(tcb: u64) -> SyscallResult {
+    check_result(syscall1(Syscall::TcbSuspend, tcb))
+}
+
+// -- IPC Buffer Helpers
+
+/// Prepare IPC buffer for sending capabilities.
+///
+/// Sets up the IPC buffer to transfer capabilities during the next IPC operation.
+/// The capabilities will be resolved in the sender's CSpace and copied to the
+/// receiver's CSpace (requires Grant right on the endpoint).
+///
+/// # Arguments
+///
+/// * `cap_slots` - Array of capability slots (CPtrs) to send (max 4)
+///
+/// # Safety
+///
+/// Caller must ensure the IPC buffer is mapped and accessible at the address
+/// configured in the TCB.
+#[cfg(feature = "userspace")]
+pub unsafe fn ipc_set_send_caps(cap_slots: &[u64]) {
+    // SAFETY: Caller ensures IPC buffer is mapped and accessible
+    let ipc_buf = unsafe { IpcBuffer::get_mut() };
+    let count = cap_slots.len().min(4);
+    ipc_buf.extra_caps = count as u8;
+    for (i, &slot) in cap_slots.iter().take(count).enumerate() {
+        ipc_buf.caps_or_badges[i] = slot;
+    }
+}
+
+/// Prepare IPC buffer for receiving capabilities.
+///
+/// Provides hints for where received capabilities should be placed in the
+/// receiver's CSpace. If slots are not empty, the kernel will try to place
+/// capabilities there; otherwise it will find empty slots.
+///
+/// # Arguments
+///
+/// * `dest_slots` - Hint slots where capabilities should be placed (max 4)
+///
+/// # Safety
+///
+/// Caller must ensure the IPC buffer is mapped and accessible.
+#[cfg(feature = "userspace")]
+pub unsafe fn ipc_set_recv_slots(dest_slots: &[u64]) {
+    // SAFETY: Caller ensures IPC buffer is mapped and accessible
+    let ipc_buf = unsafe { IpcBuffer::get_mut() };
+    let count = dest_slots.len().min(4);
+    for (i, &slot) in dest_slots.iter().take(count).enumerate() {
+        ipc_buf.caps_or_badges[i] = slot;
+    }
+}
+
+/// Get received capability slots after IPC.
+///
+/// Returns the slots where capabilities were placed in the receiver's CSpace.
+/// The number of valid slots is indicated by `recv_extra_caps` field.
+///
+/// # Returns
+///
+/// Array of capability slots where capabilities were placed. Check
+/// `IpcBuffer::get().recv_extra_caps` to see how many are valid.
+///
+/// # Safety
+///
+/// Caller must ensure the IPC buffer is mapped and accessible.
+#[cfg(feature = "userspace")]
+pub unsafe fn ipc_get_recv_caps() -> [u64; 4] {
+    // SAFETY: Caller ensures IPC buffer is mapped and accessible
+    let ipc_buf = unsafe { IpcBuffer::get() };
+    let mut caps = [0u64; 4];
+    let count = ipc_buf.recv_extra_caps as usize;
+    for i in 0..count.min(4) {
+        caps[i] = ipc_buf.caps_or_badges[i];
+    }
+    caps
 }

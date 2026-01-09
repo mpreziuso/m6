@@ -35,6 +35,7 @@ pub fn do_send(
     badge: u64,
     msg: &IpcMessage,
     blocking: bool,
+    has_grant: bool,
 ) -> Result<bool, SyscallError> {
     object_table::with_endpoint_mut(ep_ref, |endpoint| {
         match endpoint.state {
@@ -46,6 +47,13 @@ pub fn do_send(
                 // Update endpoint state
                 if endpoint.queue_head.is_null() {
                     endpoint.state = EndpointState::Idle;
+                }
+
+                // Transfer capabilities if Grant right present
+                if let Err(e) = super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant) {
+                    // If capability transfer fails, we still deliver the message
+                    // but log the error. The receiver will see 0 capabilities transferred.
+                    log::debug!("Capability transfer failed during send: {:?}", e);
                 }
 
                 // Transfer message to receiver
@@ -97,6 +105,7 @@ pub fn do_recv(
     receiver_ref: ObjectRef,
     ep_ref: ObjectRef,
     blocking: bool,
+    has_grant: bool,
 ) -> Result<Option<(u64, IpcMessage)>, SyscallError> {
     object_table::with_endpoint_mut(ep_ref, |endpoint| {
         match endpoint.state {
@@ -108,6 +117,12 @@ pub fn do_recv(
                 // Update endpoint state
                 if endpoint.queue_head.is_null() {
                     endpoint.state = EndpointState::Idle;
+                }
+
+                // Transfer capabilities if Grant right present
+                if let Err(e) = super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant) {
+                    // If capability transfer fails, we still deliver the message
+                    log::debug!("Capability transfer failed during recv: {:?}", e);
                 }
 
                 // Get pending message from sender
@@ -165,6 +180,7 @@ pub fn do_call(
     ep_ref: ObjectRef,
     badge: u64,
     msg: &IpcMessage,
+    has_grant: bool,
 ) -> Result<bool, SyscallError> {
     // Create Reply object
     let reply_ref = create_reply_object(caller_ref)?;
@@ -183,6 +199,11 @@ pub fn do_call(
 
                 if endpoint.queue_head.is_null() {
                     endpoint.state = EndpointState::Idle;
+                }
+
+                // Transfer capabilities if Grant right present
+                if let Err(e) = super::cap_transfer::transfer_capabilities(caller_ref, receiver_ref, has_grant) {
+                    log::debug!("Capability transfer failed during call: {:?}", e);
                 }
 
                 // Transfer message to receiver
@@ -237,6 +258,7 @@ pub fn do_reply_recv(
     server_ref: ObjectRef,
     ep_ref: ObjectRef,
     reply_msg: &IpcMessage,
+    has_grant: bool,
 ) -> Result<Option<(u64, IpcMessage)>, SyscallError> {
     // First, reply to any waiting caller
     let reply_ref: ObjectRef = object_table::with_tcb(server_ref, |tcb| tcb.tcb.caller);
@@ -251,7 +273,7 @@ pub fn do_reply_recv(
     }
 
     // Then receive on endpoint
-    do_recv(server_ref, ep_ref, true)
+    do_recv(server_ref, ep_ref, true, has_grant)
 }
 
 /// Internal reply operation using Reply capability.
