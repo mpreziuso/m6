@@ -1,12 +1,24 @@
 .PHONY: clean check clippy run debug fmt fmt-check
 
-all: boot kernel
+all: boot kernel initrd
 
 boot:
-	cargo build --package m6-boot --target aarch64-unknown-uefi
+	cargo build --package m6-boot --target aarch64-unknown-uefi --release
 
 kernel:
-	cargo build --package m6-kernel --target aarch64-unknown-none
+	cargo build --package m6-kernel --target aarch64-unknown-none --release
+
+user:
+	cargo build --package m6-user --target aarch64-unknown-none --release
+
+initrd: user
+	@mkdir -p target/initrd
+	cd target/aarch64-unknown-none/release && \
+		tar --format=ustar -cf ../../../target/initrd/INITRD init
+	@echo "Created initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
+	@echo "Contents:"
+	@tar -tvf target/initrd/INITRD
+
 
 clean:
 	cargo clean

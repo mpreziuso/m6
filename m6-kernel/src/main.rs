@@ -120,11 +120,53 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
     // Enable IRQs at CPU level
     gic::irq_enable();
 
+    // Bootstrap root task from initrd
+    match m6_kernel::cap::bootstrap::bootstrap_root_task_from_initrd(boot_info) {
+        Ok(root_task) => {
+            log::info!(
+                "Root task bootstrapped: entry={:#x} caps={}",
+                root_task.entry_point,
+                root_task.cap_count
+            );
+            // Add root task to the scheduler's run queue
+            m6_kernel::sched::insert_task(root_task.tcb_ref);
+        }
+        Err(e) => {
+            log::error!("Failed to bootstrap root task: {:?}", e);
+            log::warn!("Continuing without root task (kernel-only mode)");
+        }
+    }
+
     // Arm the timer
     timer::set_timer_ms(10);
 
-    log::info!("Entering idle loop with interrupts enabled");
+    log::info!("Entering scheduler");
 
+    // Pick the first task to run (root task if bootstrapped, otherwise idle)
+    m6_kernel::sched::schedule();
+
+    // Check if we have a real user task to run (not just idle)
+    if let Some(tcb_ref) = m6_kernel::sched::current_task() {
+        // Check if this is a user task (has a VSpace)
+        let has_vspace = m6_kernel::cap::object_table::with_object(tcb_ref, |obj| {
+            if obj.obj_type == m6_kernel::cap::object_table::KernelObjectType::Tcb {
+                // SAFETY: We verified this is a TCB.
+                let tcb = unsafe { &*obj.data.tcb_ptr };
+                tcb.tcb.vspace.is_valid()
+            } else {
+                false
+            }
+        }).unwrap_or(false);
+
+        if has_vspace {
+            log::info!("Entering userspace for root task");
+            // This doesn't return - jumps to userspace via eret
+            m6_kernel::sched::enter_userspace();
+        }
+    }
+
+    // Fallback: run idle loop if no user task
+    log::info!("No user task, entering idle loop");
     loop {
         cpu::wait_for_interrupt();
     }

@@ -20,10 +20,13 @@ pub mod numbers;
 
 use m6_arch::exceptions::ExceptionContext;
 use m6_arch::registers::{esr, spsr};
+use m6_cap::{CapRights, ObjectType};
 use m6_pal::console;
 
 use error::{SyscallError, SyscallResult, to_return_value};
 use numbers::Syscall;
+
+use crate::ipc::{self, IpcMessage};
 
 /// Handle a syscall from userspace.
 ///
@@ -73,7 +76,7 @@ pub struct SyscallArgs {
 fn dispatch_syscall(
     num: u64,
     args: &SyscallArgs,
-    _ctx: &mut ExceptionContext,
+    ctx: &mut ExceptionContext,
 ) -> SyscallResult {
     let syscall = match Syscall::from_number(num) {
         Some(s) => s,
@@ -92,22 +95,42 @@ fn dispatch_syscall(
     );
 
     match syscall {
-        // IPC operations (stubs for now)
-        Syscall::Send => todo_syscall("Send"),
-        Syscall::Recv => todo_syscall("Recv"),
-        Syscall::Call => todo_syscall("Call"),
-        Syscall::ReplyRecv => todo_syscall("ReplyRecv"),
-        Syscall::NBSend => todo_syscall("NBSend"),
-        Syscall::NBRecv => todo_syscall("NBRecv"),
+        // IPC operations
+        Syscall::Send => handle_send(args, ctx, true),
+        Syscall::Recv => handle_recv(args, ctx, true),
+        Syscall::Call => handle_call(args, ctx),
+        Syscall::ReplyRecv => handle_reply_recv(args, ctx),
+        Syscall::NBSend => handle_send(args, ctx, false),
+        Syscall::NBRecv => handle_recv(args, ctx, false),
         Syscall::Yield => {
-            // TODO: Yield to scheduler
+            // Check if there's another task to run
+            let dominated = {
+                let current = crate::sched::current_task();
+                let cpu_id = 0; // TODO: get actual CPU ID
+                let sched_state = crate::sched::get_sched_state();
+                let sched = sched_state[cpu_id].lock();
+                let next = crate::sched::eevdf::find_next_runnable(&sched);
+                next.is_none() || next == current
+            };
+
+            if dominated {
+                // No other task - wait for interrupt before returning
+                // This prevents busy-looping when we're the only task
+                // Must enable interrupts first or WFI returns immediately
+                m6_arch::cpu::enable_interrupts();
+                m6_arch::wait_for_interrupt();
+                // Note: interrupt handler will run, then we continue here
+            }
+
+            // Yield to scheduler
+            crate::sched::yield_current();
             Ok(0)
         }
 
-        // Notification operations (stubs)
-        Syscall::Signal => todo_syscall("Signal"),
-        Syscall::Wait => todo_syscall("Wait"),
-        Syscall::Poll => todo_syscall("Poll"),
+        // Notification operations
+        Syscall::Signal => handle_signal(args),
+        Syscall::Wait => handle_wait(args, ctx),
+        Syscall::Poll => handle_poll(args, ctx),
 
         // Capability operations (stubs)
         Syscall::CapCopy => todo_syscall("CapCopy"),
@@ -154,6 +177,172 @@ fn dispatch_syscall(
 fn todo_syscall(name: &str) -> SyscallResult {
     log::warn!("Syscall {} not yet implemented", name);
     Err(SyscallError::NotSupported)
+}
+
+// -- IPC syscall handlers
+
+/// Handle Send/NBSend syscall.
+///
+/// x0: endpoint capability pointer
+/// x1-x5: message payload
+fn handle_send(args: &SyscallArgs, ctx: &ExceptionContext, blocking: bool) -> SyscallResult {
+    let cptr = args.arg0;
+    let msg = IpcMessage::from_context(ctx);
+
+    // Look up endpoint capability with WRITE right
+    let cap = ipc::lookup_cap(cptr, ObjectType::Endpoint, CapRights::WRITE)?;
+
+    // Get current task
+    let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
+
+    // Perform send
+    match ipc::do_send(current, cap.obj_ref, cap.badge, &msg, blocking) {
+        Ok(_) => Ok(0),
+        Err(SyscallError::WouldBlock) if !blocking => Err(SyscallError::WouldBlock),
+        Err(e) => Err(e),
+    }
+}
+
+/// Handle Recv/NBRecv syscall.
+///
+/// x0: endpoint capability pointer
+/// Returns: x0-x5 = message, x6 = badge
+fn handle_recv(
+    args: &SyscallArgs,
+    ctx: &mut ExceptionContext,
+    blocking: bool,
+) -> SyscallResult {
+    let cptr = args.arg0;
+
+    // Look up endpoint capability with READ right
+    let cap = ipc::lookup_cap(cptr, ObjectType::Endpoint, CapRights::READ)?;
+
+    // Get current task
+    let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
+
+    // Perform receive
+    match ipc::do_recv(current, cap.obj_ref, blocking)? {
+        Some((badge, msg)) => {
+            // Message received - write to context
+            msg.to_context(ctx);
+            ctx.gpr[6] = badge;
+            Ok(0)
+        }
+        None => {
+            // Blocked - will be delivered when sender arrives
+            Ok(0)
+        }
+    }
+}
+
+/// Handle Call syscall (Send + wait for reply).
+///
+/// x0: endpoint capability pointer
+/// x1-x5: message payload
+/// Returns: x0-x5 = reply message
+fn handle_call(args: &SyscallArgs, ctx: &ExceptionContext) -> SyscallResult {
+    let cptr = args.arg0;
+    let msg = IpcMessage::from_context(ctx);
+
+    // Look up endpoint with WRITE + GRANT_REPLY rights
+    let required = CapRights::WRITE | CapRights::GRANT_REPLY;
+    let cap = ipc::lookup_cap(cptr, ObjectType::Endpoint, required)?;
+
+    // Get current task
+    let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
+
+    // Perform call (send + block waiting for reply)
+    ipc::do_call(current, cap.obj_ref, cap.badge, &msg)?;
+
+    // Reply will be delivered directly to our context when it arrives
+    Ok(0)
+}
+
+/// Handle ReplyRecv syscall.
+///
+/// x0: endpoint capability pointer
+/// x1-x5: reply message payload
+/// Returns: x0-x5 = new request message, x6 = badge
+fn handle_reply_recv(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallResult {
+    let cptr = args.arg0;
+    let reply_msg = IpcMessage::from_context(ctx);
+
+    // Look up endpoint with READ + WRITE rights
+    let cap = ipc::lookup_cap(cptr, ObjectType::Endpoint, CapRights::RW)?;
+
+    // Get current task
+    let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
+
+    // Reply to previous caller (if any) and receive next message
+    match ipc::do_reply_recv(current, cap.obj_ref, &reply_msg)? {
+        Some((badge, msg)) => {
+            msg.to_context(ctx);
+            ctx.gpr[6] = badge;
+            Ok(0)
+        }
+        None => {
+            // Blocked waiting for next request
+            Ok(0)
+        }
+    }
+}
+
+/// Handle Signal syscall.
+///
+/// x0: notification capability pointer
+fn handle_signal(args: &SyscallArgs) -> SyscallResult {
+    let cptr = args.arg0;
+
+    // Look up notification with WRITE right
+    let cap = ipc::lookup_cap(cptr, ObjectType::Notification, CapRights::WRITE)?;
+
+    // Perform signal
+    ipc::do_signal(cap.obj_ref, cap.badge)?;
+
+    Ok(0)
+}
+
+/// Handle Wait syscall.
+///
+/// x0: notification capability pointer
+/// Returns: x0 = signal word
+fn handle_wait(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallResult {
+    let cptr = args.arg0;
+
+    // Look up notification with READ right
+    let cap = ipc::lookup_cap(cptr, ObjectType::Notification, CapRights::READ)?;
+
+    // Get current task
+    let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
+
+    // Perform wait
+    match ipc::do_wait(current, cap.obj_ref)? {
+        Some(word) => {
+            ctx.gpr[0] = word;
+            Ok(0)
+        }
+        None => {
+            // Blocked - signal word will be delivered when we're woken
+            Ok(0)
+        }
+    }
+}
+
+/// Handle Poll syscall.
+///
+/// x0: notification capability pointer
+/// Returns: x0 = signal word (0 if no signals)
+fn handle_poll(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallResult {
+    let cptr = args.arg0;
+
+    // Look up notification with READ right
+    let cap = ipc::lookup_cap(cptr, ObjectType::Notification, CapRights::READ)?;
+
+    // Perform poll
+    let word = ipc::do_poll(cap.obj_ref)?;
+    ctx.gpr[0] = word;
+
+    Ok(0)
 }
 
 /// Install the syscall handler.
@@ -301,7 +490,15 @@ fn sync_exception_handler(ctx: &mut ExceptionContext) {
         esr::ec::SVC_AARCH64 => {
             if ctx.from_el0() {
                 handle_syscall(ctx);
-                crate::sched::dispatch::dispatch_task(ctx);
+                // Check if we need to reschedule (yield was called or timer requested it)
+                if crate::sched::reschedule_pending() {
+                    // Save current context (including syscall return value) before switching
+                    if let Some(tcb_ref) = crate::sched::current_task() {
+                        crate::sched::dispatch::save_context(tcb_ref, ctx);
+                    }
+                    crate::sched::dispatch::dispatch_task(ctx);
+                }
+                // Otherwise, just return to the same task with the syscall result
             } else {
                 dump_exception_context(ctx);
                 panic!("SVC from kernel mode is not supported");

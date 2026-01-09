@@ -51,9 +51,7 @@ const _: () = assert!(
     "L2 block size must be 2MB"
 );
 
-// ============================================================================
-// Physical-to-Virtual Address Translation
-// ============================================================================
+// -- Physical-to-Virtual Address Translation
 
 /// Physical-to-virtual offset (initialised once during kernel init).
 ///

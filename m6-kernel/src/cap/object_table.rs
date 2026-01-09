@@ -358,3 +358,104 @@ where
     let mut table = get_table().lock();
     table.get_mut(obj_ref).map(f)
 }
+
+/// Access a TCB with a closure (read-only).
+///
+/// Returns the result of the closure, or the default value if the object
+/// is not a valid TCB.
+pub fn with_tcb<F, R>(tcb_ref: ObjectRef, f: F) -> R
+where
+    F: FnOnce(&TcbFull) -> R,
+    R: Default,
+{
+    let table = get_table().lock();
+    if let Some(obj) = table.get(tcb_ref) {
+        if obj.obj_type == KernelObjectType::Tcb {
+            // SAFETY: We verified the object type, so tcb_ptr is the active variant.
+            let tcb_ptr = unsafe { obj.data.tcb_ptr };
+            if !tcb_ptr.is_null() {
+                // SAFETY: The TCB was allocated by TcbFull::alloc and is valid.
+                return f(unsafe { &*tcb_ptr });
+            }
+        }
+    }
+    R::default()
+}
+
+/// Access a TCB with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the TCB.
+/// Returns the result of the closure, or default if not a valid TCB.
+pub fn with_tcb_mut<F, R>(tcb_ref: ObjectRef, f: F) -> R
+where
+    F: FnOnce(&mut TcbFull) -> R,
+    R: Default,
+{
+    let table = get_table().lock();
+    if let Some(obj) = table.get(tcb_ref) {
+        if obj.obj_type == KernelObjectType::Tcb {
+            // SAFETY: We verified the object type, so tcb_ptr is the active variant.
+            let tcb_ptr = unsafe { obj.data.tcb_ptr };
+            if !tcb_ptr.is_null() {
+                // SAFETY: The TCB was allocated by TcbFull::alloc and is valid.
+                // We hold the object table lock so no concurrent access.
+                return f(unsafe { &mut *tcb_ptr });
+            }
+        }
+    }
+    R::default()
+}
+
+/// Access an endpoint with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the endpoint.
+/// Does nothing if the object is not a valid endpoint.
+pub fn with_endpoint_mut<F, R>(ep_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut EndpointObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(ep_ref) {
+        if obj.obj_type == KernelObjectType::Endpoint {
+            // SAFETY: We verified the object type, so endpoint is the active variant.
+            return Some(f(unsafe { &mut obj.data.endpoint }));
+        }
+    }
+    None
+}
+
+/// Access a notification with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the notification.
+/// Does nothing if the object is not a valid notification.
+pub fn with_notification_mut<F, R>(notif_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut NotificationObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(notif_ref) {
+        if obj.obj_type == KernelObjectType::Notification {
+            // SAFETY: We verified the object type, so notification is the active variant.
+            return Some(f(unsafe { &mut obj.data.notification }));
+        }
+    }
+    None
+}
+
+/// Access a reply object with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the reply object.
+/// Does nothing if the object is not a valid reply.
+pub fn with_reply_mut<F, R>(reply_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut ReplyObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(reply_ref) {
+        if obj.obj_type == KernelObjectType::Reply {
+            // SAFETY: We verified the object type, so reply is the active variant.
+            return Some(f(unsafe { &mut obj.data.reply }));
+        }
+    }
+    None
+}

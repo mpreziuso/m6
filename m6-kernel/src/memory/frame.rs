@@ -8,9 +8,7 @@ use m6_common::memory::{page, MemoryMap};
 
 use super::translate::{phys_to_virt, phys_to_virt_checked};
 
-// ============================================================================
-// Alignment Helpers
-// ============================================================================
+// -- Alignment Helpers
 
 /// Align value up to the given power-of-two alignment
 #[inline]
@@ -24,9 +22,7 @@ const fn align_down(value: u64, align: u64) -> u64 {
     value & !(align - 1)
 }
 
-// ============================================================================
-// Frame Allocator Error Types
-// ============================================================================
+// -- Frame Allocator Error Types
 
 /// Errors that can occur during frame allocation operations
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,9 +46,7 @@ pub enum FrameAllocError {
     ZeroCount,
 }
 
-// ============================================================================
-// Physical Frame Allocator
-// ============================================================================
+// -- Physical Frame Allocator
 
 /// Physical frame allocator using a bitmap.
 ///
@@ -438,9 +432,7 @@ impl FrameAllocator {
     }
 }
 
-// ============================================================================
-// Global Frame Allocator
-// ============================================================================
+// -- Global Frame Allocator
 
 /// Global frame allocator instance.
 /// Uses IrqSpinMutex to prevent deadlock when ISRs need allocation.

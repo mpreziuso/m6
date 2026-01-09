@@ -126,12 +126,14 @@ name = "m6-kernel"
 version = "0.1.0"
 dependencies = [
  "buddy_system_allocator",
+ "elf_rs",
  "log",
  "m6-arch",
  "m6-cap",
  "m6-common",
  "m6-paging",
  "m6-pal",
+ "m6-syscall",
  "spin 0.10.0",
  "thingbuf",
 ]
@@ -156,6 +158,17 @@ dependencies = [
  "once_cell_no_std",
  "spin 0.10.0",
  "tock-registers",
+]
+
+[[package]]
+name = "m6-syscall"
+version = "0.1.0"
+
+[[package]]
+name = "m6-user"
+version = "0.1.0"
+dependencies = [
+ "m6-syscall",
 ]
 
 [[package]]

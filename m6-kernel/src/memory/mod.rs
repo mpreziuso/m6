@@ -41,9 +41,7 @@ pub use translate::{
 };
 pub use layout::virt;
 
-// ============================================================================
-// Dynamic Physical Map Size
-// ============================================================================
+// -- Dynamic Physical Map Size
 
 /// Maximum physical address detected from memory map.
 /// Set during init from BootInfo.max_phys_addr.

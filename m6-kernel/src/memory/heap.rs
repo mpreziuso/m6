@@ -17,16 +17,12 @@ use super::frame::{alloc_frame_zeroed, free_frame};
 use super::layout::virt;
 use super::translate::phys_to_virt;
 
-// ============================================================================
-// Constants
-// ============================================================================
+// -- Constants
 
 /// Minimum heap growth increment (1 MB)
 const HEAP_GROWTH_INCREMENT: usize = 1024 * 1024;
 
-// ============================================================================
-// Global Heap Allocator
-// ============================================================================
+// -- Global Heap Allocator
 
 /// Guard against double initialisation of the heap
 static HEAP_INITIALISED: AtomicBool = AtomicBool::new(false);
@@ -64,9 +60,7 @@ pub(super) unsafe fn init_heap(heap_phys: u64, size: usize) {
     );
 }
 
-// ============================================================================
-// Dynamic Kernel Heap
-// ============================================================================
+// -- Dynamic Kernel Heap
 
 /// Errors that can occur during heap growth
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,9 +234,7 @@ pub unsafe fn try_grow_heap(min_size: usize) -> Result<usize, HeapError> {
     unsafe { KERNEL_HEAP.grow(growth) }
 }
 
-// ============================================================================
-// Out-of-Memory Handler
-// ============================================================================
+// -- Out-of-Memory Handler
 
 /// Out-of-memory handler for the global allocator.
 ///

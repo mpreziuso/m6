@@ -295,12 +295,10 @@ extern "C" fn handle_serror(ctx: &mut ExceptionContext) {
     handler(ctx);
 }
 
-// ============================================================================
-// Exception continuation handlers
+// -- Exception continuation handlers
 //
 // These are called from exception_stub after context is saved.
 // They call the Rust handler, restore context, and return via eret.
-// ============================================================================
 
 /// Synchronous exception continuation handler
 #[unsafe(naked)]

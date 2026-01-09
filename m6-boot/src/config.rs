@@ -28,9 +28,8 @@ pub const MAX_INITRD_SIZE: usize = 64 * 1024 * 1024; // 64 MB
 /// BootInfo allocation size
 pub const BOOT_INFO_SIZE: usize = 4096;
 
-// ============= Kernel MMIO Virtual Addresses =============
-// These are mapped in TTBR1 (kernel space) so the kernel can access
-// hardware devices without per-process TTBR0 mappings.
+// -- These are mapped in TTBR1 (kernel space) so the kernel can access
+// -- hardware devices without per-process TTBR0 mappings.
 
 /// Base address for kernel MMIO region in high-half kernel space
 /// Using the last 256MB of the 48-bit kernel VA space
@@ -46,9 +45,8 @@ pub const KERNEL_UART_VIRT: u64 = KERNEL_MMIO_BASE + 0x0100_0000; // 16MB offset
 /// Size of UART mapping
 pub const KERNEL_UART_SIZE: usize = 0x0001_0000; // 64KB
 
-// ============= Direct Physical Map =============
-// A direct mapping of all physical RAM into kernel virtual space.
-// This allows the kernel to access any physical address by adding
+// -- A direct mapping of all physical RAM into kernel virtual space.
+// -- This allows the kernel to access any physical address by adding
 // KERNEL_PHYS_MAP_BASE to the physical address.
 //
 // Virtual addresses in this region: PHYS_MAP_BASE + phys_addr

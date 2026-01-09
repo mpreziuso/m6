@@ -16,9 +16,7 @@ use crate::cap::object_table::{self, KernelObjectType};
 use crate::cap::tcb_storage::TcbFull;
 use crate::task::{priority_to_weight, DEFAULT_TIME_SLICE_MS};
 
-// ============================================================================
-// Virtual Clock Management
-// ============================================================================
+// -- Virtual Clock Management
 
 /// Advance the per-CPU virtual clock.
 ///
@@ -50,9 +48,7 @@ pub fn advance_vclock(sched: &mut PerCpuSched) {
     sched.last_update_ticks = now_ticks;
 }
 
-// ============================================================================
-// Task Eligibility
-// ============================================================================
+// -- Task Eligibility
 
 /// Check if a task is eligible to run.
 ///
@@ -88,9 +84,7 @@ pub fn is_runnable(tcb: &TcbFull) -> bool {
     tcb.tcb.state.is_schedulable()
 }
 
-// ============================================================================
-// Task Management
-// ============================================================================
+// -- Task Management
 
 /// Add a task to the run queue.
 ///
@@ -143,9 +137,7 @@ pub fn remove_from_run_queue(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
     }
 }
 
-// ============================================================================
-// Task Selection
-// ============================================================================
+// -- Task Selection
 
 /// Find the next runnable task using EEVDF algorithm.
 ///
@@ -171,9 +163,7 @@ pub fn find_next_runnable(sched: &PerCpuSched) -> Option<ObjectRef> {
     None
 }
 
-// ============================================================================
-// Context Switching
-// ============================================================================
+// -- Context Switching
 
 /// Switch to a new task.
 ///
@@ -231,9 +221,7 @@ pub fn switch_to(sched: &mut PerCpuSched, next: ObjectRef) {
     sched.current_thread = Some(next);
 }
 
-// ============================================================================
-// Time Charging
-// ============================================================================
+// -- Time Charging
 
 /// Charge the current thread for CPU time consumed.
 ///
@@ -273,9 +261,7 @@ pub fn consume_budget(tcb_ref: ObjectRef, _microseconds: u64) {
     // TODO: Update SchedContextObject when storage is implemented
 }
 
-// ============================================================================
-// Preemption
-// ============================================================================
+// -- Preemption
 
 /// Check if preemption should occur.
 ///

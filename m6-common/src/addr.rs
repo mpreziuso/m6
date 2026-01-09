@@ -156,9 +156,7 @@ impl VirtAddr {
     }
 }
 
-// ============================================================================
-// Formatting implementations
-// ============================================================================
+// -- Formatting implementations
 
 impl fmt::Debug for PhysAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -208,9 +206,7 @@ impl fmt::UpperHex for VirtAddr {
     }
 }
 
-// ============================================================================
-// Conversion implementations
-// ============================================================================
+// -- Conversion implementations
 
 impl From<u64> for PhysAddr {
     #[inline]

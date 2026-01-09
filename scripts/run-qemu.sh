@@ -47,14 +47,27 @@ ESP_DIR="$BUILD_DIR/esp"
 mkdir -p "$ESP_DIR/EFI/BOOT"
 mkdir -p "$ESP_DIR/EFI/M6"
 
-# Copy bootloader and kernel
-BOOTLOADER="$BUILD_DIR/aarch64-unknown-uefi/debug/m6-boot.efi"
+# Copy bootloader and kernel (prefer release, fall back to debug)
+BOOTLOADER="$BUILD_DIR/aarch64-unknown-uefi/release/m6-boot.efi"
+if [ ! -f "$BOOTLOADER" ]; then
+    BOOTLOADER="$BUILD_DIR/aarch64-unknown-uefi/debug/m6-boot.efi"
+fi
 cp "$BOOTLOADER" "$ESP_DIR/EFI/BOOT/BOOTAA64.EFI"
 echo "Copied bootloader to ESP"
 
-KERNEL="$BUILD_DIR/aarch64-unknown-none/debug/m6-kernel"
+KERNEL="$BUILD_DIR/aarch64-unknown-none/release/m6-kernel"
+if [ ! -f "$KERNEL" ]; then
+    KERNEL="$BUILD_DIR/aarch64-unknown-none/debug/m6-kernel"
+fi
 cp "$KERNEL" "$ESP_DIR/EFI/M6/KERNEL"
 echo "Copied kernel to ESP"
+
+# Copy initrd if available
+INITRD="$BUILD_DIR/initrd/INITRD"
+if [ -f "$INITRD" ]; then
+    cp "$INITRD" "$ESP_DIR/EFI/M6/INITRD"
+    echo "Copied initrd to ESP"
+fi
 
 # Create FAT filesystem image
 ESP_IMG="$BUILD_DIR/esp.img"

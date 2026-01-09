@@ -29,8 +29,11 @@
 #![feature(alloc_error_handler)]
 
 pub mod cap;
+pub mod initrd;
+pub mod ipc;
 pub mod logging;
 pub mod memory;
 pub mod sched;
 pub mod syscall;
 pub mod task;
+pub mod user;

@@ -32,13 +32,11 @@ pub mod sleep;
 pub mod timer_queue;
 mod context;
 
-pub use context::timer_context_switch;
+pub use context::{timer_context_switch, enter_userspace};
 pub use dispatch::dispatch_task;
 pub use run_queue::RunQueue;
 
-// ============================================================================
-// Constants
-// ============================================================================
+// -- Constants
 
 /// Maximum number of CPUs supported.
 pub const MAX_CPUS: usize = 8;
@@ -54,9 +52,7 @@ pub const VT_ONE: u128 = 1u128 << VT_FIXED_SHIFT;
 /// constant are considered equal.
 pub const VCLOCK_EPSILON: u128 = VT_ONE;
 
-// ============================================================================
-// Reschedule Flag
-// ============================================================================
+// -- Reschedule Flag
 
 /// Flag indicating a reschedule is needed (set by timer interrupt).
 static NEEDS_RESCHEDULE: AtomicBool = AtomicBool::new(false);
@@ -79,9 +75,7 @@ pub fn reschedule_pending() -> bool {
     NEEDS_RESCHEDULE.load(AtomicOrdering::Acquire)
 }
 
-// ============================================================================
-// Per-CPU Scheduler State
-// ============================================================================
+// -- Per-CPU Scheduler State
 
 /// Per-CPU scheduler state.
 pub struct PerCpuSched {
@@ -154,9 +148,7 @@ impl PerCpuSched {
 // SAFETY: PerCpuSched is only accessed with proper synchronisation.
 unsafe impl Send for PerCpuSched {}
 
-// ============================================================================
-// Global Scheduler State
-// ============================================================================
+// -- Global Scheduler State
 
 /// Per-CPU scheduler state array.
 ///
@@ -165,7 +157,7 @@ unsafe impl Send for PerCpuSched {}
 static SCHED_STATE: Once<[IrqSpinMutex<PerCpuSched>; MAX_CPUS]> = Once::new();
 
 /// Get the per-CPU scheduler state array, initialising if necessary.
-fn get_sched_state() -> &'static [IrqSpinMutex<PerCpuSched>; MAX_CPUS] {
+pub fn get_sched_state() -> &'static [IrqSpinMutex<PerCpuSched>; MAX_CPUS] {
     SCHED_STATE.call_once(|| {
         core::array::from_fn(|i| IrqSpinMutex::new(PerCpuSched::new(i)))
     })
@@ -179,9 +171,7 @@ fn current_cpu_id() -> usize {
     0 // Single CPU for now
 }
 
-// ============================================================================
-// Public API
-// ============================================================================
+// -- Public API
 
 /// Initialise the scheduler.
 ///
@@ -224,6 +214,15 @@ pub fn remove_task(tcb_ref: ObjectRef) {
     let mut sched = sched_state[cpu_id].lock();
 
     eevdf::remove_from_run_queue(&mut sched, tcb_ref);
+}
+
+/// Yield the current task's remaining time slice.
+///
+/// The current task remains runnable and the scheduler picks the next
+/// task to run. Note: The syscall handler checks if we're the only task
+/// and waits for an interrupt if so, to avoid busy-looping.
+pub fn yield_current() {
+    request_reschedule();
 }
 
 /// The main scheduling function.
@@ -333,9 +332,7 @@ pub fn should_preempt() -> bool {
     eevdf::should_preempt(&sched)
 }
 
-// ============================================================================
-// Async Work Spawning
-// ============================================================================
+// -- Async Work Spawning
 
 /// Spawn kernel work on the current task.
 ///

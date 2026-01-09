@@ -85,9 +85,7 @@ mod private {
     pub trait Sealed {}
 }
 
-// =============================================================================
-// Memory Objects
-// =============================================================================
+// -- Memory Objects
 
 /// Untyped memory capability.
 ///
@@ -188,9 +186,7 @@ impl CapObjectType for VSpace {
     const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
 }
 
-// =============================================================================
-// ASID Objects
-// =============================================================================
+// -- ASID Objects
 
 /// ASID pool capability.
 ///
@@ -218,9 +214,7 @@ impl CapObjectType for ASIDControl {
     const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
 }
 
-// =============================================================================
-// IPC Objects
-// =============================================================================
+// -- IPC Objects
 
 /// Endpoint capability.
 ///
@@ -275,9 +269,7 @@ impl CapObjectType for Reply {
     const DEFAULT_RIGHTS: CapRights = CapRights::RWG;
 }
 
-// =============================================================================
-// Execution Objects
-// =============================================================================
+// -- Execution Objects
 
 /// CNode (capability node) capability.
 ///
@@ -306,9 +298,7 @@ impl CapObjectType for TCB {
     const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
 }
 
-// =============================================================================
-// System Objects
-// =============================================================================
+// -- System Objects
 
 /// IRQ handler capability.
 ///
@@ -363,9 +353,7 @@ impl CapObjectType for SchedControl {
     const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
 }
 
-// =============================================================================
-// Null Object Type (for untyped CPtrs)
-// =============================================================================
+// -- Null Object Type (for untyped CPtrs)
 
 /// Untyped marker for generic capability pointers.
 ///

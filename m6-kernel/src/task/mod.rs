@@ -14,9 +14,7 @@ use m6_arch::exceptions::ExceptionContext;
 
 pub mod waker;
 
-// ============================================================================
-// Task ID
-// ============================================================================
+// -- Task ID
 
 /// Unique task identifier.
 ///
@@ -69,9 +67,7 @@ impl Default for TaskId {
     }
 }
 
-// ============================================================================
-// Task State
-// ============================================================================
+// -- Task State
 
 /// Task state machine for async dispatch.
 ///
@@ -106,9 +102,7 @@ impl TaskState {
     }
 }
 
-// ============================================================================
-// Task Context (holds futures)
-// ============================================================================
+// -- Task Context (holds futures)
 
 /// Type alias for kernel work future.
 pub type KernelWork = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -209,9 +203,7 @@ impl Default for TaskContext {
     }
 }
 
-// ============================================================================
-// Scheduler Weight Constants
-// ============================================================================
+// -- Scheduler Weight Constants
 
 /// Scheduler base weight to ensure tasks always have a strictly positive
 /// scheduling weight. Added to priority to get effective weight.

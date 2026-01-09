@@ -1,0 +1,20 @@
+[package]
+name = "m6-syscall"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "M6 Microkernel syscall ABI definitions"
+
+[lib]
+name = "m6_syscall"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Enable userspace syscall invocation (requires inline asm)
+userspace = []
+
+[dependencies]
+# No dependencies - must work in both kernel and userspace

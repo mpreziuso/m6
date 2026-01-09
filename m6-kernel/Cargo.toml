@@ -12,8 +12,10 @@ m6-arch = { workspace = true }
 m6-cap = { workspace = true }
 m6-pal = { workspace = true }
 m6-paging = { workspace = true }
+m6-syscall = { workspace = true }
 
 log = { workspace = true }
 spin = { workspace = true }
 thingbuf = { workspace = true }
 buddy_system_allocator = { workspace = true }
+elf_rs = { workspace = true }

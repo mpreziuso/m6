@@ -126,3 +126,97 @@ pub fn switch_to_task(sched: &mut PerCpuSched, tcb_ref: ObjectRef, ctx: &mut Exc
     let vspace_ref = with_tcb(tcb_ref, |tcb| tcb.tcb.vspace);
     switch_vspace(vspace_ref);
 }
+
+/// Enter userspace for the first time.
+///
+/// This function is used during kernel initialisation to jump to the first
+/// userspace task. It performs the initial TTBR0 switch and `eret`.
+///
+/// # Safety
+///
+/// - The current task must have a valid VSpace and context configured
+/// - This function does not return
+pub fn enter_userspace() -> ! {
+    let cpu_id = super::current_cpu_id();
+    let sched_state = super::get_sched_state();
+    let sched = sched_state[cpu_id].lock();
+
+    let tcb_ref = sched.current().expect("No current task to enter");
+
+    // Get the task's VSpace and switch TTBR0
+    let vspace_ref = with_tcb(tcb_ref, |tcb| tcb.tcb.vspace);
+    drop(sched); // Release lock before switching
+
+    switch_vspace(vspace_ref);
+
+    // Get context and perform eret
+    let (elr, sp, spsr, x0) = with_tcb(tcb_ref, |tcb| {
+        (tcb.context.elr, tcb.context.sp, tcb.context.spsr, tcb.context.gpr[0])
+    }).expect("Failed to read task context");
+
+    log::debug!(
+        "Entering userspace: ELR={:#x} SP={:#x} SPSR={:#x} x0={:#x}",
+        elr, sp, spsr, x0
+    );
+
+    // SAFETY: We've set up a valid user context. This function won't return.
+    unsafe {
+        initial_eret(elr, sp, spsr, x0);
+    }
+}
+
+/// Perform the initial eret to userspace.
+///
+/// # Safety
+///
+/// All parameters must form a valid userspace execution context.
+#[inline(never)]
+unsafe fn initial_eret(elr: u64, sp: u64, spsr: u64, x0: u64) -> ! {
+    // SAFETY: Setting up EL0 execution context and performing eret.
+    unsafe {
+        core::arch::asm!(
+            // Set up system registers for return to EL0
+            "msr elr_el1, {elr}",
+            "msr sp_el0, {sp}",
+            "msr spsr_el1, {spsr}",
+            // Clear all other GPRs for security (except x0 which has boot info)
+            "mov x1, #0",
+            "mov x2, #0",
+            "mov x3, #0",
+            "mov x4, #0",
+            "mov x5, #0",
+            "mov x6, #0",
+            "mov x7, #0",
+            "mov x8, #0",
+            "mov x9, #0",
+            "mov x10, #0",
+            "mov x11, #0",
+            "mov x12, #0",
+            "mov x13, #0",
+            "mov x14, #0",
+            "mov x15, #0",
+            "mov x16, #0",
+            "mov x17, #0",
+            "mov x18, #0",
+            "mov x19, #0",
+            "mov x20, #0",
+            "mov x21, #0",
+            "mov x22, #0",
+            "mov x23, #0",
+            "mov x24, #0",
+            "mov x25, #0",
+            "mov x26, #0",
+            "mov x27, #0",
+            "mov x28, #0",
+            "mov x29, #0",
+            "mov x30, #0",
+            // Return to userspace
+            "eret",
+            elr = in(reg) elr,
+            sp = in(reg) sp,
+            spsr = in(reg) spsr,
+            in("x0") x0,
+            options(noreturn)
+        );
+    }
+}

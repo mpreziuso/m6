@@ -157,9 +157,7 @@ pub trait BlockPageMapper: PageTableEntry {
     fn memory_type(self) -> Option<MemoryType>;
 }
 
-// =============================================================================
-// L0 Descriptor - Table only (points to L1)
-// =============================================================================
+// -- L0 Descriptor - Table only (points to L1)
 
 /// L0 table descriptor (512GB per entry, table only)
 #[repr(transparent)]
@@ -225,9 +223,7 @@ impl core::fmt::Debug for L0Descriptor {
     }
 }
 
-// =============================================================================
-// L1 Descriptor - Table or 1GB Block
-// =============================================================================
+// -- L1 Descriptor - Table or 1GB Block
 
 /// L1 descriptor (1GB per entry, table or block)
 #[repr(transparent)]
@@ -420,9 +416,7 @@ impl core::fmt::Debug for L1Descriptor {
     }
 }
 
-// =============================================================================
-// L2 Descriptor - Table or 2MB Block
-// =============================================================================
+// -- L2 Descriptor - Table or 2MB Block
 
 /// L2 descriptor (2MB per entry, table or block)
 #[repr(transparent)]
@@ -601,9 +595,7 @@ impl core::fmt::Debug for L2Descriptor {
     }
 }
 
-// =============================================================================
-// L3 Descriptor - 4KB Page only
-// =============================================================================
+// -- L3 Descriptor - 4KB Page only
 
 /// L3 page descriptor (4KB per entry, page only)
 #[repr(transparent)]
