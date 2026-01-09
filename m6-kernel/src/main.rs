@@ -16,8 +16,34 @@ use m6_pal::{console, gic, platform, timer};
 
 /// Panic handler for the kernel
 #[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    // TODO: Log panic info when we have a logger
+fn panic(info: &PanicInfo) -> ! {
+    // Print panic info if we have a console
+    console::puts("\n\x1b[31m*** KERNEL PANIC ***\x1b[0m\n");
+    if let Some(location) = info.location() {
+        console::puts("  at ");
+        console::puts(location.file());
+        console::puts(":");
+        // Print line number (simple decimal conversion)
+        let line = location.line();
+        let mut buf = [0u8; 10];
+        let mut n = line;
+        let mut i = 0;
+        loop {
+            buf[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+            i += 1;
+            if n == 0 { break; }
+        }
+        for j in (0..i).rev() {
+            console::putc(buf[j]);
+        }
+        console::puts("\n");
+    }
+    if let Some(msg) = info.message().as_str() {
+        console::puts("  ");
+        console::puts(msg);
+        console::puts("\n");
+    }
     loop {
         cpu::halt();
     }
@@ -56,12 +82,23 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
         memory::init_memory_from_boot_info(boot_info);
     }
 
+    // Initialise scheduler
+    m6_kernel::sched::init();
+
+    // Create idle task for CPU 0
+    let idle_ref = m6_kernel::sched::idle::create_idle_task(0)
+        .expect("Failed to create idle task");
+    m6_kernel::sched::init_cpu(0, idle_ref);
+
     // Initialise exception vectors
     exceptions::init();
     log::info!(
         "Exception vectors installed at {:#x}",
         exceptions::vector_table_address()
     );
+
+    // Install syscall handler
+    m6_kernel::syscall::init();
 
     // Initialise GIC with kernel virtual address from bootloader
     // SAFETY: Called once during init, gic_virt_base is valid kernel-mapped address
@@ -112,8 +149,14 @@ fn print_banner() {
 
 
 /// Main IRQ handler called from exception vector
-fn irq_handler(_ctx: &mut exceptions::ExceptionContext) {
+fn irq_handler(ctx: &mut exceptions::ExceptionContext) {
+    // Dispatch to GIC (this calls timer_irq_handler, etc.)
     gic::dispatch_irq();
+
+    // After handling all interrupts, check if we need to reschedule
+    if m6_kernel::sched::should_reschedule() {
+        m6_kernel::sched::timer_context_switch(ctx);
+    }
 }
 
 
@@ -125,12 +168,17 @@ fn timer_irq_handler(_intid: u32) {
     // Re-arm for 10ms tick
     timer::set_timer_ms(10);
 
-    // TODO: Process sleeping tasks that need to be woken
-    // sched::sleep::process_wakeups();
+    // Process sleeping tasks that need to be woken
+    m6_kernel::sched::sleep::process_wakeups();
 
-    // TODO: Process expired Timer kernel objects
-    // sched::timer_queue::process_timer_expirations();
+    // Process expired Timer kernel objects
+    m6_kernel::sched::timer_queue::process_expirations();
 
-    // TODO: Request reschedule
-    // sched::request_reschedule();
+    // Charge CPU time to current thread
+    m6_kernel::sched::charge_current_thread();
+
+    // Check if preemption is needed and request reschedule
+    if m6_kernel::sched::should_preempt() {
+        m6_kernel::sched::request_reschedule();
+    }
 }

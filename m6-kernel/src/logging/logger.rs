@@ -126,7 +126,7 @@ pub fn disable_early_console() {
 
 /// Transition from early console to userspace console
 ///
-/// Call this after kernel initialization is complete, right before init runs.
+/// Call this after kernel initialisation is complete, right before init runs.
 /// This disables early console output and resets the log buffer read position
 /// so that init's log drain loop doesn't re-print logs that were already
 /// displayed during early boot.

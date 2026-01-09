@@ -19,7 +19,7 @@ pub mod error;
 pub mod numbers;
 
 use m6_arch::exceptions::ExceptionContext;
-use m6_arch::registers::esr;
+use m6_arch::registers::{esr, spsr};
 use m6_pal::console;
 
 use error::{SyscallError, SyscallResult, to_return_value};
@@ -164,71 +164,236 @@ pub fn init() {
     log::info!("Syscall handler installed");
 }
 
-/// Synchronous exception handler that dispatches syscalls.
+/// ANSI colour codes for terminal output
+mod colour {
+    pub const RED: &str = "\x1b[31m";
+    pub const YELLOW: &str = "\x1b[33m";
+    pub const RESET: &str = "\x1b[0m";
+}
+
+/// Dump full exception context for debugging.
+///
+/// Provides detailed information about the exception state including:
+/// - Exception type and ESR breakdown
+/// - ELR, FAR, and SPSR with decoded fields
+/// - Detailed fault information for abort exceptions
+/// - Full register dump
+fn dump_exception_context(ctx: &ExceptionContext) {
+    let ec = esr::exception_class(ctx.esr);
+    let il = esr::instruction_length(ctx.esr);
+    let iss = esr::iss(ctx.esr);
+
+    // Exception type header
+    console::puts(colour::RED);
+    console::puts("\nException: ");
+    console::puts(esr::ec_name(ec));
+    console::puts(colour::RESET);
+    console::puts("\n\n");
+
+    // ESR breakdown
+    log::error!(
+        "ESR:   {:#018x} [EC={:#04x} IL={} ISS={:#07x}]",
+        ctx.esr,
+        ec,
+        u8::from(il),
+        iss
+    );
+
+    // ELR and FAR
+    log::error!("ELR:   {:#018x}", ctx.elr);
+    log::error!("FAR:   {:#018x}", ctx.far);
+
+    // SPSR with decoded fields
+    let (n, z, c, v) = spsr::nzcv(ctx.spsr);
+    let (d, a, i, f) = spsr::daif(ctx.spsr);
+    log::error!(
+        "SPSR:  {:#018x} [NZCV={}{}{}{} {} D={} A={} I={} F={}]",
+        ctx.spsr,
+        u8::from(n),
+        u8::from(z),
+        u8::from(c),
+        u8::from(v),
+        spsr::el_name(ctx.spsr),
+        u8::from(d),
+        u8::from(a),
+        u8::from(i),
+        u8::from(f)
+    );
+
+    // For abort exceptions, print detailed fault info
+    if matches!(
+        ec,
+        esr::ec::DATA_ABORT_LOWER
+            | esr::ec::DATA_ABORT_SAME
+            | esr::ec::INSTRUCTION_ABORT_LOWER
+            | esr::ec::INSTRUCTION_ABORT_SAME
+    ) {
+        dump_abort_details(ec, iss);
+    }
+
+    // Register dump
+    dump_registers(ctx);
+}
+
+/// Dump detailed abort exception information.
+fn dump_abort_details(ec: u8, iss: u32) {
+    let dfsc = esr::abort::dfsc(iss);
+    let wnr = esr::abort::wnr(iss);
+    let fnv = esr::abort::fnv(iss);
+    let s1ptw = esr::abort::s1ptw(iss);
+    let cm = esr::abort::cm(iss);
+
+    console::puts("\n");
+    console::puts(colour::YELLOW);
+    console::puts("Fault Details:\n");
+    console::puts(colour::RESET);
+
+    log::error!("  Status: {}", esr::abort::dfsc_name(dfsc));
+
+    // Print access type based on exception class
+    if matches!(ec, esr::ec::DATA_ABORT_LOWER | esr::ec::DATA_ABORT_SAME) {
+        log::error!(
+            "  Access: {} | FAR: {}{}{}",
+            if wnr { "Write" } else { "Read" },
+            if fnv { "invalid" } else { "valid" },
+            if s1ptw { " | S1 table walk" } else { "" },
+            if cm { " | cache maintenance" } else { "" }
+        );
+    } else {
+        log::error!(
+            "  Access: Instruction fetch | FAR: {}{}",
+            if fnv { "invalid" } else { "valid" },
+            if s1ptw { " | S1 table walk" } else { "" }
+        );
+    }
+}
+
+/// Dump all general-purpose registers in a formatted layout.
+fn dump_registers(ctx: &ExceptionContext) {
+    console::puts("\n");
+    console::puts(colour::YELLOW);
+    console::puts("Registers:\n");
+    console::puts(colour::RESET);
+
+    // Print GPRs in 2-column format
+    for i in (0..30).step_by(2) {
+        log::error!(
+            "  X{:02}: {:#018x}    X{:02}: {:#018x}",
+            i,
+            ctx.gpr[i],
+            i + 1,
+            ctx.gpr[i + 1]
+        );
+    }
+    log::error!(
+        "  X30: {:#018x}     SP: {:#018x}",
+        ctx.gpr[30],
+        ctx.sp
+    );
+}
+
+/// Synchronous exception handler that dispatches syscalls and handles faults.
 fn sync_exception_handler(ctx: &mut ExceptionContext) {
     let ec = ctx.exception_class();
 
     match ec {
+        // System calls
         esr::ec::SVC_AARCH64 => {
-            // Syscall from EL0
             if ctx.from_el0() {
                 handle_syscall(ctx);
+                crate::sched::dispatch::dispatch_task(ctx);
             } else {
-                // SVC from kernel mode - should not happen in normal operation
-                log::error!("SVC from kernel mode at ELR={:#x}", ctx.elr);
-                panic!("Kernel-mode syscall not supported");
+                dump_exception_context(ctx);
+                panic!("SVC from kernel mode is not supported");
             }
         }
 
+        // Data aborts
         esr::ec::DATA_ABORT_LOWER => {
-            // Data abort from EL0
-            log::error!(
-                "Data abort from user at FAR={:#x}, ELR={:#x}",
-                ctx.far,
-                ctx.elr
-            );
-            // TODO: Deliver fault to fault endpoint
+            dump_exception_context(ctx);
+            // TODO: Deliver fault to thread's fault endpoint
             panic!("Unhandled user data abort");
         }
 
+        esr::ec::DATA_ABORT_SAME => {
+            dump_exception_context(ctx);
+            panic!("Kernel data abort - this is a kernel bug");
+        }
+
+        // Instruction aborts
         esr::ec::INSTRUCTION_ABORT_LOWER => {
-            // Instruction abort from EL0
-            log::error!(
-                "Instruction abort from user at FAR={:#x}, ELR={:#x}",
-                ctx.far,
-                ctx.elr
-            );
-            // TODO: Deliver fault to fault endpoint
+            dump_exception_context(ctx);
+            // TODO: Deliver fault to thread's fault endpoint
             panic!("Unhandled user instruction abort");
         }
 
-        esr::ec::DATA_ABORT_SAME => {
-            // Data abort from kernel
-            log::error!(
-                "Kernel data abort at FAR={:#x}, ELR={:#x}",
-                ctx.far,
-                ctx.elr
-            );
-            panic!("Kernel data abort");
-        }
-
         esr::ec::INSTRUCTION_ABORT_SAME => {
-            // Instruction abort from kernel
-            log::error!(
-                "Kernel instruction abort at FAR={:#x}, ELR={:#x}",
-                ctx.far,
-                ctx.elr
-            );
-            panic!("Kernel instruction abort");
+            dump_exception_context(ctx);
+            panic!("Kernel instruction abort - this is a kernel bug");
         }
 
+        // Alignment faults
+        esr::ec::PC_ALIGNMENT => {
+            dump_exception_context(ctx);
+            panic!("PC alignment fault at {:#x}", ctx.elr);
+        }
+
+        esr::ec::SP_ALIGNMENT => {
+            dump_exception_context(ctx);
+            panic!("SP alignment fault at {:#x}", ctx.elr);
+        }
+
+        // Debug exceptions
+        esr::ec::BRK_AARCH64 => {
+            let imm = esr::iss(ctx.esr) & 0xFFFF;
+            dump_exception_context(ctx);
+            panic!("BRK #{} at {:#x}", imm, ctx.elr);
+        }
+
+        esr::ec::BREAKPOINT_LOWER | esr::ec::BREAKPOINT_SAME => {
+            dump_exception_context(ctx);
+            panic!("Hardware breakpoint at {:#x}", ctx.elr);
+        }
+
+        esr::ec::WATCHPOINT_LOWER | esr::ec::WATCHPOINT_SAME => {
+            dump_exception_context(ctx);
+            panic!("Watchpoint hit, FAR={:#x}", ctx.far);
+        }
+
+        esr::ec::SOFTWARE_STEP_LOWER | esr::ec::SOFTWARE_STEP_SAME => {
+            dump_exception_context(ctx);
+            panic!("Software step exception at {:#x}", ctx.elr);
+        }
+
+        // Other exceptions
+        esr::ec::ILLEGAL_EXECUTION => {
+            dump_exception_context(ctx);
+            panic!("Illegal execution state at {:#x}", ctx.elr);
+        }
+
+        esr::ec::FP_EXCEPTION => {
+            dump_exception_context(ctx);
+            panic!("Floating-point exception at {:#x}", ctx.elr);
+        }
+
+        esr::ec::SVE_SIMD_FP => {
+            dump_exception_context(ctx);
+            panic!("SVE/SIMD/FP access trapped at {:#x}", ctx.elr);
+        }
+
+        esr::ec::UNKNOWN => {
+            dump_exception_context(ctx);
+            panic!("Unknown exception at {:#x}", ctx.elr);
+        }
+
+        // Catch-all
         _ => {
-            log::error!(
-                "Unhandled sync exception EC={:#x} at ELR={:#x}",
-                ec,
-                ctx.elr
+            dump_exception_context(ctx);
+            panic!(
+                "Unhandled synchronous exception: {} (EC={:#04x})",
+                esr::ec_name(ec),
+                ec
             );
-            panic!("Unhandled synchronous exception");
         }
     }
 }

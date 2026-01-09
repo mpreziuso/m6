@@ -12,12 +12,15 @@ use m6_arch::exceptions::ExceptionContext;
 use m6_cap::{CapError, CapResult, ObjectRef};
 use m6_cap::objects::TcbObject;
 
+use crate::task::TaskContext;
+
 /// Full TCB including register context.
 ///
 /// This structure is heap-allocated and contains everything needed
 /// for thread management:
 /// - Basic TCB metadata (from `m6-cap`)
 /// - Register save area (from `m6-arch`)
+/// - EEVDF scheduling fields
 /// - Scheduler queue links
 /// - IPC queue links
 #[repr(C, align(64))]
@@ -28,6 +31,19 @@ pub struct TcbFull {
     pub context: ExceptionContext,
     /// Kernel stack pointer for this thread.
     pub kernel_sp: u64,
+
+    // EEVDF scheduling fields (65.63 fixed-point for virtual time)
+    /// Virtual runtime consumed by this thread.
+    pub v_runtime: u128,
+    /// Virtual time when this thread becomes eligible to run.
+    pub v_eligible: u128,
+    /// Virtual deadline for scheduling decisions.
+    pub v_deadline: u128,
+    /// Tick count when execution started (for time accounting).
+    pub exec_start_ticks: u64,
+    /// Tick count when this thread last ran (tie-breaker).
+    pub last_run_ticks: u64,
+
     /// Next TCB in scheduler run queue.
     pub sched_next: ObjectRef,
     /// Previous TCB in scheduler run queue.
@@ -36,6 +52,9 @@ pub struct TcbFull {
     pub ipc_next: ObjectRef,
     /// Previous TCB in IPC wait queue.
     pub ipc_prev: ObjectRef,
+
+    /// Async work context (signal_work, kernel_work futures).
+    pub task_ctx: TaskContext,
 }
 
 impl TcbFull {
@@ -49,10 +68,19 @@ impl TcbFull {
             // so zeroed memory is a valid representation.
             context: unsafe { core::mem::zeroed() },
             kernel_sp: 0,
+            // EEVDF fields - all start at zero
+            v_runtime: 0,
+            v_eligible: 0,
+            v_deadline: 0,
+            exec_start_ticks: 0,
+            last_run_ticks: 0,
+            // Queue links
             sched_next: ObjectRef::NULL,
             sched_prev: ObjectRef::NULL,
             ipc_next: ObjectRef::NULL,
             ipc_prev: ObjectRef::NULL,
+            // Async work context
+            task_ctx: TaskContext::new(),
         }
     }
 
@@ -63,6 +91,7 @@ impl TcbFull {
         // SAFETY: Layout is valid and non-zero size.
         let ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
         if ptr.is_null() {
+            log::error!("TcbFull::alloc: allocation failed (out of memory)");
             return None;
         }
 
@@ -74,10 +103,19 @@ impl TcbFull {
             (*tcb).tcb = TcbObject::new();
             // context is already zeroed - valid initial state
             (*tcb).kernel_sp = 0;
+            // EEVDF fields are already zeroed from alloc_zeroed
+            (*tcb).v_runtime = 0;
+            (*tcb).v_eligible = 0;
+            (*tcb).v_deadline = 0;
+            (*tcb).exec_start_ticks = 0;
+            (*tcb).last_run_ticks = 0;
+            // Queue links
             (*tcb).sched_next = ObjectRef::NULL;
             (*tcb).sched_prev = ObjectRef::NULL;
             (*tcb).ipc_next = ObjectRef::NULL;
             (*tcb).ipc_prev = ObjectRef::NULL;
+            // Async work context
+            (*tcb).task_ctx = TaskContext::new();
         }
 
         NonNull::new(tcb)

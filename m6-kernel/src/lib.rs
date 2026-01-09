@@ -31,4 +31,6 @@
 pub mod cap;
 pub mod logging;
 pub mod memory;
+pub mod sched;
 pub mod syscall;
+pub mod task;

@@ -1,4 +1,4 @@
-//! Memory Subsystem Initialization
+//! Memory Subsystem Initialisation
 //!
 //! High-level orchestration of frame allocator and heap setup.
 
@@ -8,8 +8,10 @@ use m6_common::memory::page;
 use super::frame::{self, ReservedRegion};
 use super::heap;
 
-/// Initial kernel heap size (4 MB)
-const INITIAL_HEAP_SIZE: usize = 4 * 1024 * 1024;
+/// Initial kernel heap size (16 MB)
+/// This provides ample space for the object table (~4 MB), TCBs, and other
+/// kernel allocations. The heap can grow dynamically if needed.
+const INITIAL_HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 /// Initialise memory subsystems from boot info.
 ///
