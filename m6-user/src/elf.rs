@@ -79,6 +79,7 @@ pub struct ElfSegment {
 
 impl ElfSegment {
     /// Get access rights as a bitmap (R=1, W=2, X=4)
+    #[expect(dead_code)]
     pub fn rights(&self) -> u64 {
         let mut rights = 0u64;
         if self.readable {
@@ -121,7 +122,7 @@ impl<'a> Elf64<'a> {
         let header = unsafe { &*(data.as_ptr() as *const Elf64Header) };
 
         // Validate magic
-        if &header.e_ident[0..4] != &ELFMAG {
+        if header.e_ident[0..4] != ELFMAG {
             return Err(ElfError::InvalidMagic);
         }
 
@@ -141,6 +142,7 @@ impl<'a> Elf64<'a> {
     /// Get the highest virtual address used by the ELF
     ///
     /// This is useful for placing the heap after the program image.
+    #[expect(dead_code)]
     pub fn brk(&self) -> u64 {
         let mut max_addr = 0u64;
         for segment in self.segments() {

@@ -82,9 +82,8 @@ impl StreamTableEntry {
             | ((cd_table_addr & !0x3F) << 6); // S1ContextPtr (aligned to 64 bytes)
 
         // DWORD 1: S1CDMax, S1Fmt
-        // S1Fmt = 0b00 = Linear CD table
-        ste.dwords[1] = ((s1cdmax as u64) << 59) // S1CDMax
-            | (0b00 << 4); // S1Fmt = Linear
+        // S1Fmt = 0b00 = Linear CD table (no-op)
+        ste.dwords[1] = (s1cdmax as u64) << 59; // S1CDMax
 
         // DWORD 2: S2VMID, SHCFG, etc.
         // SHCFG = 0b01 = Inner shareable
@@ -125,11 +124,10 @@ impl ContextDescriptor {
         // DWORD 0: T0SZ, TG0, IR0, OR0, SH0, EPD0, V
         cd.dwords[0] = (1u64 << 31) // V (Valid)
             | (t0sz as u64) // T0SZ
-            | (0b00 << 6)  // TG0 = 4KB granule
+            // TG0 = 4KB granule (0b00, no-op)
             | (0b01 << 8)  // IR0 = Write-back cacheable
             | (0b01 << 10) // OR0 = Write-back cacheable
-            | (0b11 << 12) // SH0 = Inner shareable
-            | (0 << 14);   // EPD0 = 0 (translation enabled)
+            | (0b11 << 12); // SH0 = Inner shareable, EPD0 = 0 (translation enabled)
 
         // DWORD 1: TTB0
         cd.dwords[1] = ttb0 & !0xFFF; // 4KB aligned

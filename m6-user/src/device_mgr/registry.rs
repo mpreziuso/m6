@@ -183,22 +183,12 @@ impl Registry {
 
     /// Find device by exact path.
     pub fn find_device_by_path(&self, path: &str) -> Option<usize> {
-        for i in 0..self.device_count {
-            if self.devices[i].path_str() == path {
-                return Some(i);
-            }
-        }
-        None
+        (0..self.device_count).find(|&i| self.devices[i].path_str() == path)
     }
 
     /// Find device by compatible string (partial match).
     pub fn find_device_by_compatible(&self, compat: &str) -> Option<usize> {
-        for i in 0..self.device_count {
-            if self.devices[i].compatible_str().contains(compat) {
-                return Some(i);
-            }
-        }
-        None
+        (0..self.device_count).find(|&i| self.devices[i].compatible_str().contains(compat))
     }
 
     /// Find all devices matching a compatible string.
@@ -269,11 +259,6 @@ impl Registry {
 
     /// Find a free subscription slot.
     pub fn find_free_subscription(&self) -> Option<usize> {
-        for i in 0..MAX_SUBSCRIPTIONS {
-            if !self.subscriptions[i].active {
-                return Some(i);
-            }
-        }
-        None
+        (0..MAX_SUBSCRIPTIONS).find(|&i| !self.subscriptions[i].active)
     }
 }

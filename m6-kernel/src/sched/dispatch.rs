@@ -148,6 +148,7 @@ pub fn dispatch_task(ctx: &mut UserCtx) {
 
 /// Result of polling signal work.
 #[allow(dead_code)]
+#[allow(clippy::large_enum_variant)]
 enum PollResult {
     Ready(UserCtx),
     Error,
@@ -227,15 +228,12 @@ fn handle_pending(tcb_ref: ObjectRef) {
     use m6_cap::objects::ThreadState;
 
     with_tcb_mut(tcb_ref, |tcb| {
-        match tcb.tcb.state {
-            ThreadState::Running => {
-                // Normal path: task goes to sleep (blocked on async work)
-                tcb.tcb.state = ThreadState::BlockedOnNotification; // Using this for async waiting
-            }
-            // Other states - task was woken while we were processing
-            // Keep it runnable
-            _ => {}
+        if tcb.tcb.state == ThreadState::Running {
+            // Normal path: task goes to sleep (blocked on async work)
+            tcb.tcb.state = ThreadState::BlockedOnNotification; // Using this for async waiting
         }
+        // Other states - task was woken while we were processing
+        // Keep it runnable
     });
 }
 

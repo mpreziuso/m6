@@ -27,6 +27,7 @@ pub mod response {
     /// Invalid request label
     pub const ERR_INVALID_REQUEST: u64 = 1;
     /// Operation would block (for non-blocking mode)
+    #[expect(dead_code)]
     pub const ERR_WOULD_BLOCK: u64 = 2;
     /// No data available for read
     pub const ERR_NO_DATA: u64 = 3;
@@ -49,6 +50,7 @@ pub const fn write_inline_len(x0: u64) -> usize {
 
 /// Create WRITE_INLINE x0 value with length.
 #[inline]
+#[expect(dead_code)]
 pub const fn write_inline_x0(len: usize) -> u64 {
     request::WRITE_INLINE | ((len as u64) << 32)
 }

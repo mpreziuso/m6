@@ -302,9 +302,9 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     cap_idx += 1;
 
     // Device untypeds at slots 20+
-    for i in 0..device_untyped_count {
+    for (i, &slot) in device_untyped_slots.iter().enumerate().take(device_untyped_count) {
         initial_caps_storage[cap_idx] = InitialCap {
-            src_slot: device_untyped_slots[i],
+            src_slot: slot,
             dst_slot: DEVMGR_FIRST_DEVICE_UNTYPED + i as u64,
         };
         cap_idx += 1;
@@ -341,7 +341,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
 
     // Ensure page tables exist for our mapping regions
     // Boot info region (at 256MB)
-    if let Err(_) = process::ensure_child_page_tables(
+    if process::ensure_child_page_tables(
         slots::ROOT_CNODE,
         radix,
         result.vspace_slot,
@@ -349,14 +349,14 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         &mut next_slot,
         DEVMGR_BOOT_INFO_ADDR,
         DEVMGR_DTB_ADDR + boot_info.dtb_size,
-    ) {
+    ).is_err() {
         io::puts("[init] ERROR: Failed to create page tables for boot info region\n");
         return;
     }
 
     // Initrd region (at 512MB) - may need separate page tables
-    if boot_info.has_initrd() {
-        if let Err(_) = process::ensure_child_page_tables(
+    if boot_info.has_initrd()
+        && process::ensure_child_page_tables(
             slots::ROOT_CNODE,
             radix,
             result.vspace_slot,
@@ -364,10 +364,10 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             &mut next_slot,
             DEVMGR_INITRD_ADDR,
             DEVMGR_INITRD_ADDR + boot_info.initrd_size,
-        ) {
-            io::puts("[init] ERROR: Failed to create page tables for initrd region\n");
-            return;
-        }
+        ).is_err()
+    {
+        io::puts("[init] ERROR: Failed to create page tables for initrd region\n");
+        return;
     }
 
     // Create boot info structure
@@ -392,7 +392,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             core::mem::size_of::<DevMgrBootInfoLayout>(),
         )
     };
-    if let Err(_) = process::map_data_to_child(
+    if process::map_data_to_child(
         slots::ROOT_CNODE,
         radix,
         result.vspace_slot,
@@ -401,7 +401,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         DEVMGR_BOOT_INFO_ADDR,
         boot_info_bytes,
         process::MapRights::R,
-    ) {
+    ).is_err() {
         io::puts("[init] ERROR: Failed to map boot info\n");
         return;
     }
@@ -413,7 +413,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
                 boot_info.dtb_size as usize,
             )
         };
-        if let Err(_) = process::map_data_to_child(
+        if process::map_data_to_child(
             slots::ROOT_CNODE,
             radix,
             result.vspace_slot,
@@ -422,7 +422,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             DEVMGR_DTB_ADDR,
             dtb_data,
             process::MapRights::R,
-        ) {
+        ).is_err() {
             io::puts("[init] ERROR: Failed to map DTB\n");
             return;
         }
@@ -435,7 +435,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
                 boot_info.initrd_size as usize,
             )
         };
-        if let Err(_) = process::map_data_to_child(
+        if process::map_data_to_child(
             slots::ROOT_CNODE,
             radix,
             result.vspace_slot,
@@ -444,7 +444,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             DEVMGR_INITRD_ADDR,
             initrd_data,
             process::MapRights::R,
-        ) {
+        ).is_err() {
             io::puts("[init] ERROR: Failed to map initrd\n");
             return;
         }

@@ -309,7 +309,7 @@ pub fn map_dtb(
     let perms = PtePermissions::ro(true);
 
     // Map all pages covering the DTB
-    let num_pages = ((dtb_size + 0xFFF) / 0x1000) as usize;
+    let num_pages = dtb_size.div_ceil(0x1000) as usize;
     for i in 0..num_pages {
         let phys = dtb_phys.0 + (i * 0x1000) as u64;
         let virt = layout::DTB_MAP_ADDR + (i * 0x1000) as u64;
@@ -355,7 +355,7 @@ pub fn map_initrd(
     let perms = PtePermissions::ro(true);
 
     // Map all pages covering the initrd
-    let num_pages = ((initrd_size + 0xFFF) / 0x1000) as usize;
+    let num_pages = initrd_size.div_ceil(0x1000) as usize;
     for i in 0..num_pages {
         let phys = initrd_phys.0 + (i * 0x1000) as u64;
         let virt = layout::INITRD_MAP_ADDR + (i * 0x1000) as u64;

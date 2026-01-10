@@ -49,12 +49,14 @@ static SMMU_AVAILABLE: AtomicBool = AtomicBool::new(false);
 /// Collection of SMMU instances.
 struct SmmuInstances {
     instances: [Option<SmmuInstance>; MAX_SMMUS],
+    #[expect(dead_code)]
     count: usize,
 }
 
 /// Queue state (command or event).
 struct QueueState {
     /// Physical address of queue base.
+    #[expect(dead_code)]
     base_phys: u64,
     /// Virtual address of queue base.
     base_virt: u64,
@@ -71,6 +73,7 @@ pub struct SmmuInstance {
     /// Base virtual address of SMMU registers.
     base: NonNull<u8>,
     /// Physical address of stream table.
+    #[expect(dead_code)]
     strtab_phys: u64,
     /// Virtual address of stream table.
     strtab_virt: u64,
@@ -318,19 +321,19 @@ pub unsafe fn init(_smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
     // Allocate stream table (linear format)
     let strtab_entries = 1usize << strtab_log2size;
     let strtab_size = strtab_entries * StreamTableEntry::SIZE;
-    let strtab_pages = (strtab_size + page::SIZE_4K - 1) / page::SIZE_4K;
+    let strtab_pages = strtab_size.div_ceil(page::SIZE_4K);
     let strtab_phys = alloc_frames_zeroed(strtab_pages).ok_or(SmmuError::AllocFailed)?;
     let strtab_virt = phys_to_virt(strtab_phys);
 
     // Allocate command queue
     let cmdq_size = CMDQ_ENTRIES * CommandEntry::SIZE;
-    let cmdq_pages = (cmdq_size + page::SIZE_4K - 1) / page::SIZE_4K;
+    let cmdq_pages = cmdq_size.div_ceil(page::SIZE_4K);
     let cmdq_phys = alloc_frames_zeroed(cmdq_pages).ok_or(SmmuError::AllocFailed)?;
     let cmdq_virt = phys_to_virt(cmdq_phys);
 
     // Allocate event queue
     let eventq_size = EVENTQ_ENTRIES * EventEntry::SIZE;
-    let eventq_pages = (eventq_size + page::SIZE_4K - 1) / page::SIZE_4K;
+    let eventq_pages = eventq_size.div_ceil(page::SIZE_4K);
     let eventq_phys = alloc_frames_zeroed(eventq_pages).ok_or(SmmuError::AllocFailed)?;
     let eventq_virt = phys_to_virt(eventq_phys);
 

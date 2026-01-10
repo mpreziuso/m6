@@ -275,11 +275,11 @@ impl RevocationCallback for SlotClearCallback {
             }
 
             let cnode = unsafe { &mut *cnode_ptr };
-            if let Some(slot) = cnode.get_slot_mut(node.slot_index as usize) {
-                if !slot.is_empty() {
-                    slot.clear();
-                    cnode.meta_mut().decrement_used();
-                }
+            if let Some(slot) = cnode.get_slot_mut(node.slot_index as usize)
+                && !slot.is_empty()
+            {
+                slot.clear();
+                cnode.meta_mut().decrement_used();
             }
         });
 

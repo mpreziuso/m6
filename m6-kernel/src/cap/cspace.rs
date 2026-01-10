@@ -262,7 +262,7 @@ fn resolve_recursive(
         // Use the m6-cap resolution logic
         let (index, new_depth) = cnode
             .resolve_local(cptr, depth)
-            .map_err(|e| crate::syscall::error::cap_error_to_syscall(e))?;
+            .map_err(crate::syscall::error::cap_error_to_syscall)?;
 
         // Get the slot
         let slot = cnode.get_slot(index).ok_or(SyscallError::InvalidCap)?;

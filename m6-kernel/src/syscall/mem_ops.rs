@@ -110,16 +110,14 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
 
     // Look up untyped capability with WRITE right
     let untyped_cap = ipc::lookup_cap(untyped_cptr, ObjectType::Untyped, CapRights::WRITE)
-        .map_err(|e| {
+        .inspect_err(|&e| {
             log::debug!("Retype: untyped lookup failed: {:?}", e);
-            e
         })?;
 
     // Look up destination CNode with WRITE right
     let _dest_cnode_cap = ipc::lookup_cap(dest_cnode_cptr, ObjectType::CNode, CapRights::WRITE)
-        .map_err(|e| {
+        .inspect_err(|&e| {
             log::debug!("Retype: dest CNode lookup failed: {:?}", e);
-            e
         })?;
 
     log::trace!("Retype: capabilities looked up successfully");

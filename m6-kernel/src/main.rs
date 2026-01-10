@@ -44,9 +44,7 @@ fn panic(info: &PanicInfo) -> ! {
         console::puts(msg);
         console::puts("\n");
     }
-    loop {
-        cpu::halt();
-    }
+    cpu::halt();
 }
 
 

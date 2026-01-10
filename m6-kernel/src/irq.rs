@@ -119,13 +119,14 @@ fn find_irq_handler(intid: u32) -> Option<ObjectRef> {
     object_table::with_table(|table| {
         for i in 1..MAX_OBJECTS {
             let obj_ref = ObjectRef::from_index(i as u32);
-            if let Some(obj) = table.get(obj_ref) {
-                if obj.obj_type == KernelObjectType::IrqHandler && !obj.is_free() {
-                    // SAFETY: Verified type is IrqHandler
-                    let handler = unsafe { &obj.data.irq_handler };
-                    if handler.irq == intid {
-                        return Some(obj_ref);
-                    }
+            if let Some(obj) = table.get(obj_ref)
+                && obj.obj_type == KernelObjectType::IrqHandler
+                && !obj.is_free()
+            {
+                // SAFETY: Verified type is IrqHandler
+                let handler = unsafe { &obj.data.irq_handler };
+                if handler.irq == intid {
+                    return Some(obj_ref);
                 }
             }
         }

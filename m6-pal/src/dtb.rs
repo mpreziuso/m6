@@ -168,14 +168,14 @@ fn parse_gic(fdt: &Fdt) -> Result<(u64, u64, u64, GicVersion), DtbError> {
 /// Parse UART (serial console) configuration
 fn parse_uart(fdt: &Fdt) -> Result<u64, DtbError> {
     for node in fdt.all_nodes() {
-        if let Some(compatible) = node.compatible() {
-            if compatible.all().any(|c| c == "arm,pl011") {
-                let reg = node.reg()
-                    .ok_or(DtbError::MissingProperty("reg"))?
-                    .next()
-                    .ok_or(DtbError::InvalidData)?;
-                return Ok(reg.starting_address as u64);
-            }
+        if let Some(compatible) = node.compatible()
+            && compatible.all().any(|c| c == "arm,pl011")
+        {
+            let reg = node.reg()
+                .ok_or(DtbError::MissingProperty("reg"))?
+                .next()
+                .ok_or(DtbError::InvalidData)?;
+            return Ok(reg.starting_address as u64);
         }
     }
     Err(DtbError::MissingNode("uart"))
@@ -201,17 +201,17 @@ fn parse_memory(fdt: &Fdt) -> Result<(u64, u64), DtbError> {
 /// Parse timer configuration
 fn parse_timer(fdt: &Fdt) -> Result<u32, DtbError> {
     for node in fdt.all_nodes() {
-        if let Some(compatible) = node.compatible() {
-            if compatible.all().any(|c| c == "arm,armv8-timer") {
-                // ARM timer interrupts property contains multiple IRQs
-                // Format: [secure_phys_irq, phys_irq, virt_irq, hyp_irq]
-                // We typically want the virtual timer (index 2)
-                if let Some(interrupts) = node.interrupts() {
-                    // Skip to virtual timer interrupt (3rd entry, index 2)
-                    let virt_irq = interrupts.skip(2).next()
-                        .ok_or(DtbError::InvalidData)? as u32;
-                    return Ok(virt_irq);
-                }
+        if let Some(compatible) = node.compatible()
+            && compatible.all().any(|c| c == "arm,armv8-timer")
+        {
+            // ARM timer interrupts property contains multiple IRQs
+            // Format: [secure_phys_irq, phys_irq, virt_irq, hyp_irq]
+            // We typically want the virtual timer (index 2)
+            if let Some(mut interrupts) = node.interrupts() {
+                // Skip to virtual timer interrupt (3rd entry, index 2)
+                let virt_irq = interrupts.nth(2)
+                    .ok_or(DtbError::InvalidData)? as u32;
+                return Ok(virt_irq);
             }
         }
     }
@@ -241,7 +241,7 @@ fn parse_platform_name(fdt: &Fdt) -> Result<&'static str, DtbError> {
             let s = core::str::from_utf8(&stored[..*len])
                 .unwrap_or("Unknown DTB Platform");
             // SAFETY: This is pointing to static storage that lives for 'static
-            return Ok(unsafe { core::mem::transmute(s) });
+            return Ok(unsafe { core::mem::transmute::<&str, &str>(s) });
         }
     }
 
@@ -262,7 +262,7 @@ fn parse_platform_name(fdt: &Fdt) -> Result<&'static str, DtbError> {
             let s = core::str::from_utf8(&stored[..*len])
                 .unwrap_or("Unknown DTB Platform");
             // SAFETY: This is pointing to static storage that lives for 'static
-            return Ok(unsafe { core::mem::transmute(s) });
+            return Ok(unsafe { core::mem::transmute::<&str, &str>(s) });
         }
     }
 

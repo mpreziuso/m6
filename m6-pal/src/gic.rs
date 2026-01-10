@@ -19,6 +19,9 @@ const MAX_HANDLERS: usize = 1024;
 /// Interrupt handler function type
 pub type IrqHandler = fn(intid: u32);
 
+/// Userspace IRQ dispatcher function type
+type UserspaceDispatcher = Option<fn(u32) -> bool>;
+
 /// Static storage for registered interrupt handlers
 /// Index is the interrupt ID (INTID)
 static IRQ_HANDLERS: Mutex<[Option<IrqHandler>; MAX_HANDLERS]> =
@@ -28,7 +31,7 @@ static IRQ_HANDLERS: Mutex<[Option<IrqHandler>; MAX_HANDLERS]> =
 ///
 /// When set, this function is called for interrupts that don't have
 /// a kernel-registered handler. Returns true if the interrupt was handled.
-static USERSPACE_DISPATCHER: Mutex<Option<fn(u32) -> bool>> = Mutex::new(None);
+static USERSPACE_DISPATCHER: Mutex<UserspaceDispatcher> = Mutex::new(None);
 
 /// GIC driver abstraction supporting both v2 and v3
 enum GicDriver {

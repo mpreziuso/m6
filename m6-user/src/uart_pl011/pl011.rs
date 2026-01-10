@@ -9,22 +9,28 @@ use core::ptr::{read_volatile, write_volatile};
 /// Data register (read/write)
 pub const DR: usize = 0x00;
 /// Receive status/error clear register
+#[expect(dead_code)]
 pub const RSRECR: usize = 0x04;
 /// Flag register (read-only)
 pub const FR: usize = 0x18;
 /// Integer baud rate register
+#[expect(dead_code)]
 pub const IBRD: usize = 0x24;
 /// Fractional baud rate register
+#[expect(dead_code)]
 pub const FBRD: usize = 0x28;
 /// Line control register
+#[expect(dead_code)]
 pub const LCR_H: usize = 0x2C;
 /// Control register
 pub const CR: usize = 0x30;
 /// Interrupt FIFO level select register
+#[expect(dead_code)]
 pub const IFLS: usize = 0x34;
 /// Interrupt mask set/clear register
 pub const IMSC: usize = 0x38;
 /// Raw interrupt status register
+#[expect(dead_code)]
 pub const RIS: usize = 0x3C;
 /// Masked interrupt status register
 pub const MIS: usize = 0x40;
@@ -38,6 +44,7 @@ pub const FR_TXFF: u32 = 1 << 5;
 /// RX FIFO empty
 pub const FR_RXFE: u32 = 1 << 4;
 /// UART busy
+#[expect(dead_code)]
 pub const FR_BUSY: u32 = 1 << 3;
 
 // -- Control register bits
@@ -52,8 +59,10 @@ pub const CR_RXE: u32 = 1 << 9;
 // -- Line control register bits
 
 /// Enable FIFOs
+#[expect(dead_code)]
 pub const LCR_H_FEN: u32 = 1 << 4;
 /// Word length 8 bits
+#[expect(dead_code)]
 pub const LCR_H_WLEN_8: u32 = 3 << 5;
 
 // -- Interrupt mask register bits (IMSC)
@@ -61,6 +70,7 @@ pub const LCR_H_WLEN_8: u32 = 3 << 5;
 /// Receive interrupt mask
 pub const IMSC_RXIM: u32 = 1 << 4;
 /// Transmit interrupt mask
+#[expect(dead_code)]
 pub const IMSC_TXIM: u32 = 1 << 5;
 /// Receive timeout interrupt mask
 pub const IMSC_RTIM: u32 = 1 << 6;
@@ -75,6 +85,7 @@ pub struct Pl011 {
     base: usize,
 }
 
+#[expect(dead_code)]
 impl Pl011 {
     /// Create a new PL011 driver for the given MMIO base address.
     ///

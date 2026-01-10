@@ -310,11 +310,9 @@ pub fn charge_time(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
 pub fn consume_budget(tcb_ref: ObjectRef, _microseconds: u64) {
     let sched_ctx_ref = with_tcb(tcb_ref, |tcb| tcb.tcb.sched_context).unwrap_or(ObjectRef::NULL);
 
-    if !sched_ctx_ref.is_valid() {
-        return;
+    if sched_ctx_ref.is_valid() {
+        // TODO: Update SchedContextObject when storage is implemented
     }
-
-    // TODO: Update SchedContextObject when storage is implemented
 }
 
 // -- Preemption

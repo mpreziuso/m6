@@ -670,6 +670,7 @@ fn update_user_boot_info(
 }
 
 /// Update UserBootInfo with untyped memory region info.
+#[expect(dead_code)]
 fn update_user_boot_info_untyped(
     boot_info_phys: PhysAddr,
     count: u32,

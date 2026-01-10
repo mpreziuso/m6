@@ -85,7 +85,7 @@ fn parse_octal(field: &[u8]) -> usize {
         if b == 0 || b == b' ' {
             break;
         }
-        if b >= b'0' && b <= b'7' {
+        if (b'0'..=b'7').contains(&b) {
             result = result.saturating_mul(8).saturating_add((b - b'0') as usize);
         }
     }

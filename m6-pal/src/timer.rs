@@ -24,6 +24,7 @@ pub fn read_counter() -> u64 {
 }
 
 /// Read the virtual timer compare value
+#[allow(dead_code)]
 fn read_cntv_cval() -> u64 {
     CNTV_CVAL_EL0.get()
 }

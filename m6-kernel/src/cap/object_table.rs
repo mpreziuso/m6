@@ -395,14 +395,14 @@ where
     R: Default,
 {
     let table = get_table().lock();
-    if let Some(obj) = table.get(tcb_ref) {
-        if obj.obj_type == KernelObjectType::Tcb {
-            // SAFETY: We verified the object type, so tcb_ptr is the active variant.
-            let tcb_ptr = unsafe { obj.data.tcb_ptr };
-            if !tcb_ptr.is_null() {
-                // SAFETY: The TCB was allocated by TcbFull::alloc and is valid.
-                return f(unsafe { &*tcb_ptr });
-            }
+    if let Some(obj) = table.get(tcb_ref)
+        && obj.obj_type == KernelObjectType::Tcb
+    {
+        // SAFETY: We verified the object type, so tcb_ptr is the active variant.
+        let tcb_ptr = unsafe { obj.data.tcb_ptr };
+        if !tcb_ptr.is_null() {
+            // SAFETY: The TCB was allocated by TcbFull::alloc and is valid.
+            return f(unsafe { &*tcb_ptr });
         }
     }
     R::default()
@@ -418,15 +418,15 @@ where
     R: Default,
 {
     let table = get_table().lock();
-    if let Some(obj) = table.get(tcb_ref) {
-        if obj.obj_type == KernelObjectType::Tcb {
-            // SAFETY: We verified the object type, so tcb_ptr is the active variant.
-            let tcb_ptr = unsafe { obj.data.tcb_ptr };
-            if !tcb_ptr.is_null() {
-                // SAFETY: The TCB was allocated by TcbFull::alloc and is valid.
-                // We hold the object table lock so no concurrent access.
-                return f(unsafe { &mut *tcb_ptr });
-            }
+    if let Some(obj) = table.get(tcb_ref)
+        && obj.obj_type == KernelObjectType::Tcb
+    {
+        // SAFETY: We verified the object type, so tcb_ptr is the active variant.
+        let tcb_ptr = unsafe { obj.data.tcb_ptr };
+        if !tcb_ptr.is_null() {
+            // SAFETY: The TCB was allocated by TcbFull::alloc and is valid.
+            // We hold the object table lock so no concurrent access.
+            return f(unsafe { &mut *tcb_ptr });
         }
     }
     R::default()
@@ -441,11 +441,11 @@ where
     F: FnOnce(&mut EndpointObject) -> R,
 {
     let mut table = get_table().lock();
-    if let Some(obj) = table.get_mut(ep_ref) {
-        if obj.obj_type == KernelObjectType::Endpoint {
-            // SAFETY: We verified the object type, so endpoint is the active variant.
-            return Some(f(unsafe { &mut obj.data.endpoint }));
-        }
+    if let Some(obj) = table.get_mut(ep_ref)
+        && obj.obj_type == KernelObjectType::Endpoint
+    {
+        // SAFETY: We verified the object type, so endpoint is the active variant.
+        return Some(f(unsafe { &mut obj.data.endpoint }));
     }
     None
 }
@@ -459,11 +459,11 @@ where
     F: FnOnce(&mut NotificationObject) -> R,
 {
     let mut table = get_table().lock();
-    if let Some(obj) = table.get_mut(notif_ref) {
-        if obj.obj_type == KernelObjectType::Notification {
-            // SAFETY: We verified the object type, so notification is the active variant.
-            return Some(f(unsafe { &mut obj.data.notification }));
-        }
+    if let Some(obj) = table.get_mut(notif_ref)
+        && obj.obj_type == KernelObjectType::Notification
+    {
+        // SAFETY: We verified the object type, so notification is the active variant.
+        return Some(f(unsafe { &mut obj.data.notification }));
     }
     None
 }
@@ -477,11 +477,11 @@ where
     F: FnOnce(&mut ReplyObject) -> R,
 {
     let mut table = get_table().lock();
-    if let Some(obj) = table.get_mut(reply_ref) {
-        if obj.obj_type == KernelObjectType::Reply {
-            // SAFETY: We verified the object type, so reply is the active variant.
-            return Some(f(unsafe { &mut obj.data.reply }));
-        }
+    if let Some(obj) = table.get_mut(reply_ref)
+        && obj.obj_type == KernelObjectType::Reply
+    {
+        // SAFETY: We verified the object type, so reply is the active variant.
+        return Some(f(unsafe { &mut obj.data.reply }));
     }
     None
 }
@@ -495,11 +495,11 @@ where
     F: FnOnce(&mut UntypedObject) -> R,
 {
     let mut table = get_table().lock();
-    if let Some(obj) = table.get_mut(untyped_ref) {
-        if obj.obj_type == KernelObjectType::Untyped {
-            // SAFETY: We verified the object type, so untyped is the active variant.
-            return Some(f(unsafe { &mut obj.data.untyped }));
-        }
+    if let Some(obj) = table.get_mut(untyped_ref)
+        && obj.obj_type == KernelObjectType::Untyped
+    {
+        // SAFETY: We verified the object type, so untyped is the active variant.
+        return Some(f(unsafe { &mut obj.data.untyped }));
     }
     None
 }
@@ -513,12 +513,11 @@ where
     F: FnOnce(&mut FrameObject) -> R,
 {
     let mut table = get_table().lock();
-    if let Some(obj) = table.get_mut(frame_ref) {
-        if obj.obj_type == KernelObjectType::Frame || obj.obj_type == KernelObjectType::DeviceFrame
-        {
-            // SAFETY: We verified the object type, so frame is the active variant.
-            return Some(f(unsafe { &mut obj.data.frame }));
-        }
+    if let Some(obj) = table.get_mut(frame_ref)
+        && (obj.obj_type == KernelObjectType::Frame || obj.obj_type == KernelObjectType::DeviceFrame)
+    {
+        // SAFETY: We verified the object type, so frame is the active variant.
+        return Some(f(unsafe { &mut obj.data.frame }));
     }
     None
 }
@@ -532,11 +531,11 @@ where
     F: FnOnce(&mut IOSpaceObject) -> R,
 {
     let mut table = get_table().lock();
-    if let Some(obj) = table.get_mut(iospace_ref) {
-        if obj.obj_type == KernelObjectType::IOSpace {
-            // SAFETY: We verified the object type, so iospace is the active variant.
-            return Some(f(unsafe { &mut obj.data.iospace }));
-        }
+    if let Some(obj) = table.get_mut(iospace_ref)
+        && obj.obj_type == KernelObjectType::IOSpace
+    {
+        // SAFETY: We verified the object type, so iospace is the active variant.
+        return Some(f(unsafe { &mut obj.data.iospace }));
     }
     None
 }
@@ -550,11 +549,11 @@ where
     F: FnOnce(&mut DmaPoolObject) -> R,
 {
     let mut table = get_table().lock();
-    if let Some(obj) = table.get_mut(pool_ref) {
-        if obj.obj_type == KernelObjectType::DmaPool {
-            // SAFETY: We verified the object type, so dma_pool is the active variant.
-            return Some(f(unsafe { &mut obj.data.dma_pool }));
-        }
+    if let Some(obj) = table.get_mut(pool_ref)
+        && obj.obj_type == KernelObjectType::DmaPool
+    {
+        // SAFETY: We verified the object type, so dma_pool is the active variant.
+        return Some(f(unsafe { &mut obj.data.dma_pool }));
     }
     None
 }
@@ -568,15 +567,15 @@ where
     F: FnOnce(&mut SmmuControlObject) -> R,
 {
     let table = get_table().lock();
-    if let Some(obj) = table.get(smmu_ref) {
-        if obj.obj_type == KernelObjectType::SmmuControl {
-            // SAFETY: We verified the object type, so smmu_control_ptr is the active variant.
-            let ptr = unsafe { obj.data.smmu_control_ptr };
-            if !ptr.is_null() {
-                // SAFETY: The SmmuControl was heap-allocated and is valid.
-                // We hold the object table lock so no concurrent access.
-                return Some(f(unsafe { &mut *ptr }));
-            }
+    if let Some(obj) = table.get(smmu_ref)
+        && obj.obj_type == KernelObjectType::SmmuControl
+    {
+        // SAFETY: We verified the object type, so smmu_control_ptr is the active variant.
+        let ptr = unsafe { obj.data.smmu_control_ptr };
+        if !ptr.is_null() {
+            // SAFETY: The SmmuControl was heap-allocated and is valid.
+            // We hold the object table lock so no concurrent access.
+            return Some(f(unsafe { &mut *ptr }));
         }
     }
     None
@@ -591,11 +590,11 @@ where
     F: FnOnce(&mut IrqHandlerObject) -> R,
 {
     let mut table = get_table().lock();
-    if let Some(obj) = table.get_mut(handler_ref) {
-        if obj.obj_type == KernelObjectType::IrqHandler {
-            // SAFETY: We verified the object type, so irq_handler is the active variant.
-            return Some(f(unsafe { &mut obj.data.irq_handler }));
-        }
+    if let Some(obj) = table.get_mut(handler_ref)
+        && obj.obj_type == KernelObjectType::IrqHandler
+    {
+        // SAFETY: We verified the object type, so irq_handler is the active variant.
+        return Some(f(unsafe { &mut obj.data.irq_handler }));
     }
     None
 }
@@ -647,11 +646,11 @@ where
     F: FnOnce(&mut VSpaceObject) -> R,
 {
     let mut table = get_table().lock();
-    if let Some(obj) = table.get_mut(vspace_ref) {
-        if obj.obj_type == KernelObjectType::VSpace {
-            // SAFETY: We verified the object type, so vspace is the active variant.
-            return Some(f(unsafe { &mut obj.data.vspace }));
-        }
+    if let Some(obj) = table.get_mut(vspace_ref)
+        && obj.obj_type == KernelObjectType::VSpace
+    {
+        // SAFETY: We verified the object type, so vspace is the active variant.
+        return Some(f(unsafe { &mut obj.data.vspace }));
     }
     None
 }
@@ -665,11 +664,11 @@ where
     F: FnOnce(&VSpaceObject) -> R,
 {
     let table = get_table().lock();
-    if let Some(obj) = table.get(vspace_ref) {
-        if obj.obj_type == KernelObjectType::VSpace {
-            // SAFETY: We verified the object type, so vspace is the active variant.
-            return Some(f(unsafe { &obj.data.vspace }));
-        }
+    if let Some(obj) = table.get(vspace_ref)
+        && obj.obj_type == KernelObjectType::VSpace
+    {
+        // SAFETY: We verified the object type, so vspace is the active variant.
+        return Some(f(unsafe { &obj.data.vspace }));
     }
     None
 }
@@ -683,13 +682,13 @@ where
     F: FnOnce(&mut AsidPoolObject) -> R,
 {
     let mut table = get_table().lock();
-    if let Some(obj) = table.get_mut(asid_pool_ref) {
-        if obj.obj_type == KernelObjectType::AsidPool {
-            let asid_pool_ptr = unsafe { obj.data.asid_pool_ptr };
-            if !asid_pool_ptr.is_null() {
-                // SAFETY: We verified the object type and null checked the pointer.
-                return Some(f(unsafe { &mut *asid_pool_ptr }));
-            }
+    if let Some(obj) = table.get_mut(asid_pool_ref)
+        && obj.obj_type == KernelObjectType::AsidPool
+    {
+        let asid_pool_ptr = unsafe { obj.data.asid_pool_ptr };
+        if !asid_pool_ptr.is_null() {
+            // SAFETY: We verified the object type and null checked the pointer.
+            return Some(f(unsafe { &mut *asid_pool_ptr }));
         }
     }
     None
@@ -704,11 +703,11 @@ where
     F: FnOnce(&PageTableObject) -> R,
 {
     let table = get_table().lock();
-    if let Some(obj) = table.get(pt_ref) {
-        if obj.obj_type == KernelObjectType::PageTable {
-            // SAFETY: We verified the object type, so page_table is the active variant.
-            return Some(f(unsafe { &obj.data.page_table }));
-        }
+    if let Some(obj) = table.get(pt_ref)
+        && obj.obj_type == KernelObjectType::PageTable
+    {
+        // SAFETY: We verified the object type, so page_table is the active variant.
+        return Some(f(unsafe { &obj.data.page_table }));
     }
     None
 }

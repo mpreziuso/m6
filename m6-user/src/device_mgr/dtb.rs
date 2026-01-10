@@ -44,12 +44,11 @@ pub fn enumerate_devices(fdt_data: &[u8], registry: &mut Registry) -> Result<usi
         // Check if this node has an interesting compatible string
         if let Some(compatible) = node.compatible() {
             for compat_str in compatible.all() {
-                if is_interesting_device(compat_str) {
-                    if let Some(entry) = parse_device_node(&node, compat_str) {
-                        if registry.add_device(entry).is_some() {
-                            count += 1;
-                        }
-                    }
+                if is_interesting_device(compat_str)
+                    && let Some(entry) = parse_device_node(&node, compat_str)
+                    && registry.add_device(entry).is_some()
+                {
+                    count += 1;
                     break;
                 }
             }
@@ -75,11 +74,11 @@ fn parse_device_node(node: &fdt::node::FdtNode, compat: &str) -> Option<DeviceEn
     entry.set_compatible(compat);
 
     // Extract reg property (physical address and size)
-    if let Some(mut reg) = node.reg() {
-        if let Some(first_region) = reg.next() {
-            entry.phys_base = first_region.starting_address as u64;
-            entry.size = first_region.size.unwrap_or(0) as u64;
-        }
+    if let Some(mut reg) = node.reg()
+        && let Some(first_region) = reg.next()
+    {
+        entry.phys_base = first_region.starting_address as u64;
+        entry.size = first_region.size.unwrap_or(0) as u64;
     }
 
     // Extract interrupts property
@@ -127,15 +126,14 @@ pub fn get_memory_info(fdt_data: &[u8]) -> Option<(u64, u64)> {
     let fdt = fdt::Fdt::new(fdt_data).ok()?;
 
     for node in fdt.all_nodes() {
-        if node.name.starts_with("memory") {
-            if let Some(mut reg) = node.reg() {
-                if let Some(region) = reg.next() {
-                    return Some((
-                        region.starting_address as u64,
-                        region.size.unwrap_or(0) as u64,
-                    ));
-                }
-            }
+        if node.name.starts_with("memory")
+            && let Some(mut reg) = node.reg()
+            && let Some(region) = reg.next()
+        {
+            return Some((
+                region.starting_address as u64,
+                region.size.unwrap_or(0) as u64,
+            ));
         }
     }
     None

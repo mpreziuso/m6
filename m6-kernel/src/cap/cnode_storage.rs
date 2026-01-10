@@ -47,7 +47,7 @@ impl CNodeStorage {
     ///
     /// Returns a pointer to the allocated CNode, or `None` if allocation fails.
     pub fn alloc(radix: CNodeRadix, guard: CNodeGuard) -> Option<NonNull<Self>> {
-        if radix < MIN_CNODE_RADIX || radix > MAX_CNODE_RADIX {
+        if !(MIN_CNODE_RADIX..=MAX_CNODE_RADIX).contains(&radix) {
             return None;
         }
 

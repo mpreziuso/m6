@@ -98,7 +98,7 @@ impl FrameAllocator {
         first_frame: usize,
         total_frames: usize,
     ) -> Self {
-        let required_entries = (total_frames + Self::BITS_PER_ENTRY - 1) / Self::BITS_PER_ENTRY;
+        let required_entries = total_frames.div_ceil(Self::BITS_PER_ENTRY);
 
         assert!(
             bitmap.len() >= required_entries,
@@ -128,6 +128,7 @@ impl FrameAllocator {
     ///
     /// Panics if the frame is below `first_frame`.
     #[inline]
+    #[expect(dead_code)]
     fn to_relative(&self, frame: usize) -> usize {
         assert!(
             frame >= self.first_frame,
@@ -140,6 +141,7 @@ impl FrameAllocator {
 
     /// Check if a relative frame index is within bounds.
     #[inline]
+    #[expect(dead_code)]
     fn is_valid_relative(&self, relative: usize) -> bool {
         relative < self.total_frames
     }
@@ -523,7 +525,7 @@ pub(super) unsafe fn init_frame_allocator(
     let bitmap_entries = bitmap_size / core::mem::size_of::<u64>();
 
     // Validate bitmap is large enough for the physical memory range
-    let required_entries = (total_frames + 63) / 64; // 64 bits per u64
+    let required_entries = total_frames.div_ceil(64); // 64 bits per u64
     let required_bytes = required_entries * core::mem::size_of::<u64>();
     if bitmap_size < required_bytes {
         panic!(

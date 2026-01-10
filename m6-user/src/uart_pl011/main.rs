@@ -210,8 +210,8 @@ fn handle_irq(uart: &Pl011, rx_buffer: &mut RxBuffer) {
         if count == 0 {
             break;
         }
-        for i in 0..count {
-            if !rx_buffer.push(tmp[i]) {
+        for &byte in tmp.iter().take(count) {
+            if !rx_buffer.push(byte) {
                 // Buffer full - drop remaining data
                 io::puts("[drv-uart] RX buffer overflow\n");
                 break;
@@ -301,8 +301,7 @@ fn handle_write_inline(uart: &Pl011, x0: u64, msg: &[u64; 4]) -> u64 {
 
     // Extract bytes from message registers and write to UART
     let mut data = [0u8; 24];
-    for i in 0..3 {
-        let reg = msg[i];
+    for (i, &reg) in msg.iter().enumerate().take(3) {
         for j in 0..8 {
             let byte_idx = i * 8 + j;
             if byte_idx >= len {
@@ -325,8 +324,8 @@ fn handle_read(uart: &Pl011, rx_buffer: &mut RxBuffer) -> u64 {
     // First, drain any newly arrived data from UART into buffer
     let mut tmp = [0u8; 32];
     let count = uart.drain_rx(&mut tmp);
-    for i in 0..count {
-        let _ = rx_buffer.push(tmp[i]);
+    for &byte in tmp.iter().take(count) {
+        let _ = rx_buffer.push(byte);
     }
 
     // Check if we have any data

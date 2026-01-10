@@ -176,6 +176,7 @@ pub fn timer_context_switch(ctx: &mut ExceptionContext) {
 }
 
 /// Switch to a specific task (used for initial task startup).
+#[expect(dead_code)]
 pub fn switch_to_task(sched: &mut PerCpuSched, tcb_ref: ObjectRef, ctx: &mut ExceptionContext) {
     // Set up the task
     eevdf::switch_to(sched, tcb_ref);

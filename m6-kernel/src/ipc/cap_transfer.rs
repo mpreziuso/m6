@@ -68,19 +68,19 @@ fn find_empty_slot_in_cspace(
 
         // Search from hint to end
         for i in start..num_slots {
-            if let Some(slot) = cnode.get_slot(i) {
-                if slot.is_empty() {
-                    return Ok(i);
-                }
+            if let Some(slot) = cnode.get_slot(i)
+                && slot.is_empty()
+            {
+                return Ok(i);
             }
         }
 
         // Wrap around and search from beginning to hint
         for i in 0..start {
-            if let Some(slot) = cnode.get_slot(i) {
-                if slot.is_empty() {
-                    return Ok(i);
-                }
+            if let Some(slot) = cnode.get_slot(i)
+                && slot.is_empty()
+            {
+                return Ok(i);
             }
         }
 
@@ -139,9 +139,7 @@ pub fn transfer_capabilities(
     // Read receiver's IPC buffer for destination hints
     let receiver_buf = read_ipc_buffer(receiver_ref)?;
     let mut dest_hints = [0u64; 4];
-    for i in 0..4 {
-        dest_hints[i] = receiver_buf.caps_or_badges[i];
-    }
+    dest_hints.copy_from_slice(&receiver_buf.caps_or_badges[..4]);
 
     // Array to store where we placed the capabilities
     let mut placed_slots = [0u64; 4];
@@ -213,9 +211,7 @@ pub fn transfer_capabilities(
     // Write destination slots back to receiver's IPC buffer
     let receiver_buf_mut = write_ipc_buffer(receiver_ref)?;
     receiver_buf_mut.recv_extra_caps = transferred as u8;
-    for i in 0..transferred {
-        receiver_buf_mut.caps_or_badges[i] = placed_slots[i];
-    }
+    receiver_buf_mut.caps_or_badges[..transferred].copy_from_slice(&placed_slots[..transferred]);
 
     Ok(transferred)
 }

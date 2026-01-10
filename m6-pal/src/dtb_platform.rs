@@ -71,6 +71,7 @@ pub struct DtbPlatform {
     pub(crate) gic_version: GicVersion,
     pub(crate) timer_irq: u32,
     pub(crate) uart_base: u64,
+    #[expect(dead_code)]
     pub(crate) uart_type: UartType,
     pub(crate) ram_base: u64,
     pub(crate) ram_size: u64,

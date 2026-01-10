@@ -13,12 +13,14 @@ static UART_ENDPOINT: AtomicU64 = AtomicU64::new(0);
 ///
 /// After calling this, `puts()` and other output functions will use IPC
 /// to communicate with the UART driver instead of the debug syscall.
+#[allow(dead_code)]
 pub fn init_console(uart_ep: u64) {
     UART_ENDPOINT.store(uart_ep, Ordering::Release);
 }
 
 /// Check if IPC console is available.
 #[inline]
+#[expect(dead_code)]
 pub fn has_ipc_console() -> bool {
     UART_ENDPOINT.load(Ordering::Acquire) != 0
 }
@@ -98,8 +100,8 @@ pub fn put_u64(mut n: u64) {
         let s = unsafe { core::str::from_utf8_unchecked(&reversed[..len]) };
         ipc_write_string(ep, s);
     } else {
-        for j in 0..len {
-            debug_putc(reversed[j]);
+        for &byte in reversed.iter().take(len) {
+            debug_putc(byte);
         }
     }
 }
@@ -140,8 +142,8 @@ pub fn put_hex(n: u64) {
         let s = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
         ipc_write_string(ep, s);
     } else {
-        for i in 0..len {
-            debug_putc(buf[i]);
+        for &byte in buf.iter().take(len) {
+            debug_putc(byte);
         }
     }
 }

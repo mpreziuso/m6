@@ -234,7 +234,7 @@ impl VSpaceBuilder {
             pt_slot,
             1,
         )
-        .map_err(|e| SpawnError::RetypeFailed(e))?;
+        .map_err(SpawnError::RetypeFailed)?;
 
         Ok(pt_slot)
     }
@@ -257,7 +257,7 @@ impl VSpaceBuilder {
             frame_slot,
             1,
         )
-        .map_err(|e| SpawnError::RetypeFailed(e))?;
+        .map_err(SpawnError::RetypeFailed)?;
 
         Ok(frame_slot)
     }
@@ -265,7 +265,7 @@ impl VSpaceBuilder {
     /// Map a frame at a virtual address
     fn map_frame(&self, frame_slot: u64, vaddr: u64, rights: MapRights) -> Result<(), SpawnError> {
         map_frame(self.cptr(self.vspace_slot), self.cptr(frame_slot), vaddr, rights.to_bits(), 0)
-            .map_err(|e| SpawnError::FrameMapFailed(e))?;
+            .map_err(SpawnError::FrameMapFailed)?;
         Ok(())
     }
 
@@ -303,7 +303,7 @@ impl VSpaceBuilder {
                 l1_base,
                 1, // Level 1
             )
-            .map_err(|e| SpawnError::PageTableMapFailed(e))?;
+            .map_err(SpawnError::PageTableMapFailed)?;
             self.add_l1(l1_base);
         }
 
@@ -316,7 +316,7 @@ impl VSpaceBuilder {
                 l2_base,
                 2, // Level 2
             )
-            .map_err(|e| SpawnError::PageTableMapFailed(e))?;
+            .map_err(SpawnError::PageTableMapFailed)?;
             self.add_l2(l2_base);
         }
 
@@ -329,7 +329,7 @@ impl VSpaceBuilder {
                 l3_base,
                 3, // Level 3
             )
-            .map_err(|e| SpawnError::PageTableMapFailed(e))?;
+            .map_err(SpawnError::PageTableMapFailed)?;
             self.add_l3(l3_base);
         }
 
@@ -382,7 +382,7 @@ impl VSpaceBuilder {
                             0,
                             ZEROS.as_ptr(),
                             data_offset_in_first_page,
-                        ).map_err(|e| SpawnError::FrameMapFailed(e))?;
+                        ).map_err(SpawnError::FrameMapFailed)?;
                     }
                     // Write the actual data
                     frame_write(
@@ -390,7 +390,7 @@ impl VSpaceBuilder {
                         data_offset_in_first_page as u64,
                         data.as_ptr(),
                         copy_len,
-                    ).map_err(|e| SpawnError::FrameMapFailed(e))?;
+                    ).map_err(SpawnError::FrameMapFailed)?;
                     // Zero remainder if needed
                     let remainder_start = data_offset_in_first_page + copy_len;
                     if remainder_start < PAGE_SIZE {
@@ -400,7 +400,7 @@ impl VSpaceBuilder {
                             remainder_start as u64,
                             ZEROS.as_ptr(),
                             PAGE_SIZE - remainder_start,
-                        ).map_err(|e| SpawnError::FrameMapFailed(e))?;
+                        ).map_err(SpawnError::FrameMapFailed)?;
                     }
                 } else if page_data_start < page_data_end {
                     // Subsequent pages: copy from calculated offset
@@ -410,7 +410,7 @@ impl VSpaceBuilder {
                         0,
                         data[page_data_start..].as_ptr(),
                         copy_len,
-                    ).map_err(|e| SpawnError::FrameMapFailed(e))?;
+                    ).map_err(SpawnError::FrameMapFailed)?;
                     // Zero remainder if this is a partial page
                     if copy_len < PAGE_SIZE {
                         static ZEROS: [u8; PAGE_SIZE] = [0u8; PAGE_SIZE];
@@ -419,7 +419,7 @@ impl VSpaceBuilder {
                             copy_len as u64,
                             ZEROS.as_ptr(),
                             PAGE_SIZE - copy_len,
-                        ).map_err(|e| SpawnError::FrameMapFailed(e))?;
+                        ).map_err(SpawnError::FrameMapFailed)?;
                     }
                 }
             } else {
@@ -430,7 +430,7 @@ impl VSpaceBuilder {
                     0,
                     ZEROS.as_ptr(),
                     PAGE_SIZE,
-                ).map_err(|e| SpawnError::FrameMapFailed(e))?;
+                ).map_err(SpawnError::FrameMapFailed)?;
             }
 
             // Map frame into child's VSpace with the correct permissions
@@ -465,6 +465,7 @@ impl VSpaceBuilder {
 /// the child's VSpace. Used for mapping DTB, initrd, boot info, etc.
 ///
 /// Returns the virtual address where the data was mapped.
+#[allow(clippy::too_many_arguments)]
 pub fn map_data_to_child(
     root_cnode: u64,
     cnode_radix: u8,
@@ -478,7 +479,7 @@ pub fn map_data_to_child(
     let cptr = |slot: u64| slot_to_cptr(slot, cnode_radix);
 
     // Calculate number of pages needed
-    let num_pages = (data.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+    let num_pages = data.len().div_ceil(PAGE_SIZE);
 
     for i in 0..num_pages {
         let page_vaddr = vaddr + (i * PAGE_SIZE) as u64;
@@ -634,11 +635,11 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
         vspace_slot,
         1,
     )
-    .map_err(|e| SpawnError::RetypeFailed(e))?;
+    .map_err(SpawnError::RetypeFailed)?;
 
     // Assign ASID to VSpace
     let asid = asid_pool_assign(cptr(config.asid_pool), cptr(vspace_slot))
-        .map_err(|e| SpawnError::AsidAssignFailed(e))? as u64;
+        .map_err(SpawnError::AsidAssignFailed)? as u64;
 
     // Create CSpace for child (radix 12 = 4096 slots)
     retype(
@@ -649,7 +650,7 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
         cspace_slot,
         1,
     )
-    .map_err(|e| SpawnError::RetypeFailed(e))?;
+    .map_err(SpawnError::RetypeFailed)?;
 
     // Create TCB
     retype(
@@ -660,7 +661,7 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
         tcb_slot,
         1,
     )
-    .map_err(|e| SpawnError::RetypeFailed(e))?;
+    .map_err(SpawnError::RetypeFailed)?;
 
     // Create IPC buffer frame
     retype(
@@ -671,7 +672,7 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
         ipc_buf_frame_slot,
         1,
     )
-    .map_err(|e| SpawnError::RetypeFailed(e))?;
+    .map_err(SpawnError::RetypeFailed)?;
 
     // Initialize VSpace builder
     let mut vspace_builder = VSpaceBuilder::new(
@@ -706,7 +707,7 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
     const IPC_BUFFER_ADDR: u64 = m6_syscall::IPC_BUFFER_ADDR;
     vspace_builder.ensure_page_tables(IPC_BUFFER_ADDR, IPC_BUFFER_ADDR + 0x1000)?;
     map_frame(cptr(vspace_slot), cptr(ipc_buf_frame_slot), IPC_BUFFER_ADDR, MapRights::RW.to_bits(), 0)
-        .map_err(|e| SpawnError::FrameMapFailed(e))?;
+        .map_err(SpawnError::FrameMapFailed)?;
 
     crate::io::puts("[spawn] IPC buffer mapped\n");
 
@@ -814,7 +815,7 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
         IPC_BUFFER_ADDR,
         cptr(ipc_buf_frame_slot),
     )
-    .map_err(|e| SpawnError::TcbConfigureFailed(e))?;
+    .map_err(SpawnError::TcbConfigureFailed)?;
 
     crate::io::puts("[spawn] Writing registers: PC=0x");
     // Set up initial registers
@@ -825,13 +826,13 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
     crate::io::put_hex(sp);
     crate::io::newline();
     tcb_write_registers(cptr(tcb_slot), entry, sp, config.x0)
-        .map_err(|e| SpawnError::TcbWriteRegistersFailed(e))?;
+        .map_err(SpawnError::TcbWriteRegistersFailed)?;
 
     if config.resume {
         crate::io::puts("[spawn] Resuming TCB...\n");
         // Resume the task
         tcb_resume(cptr(tcb_slot))
-            .map_err(|e| SpawnError::TcbResumeFailed(e))?;
+            .map_err(SpawnError::TcbResumeFailed)?;
         crate::io::puts("[spawn] TCB resumed\n");
     } else {
         crate::io::puts("[spawn] TCB configured (not resumed)\n");

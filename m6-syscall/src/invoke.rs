@@ -996,8 +996,6 @@ pub unsafe fn ipc_get_recv_caps() -> [u64; 4] {
     let ipc_buf = unsafe { IpcBuffer::get() };
     let mut caps = [0u64; 4];
     let count = ipc_buf.recv_extra_caps as usize;
-    for i in 0..count.min(4) {
-        caps[i] = ipc_buf.caps_or_badges[i];
-    }
+    caps[..count.min(4)].copy_from_slice(&ipc_buf.caps_or_badges[..count.min(4)]);
     caps
 }

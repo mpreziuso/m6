@@ -596,6 +596,7 @@ fn alloc_frame(registry: &mut Registry, cptr: &impl Fn(u64) -> u64) -> Result<u6
 /// - child_cspace_cptr: CPtr of the child's CSpace (destination)
 /// - src_cnode_cptr: CPtr of device-mgr's root CNode (source)
 /// - vspace_slot, tcb_slot, etc.: raw slot numbers in source CNode
+#[allow(clippy::too_many_arguments)]
 fn install_driver_caps(
     child_cspace_cptr: u64,
     src_cnode_cptr: u64,

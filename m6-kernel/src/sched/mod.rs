@@ -93,6 +93,7 @@ pub struct PerCpuSched {
     /// Cached sum of weights of all tasks in the run queue.
     total_weight: u64,
     /// CPU ID.
+    #[expect(dead_code)]
     cpu_id: usize,
 }
 
