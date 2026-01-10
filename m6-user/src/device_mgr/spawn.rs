@@ -90,6 +90,8 @@ pub struct DriverSpawnConfig<'a> {
     pub device_idx: usize,
     /// Driver manifest entry
     pub manifest: &'a DriverManifest,
+    /// Optional console endpoint slot to copy to driver (for IPC console)
+    pub console_ep_slot: Option<u64>,
 }
 
 /// Result of successful driver spawn
@@ -260,7 +262,7 @@ pub fn spawn_driver(
     let stack_top = load_elf_and_stack(vspace_slot, &elf, config.elf_data, registry, &cptr)?;
 
     // Map IPC buffer - ensure page tables exist first
-    const IPC_BUFFER_ADDR: u64 = 0x0000_7FFF_F000_0000;
+    const IPC_BUFFER_ADDR: u64 = m6_syscall::IPC_BUFFER_ADDR;
     ensure_page_tables(vspace_slot, IPC_BUFFER_ADDR, IPC_BUFFER_ADDR + PAGE_SIZE as u64, registry, &cptr)?;
     map_frame(cptr(vspace_slot), cptr(ipc_buf_slot), IPC_BUFFER_ADDR, MapRights::RW.to_bits(), 0)
         .map_err(SpawnError::FrameMapFailed)?;
@@ -281,6 +283,7 @@ pub fn spawn_driver(
         device_frame_slot,            // device frame slot number
         irq_handler_slot,             // optional irq handler slot
         iospace_slot,                 // optional iospace slot
+        config.console_ep_slot,       // optional console endpoint slot
     )?;
 
     // Calculate fault badge for this driver
@@ -584,6 +587,7 @@ fn install_driver_caps(
     device_frame_slot: u64,
     irq_handler_slot: Option<u64>,
     iospace_slot: Option<u64>,
+    console_ep_slot: Option<u64>,
 ) -> Result<(), SpawnError> {
     // Slot 0: CSpace self-reference
     cap_copy(child_cspace_cptr, slots::driver::ROOT_CNODE, 0, src_cnode_cptr, cspace_slot, 0)
@@ -614,6 +618,12 @@ fn install_driver_caps(
     // Slot 13: IOSpace (if present)
     if let Some(io_slot) = iospace_slot {
         cap_copy(child_cspace_cptr, slots::driver::IOSPACE, 0, src_cnode_cptr, io_slot, 0)
+            .map_err(SpawnError::CapCopyFailed)?;
+    }
+
+    // Slot 20: Console endpoint (if present, for IPC-based output)
+    if let Some(console_slot) = console_ep_slot {
+        cap_copy(child_cspace_cptr, slots::driver::CONSOLE_EP, 0, src_cnode_cptr, console_slot, 0)
             .map_err(SpawnError::CapCopyFailed)?;
     }
 

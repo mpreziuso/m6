@@ -39,15 +39,16 @@ pub fn puts(s: &str) {
 
 /// Write a string via IPC to the UART driver.
 ///
-/// Sends data in chunks of up to 32 bytes per message (using x1-x4,
-/// with length encoded in x0's upper bits).
+/// Sends data in chunks of up to 24 bytes per message (using x1-x3,
+/// with length encoded in x0's upper bits). x0 contains the label.
 fn ipc_write_string(ep: u64, s: &str) {
     let bytes = s.as_bytes();
 
-    // Send in chunks of 32 bytes (4 registers × 8 bytes each)
-    for chunk in bytes.chunks(32) {
-        // Pack bytes into registers x1-x4
-        let mut regs = [0u64; 4];
+    // Send in chunks of 24 bytes (3 data registers × 8 bytes each)
+    // Note: send() passes label + 3 data words via x1-x4
+    for chunk in bytes.chunks(24) {
+        // Pack bytes into registers x1-x3
+        let mut regs = [0u64; 3];
         for (i, &byte) in chunk.iter().enumerate() {
             let reg_idx = i / 8;
             let byte_idx = i % 8;

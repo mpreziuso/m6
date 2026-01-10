@@ -30,7 +30,8 @@ mod spawn;
 mod io;
 
 use core::panic::PanicInfo;
-use m6_syscall::invoke::{recv, reply_recv, sched_yield, signal};
+use m6_syscall::invoke::{recv, reply_recv, sched_yield, signal, ipc_set_send_caps};
+use m6_syscall::slot_to_cptr;
 
 use boot_info::DevMgrBootInfo;
 use registry::{DeviceState, Registry};
@@ -221,10 +222,17 @@ fn handle_ensure(registry: &mut Registry, _badge: u64) -> u64 {
     // Check current state
     match device.state {
         DeviceState::Running => {
-            // Driver already running - mint endpoint to client
+            // Driver already running - transfer endpoint to client
             let driver_idx = device.driver_idx;
             if driver_idx < registry.driver_count {
-                // In real impl: mint endpoint cap to client via IPC buffer
+                let driver = &registry.drivers[driver_idx];
+                // SAFETY: _start has initialised BOOT_INFO
+                let boot_info = unsafe { get_boot_info() };
+                let endpoint_cptr = slot_to_cptr(driver.endpoint_slot, boot_info.cnode_radix);
+
+                // SAFETY: IPC buffer is mapped for device-mgr
+                unsafe { ipc_set_send_caps(&[endpoint_cptr]); }
+
                 return ipc::response::OK;
             }
             ipc::response::ERR_DEVICE_NOT_FOUND
@@ -325,11 +333,13 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
     registry.devices[device_idx].state = DeviceState::Starting;
 
     // Spawn the driver
+    // Pass console endpoint if available (for drivers spawned after UART)
     let config = DriverSpawnConfig {
         elf_data,
         device_info,
         device_idx,
         manifest: manifest_entry,
+        console_ep_slot: registry.console_ep_slot,
     };
     let spawn_result = spawn::spawn_driver(&config, registry);
 
@@ -342,6 +352,20 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
             io::puts("[device-mgr] Spawned driver for: ");
             io::puts(compat);
             io::newline();
+
+            // If this is a UART driver, store its endpoint as the console
+            // so subsequent drivers can use IPC-based console output
+            if compat.contains("pl011") || compat.contains("uart") {
+                registry.console_ep_slot = Some(result.endpoint_slot);
+            }
+
+            // Transfer endpoint to client
+            // SAFETY: _start has initialised BOOT_INFO
+            let boot_info = unsafe { get_boot_info() };
+            let endpoint_cptr = slot_to_cptr(result.endpoint_slot, boot_info.cnode_radix);
+
+            // SAFETY: IPC buffer is mapped for device-mgr
+            unsafe { ipc_set_send_caps(&[endpoint_cptr]); }
 
             ipc::response::OK
         }

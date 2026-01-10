@@ -702,9 +702,9 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
     // Rust programs need significant stack space for startup/runtime
     let stack_top = vspace_builder.create_stack(32)?;
 
-    // Map IPC buffer just below the stack
-    // Stack: 32 pages from 0x7FFD_F000 to 0x7FFF_E000, so IPC buffer at 0x7FFD_E000
-    const IPC_BUFFER_ADDR: u64 = 0x0000_7FFD_E000;
+    // Map IPC buffer at the standard address
+    const IPC_BUFFER_ADDR: u64 = m6_syscall::IPC_BUFFER_ADDR;
+    vspace_builder.ensure_page_tables(IPC_BUFFER_ADDR, IPC_BUFFER_ADDR + 0x1000)?;
     map_frame(cptr(vspace_slot), cptr(ipc_buf_frame_slot), IPC_BUFFER_ADDR, MapRights::RW.to_bits(), 0)
         .map_err(|e| SpawnError::FrameMapFailed(e))?;
 

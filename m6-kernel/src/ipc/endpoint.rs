@@ -482,7 +482,7 @@ pub fn do_reply_recv(
     );
 
     if reply_ref.is_valid() {
-        do_reply_internal(reply_ref, reply_msg)?;
+        do_reply_internal(server_ref, reply_ref, reply_msg, has_grant)?;
 
         // Clear caller reference
         let _: () = object_table::with_tcb_mut(server_ref, |tcb| {
@@ -497,7 +497,12 @@ pub fn do_reply_recv(
 }
 
 /// Internal reply operation using Reply capability.
-fn do_reply_internal(reply_ref: ObjectRef, msg: &IpcMessage) -> Result<(), SyscallError> {
+fn do_reply_internal(
+    server_ref: ObjectRef,
+    reply_ref: ObjectRef,
+    msg: &IpcMessage,
+    has_grant: bool,
+) -> Result<(), SyscallError> {
     log::trace!(
         "do_reply_internal: reply_ref={:?}, msg[0]={:#x}",
         reply_ref, msg.regs[0]
@@ -513,6 +518,11 @@ fn do_reply_internal(reply_ref: ObjectRef, msg: &IpcMessage) -> Result<(), Sysca
     .ok_or(SyscallError::InvalidCap)??;
 
     log::trace!("do_reply_internal: caller_ref={:?}", caller_ref);
+
+    // Transfer capabilities from server to caller if Grant right present
+    if let Err(e) = super::cap_transfer::transfer_capabilities(server_ref, caller_ref, has_grant) {
+        log::debug!("Capability transfer failed during reply: {:?}", e);
+    }
 
     // Transfer reply message to caller
     transfer_message(caller_ref, msg, 0);

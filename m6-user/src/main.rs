@@ -13,8 +13,8 @@ pub mod process;
 
 use core::panic::PanicInfo;
 use m6_syscall::{
-    invoke::sched_yield,
-    UserBootInfo, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION,
+    invoke::{sched_yield, ipc_set_recv_slots, ipc_get_recv_caps},
+    IpcBuffer, UserBootInfo, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION,
 };
 use process::{slots, SpawnConfig, InitialCap};
 
@@ -467,43 +467,50 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
 
     // Request UART driver via ENSURE
     // This triggers device-mgr to spawn the PL011 driver
-    request_uart_driver(registry_ep_slot, radix);
+    request_uart_driver(registry_ep_slot, radix, &mut next_slot);
 }
 
 /// Request the UART driver from device-mgr.
 ///
-/// Sends an ENSURE request for the PL011 UART device. Once capability
-/// transfer is fully implemented, this would receive the driver's service
-/// endpoint and initialise io::init_console() with it.
-fn request_uart_driver(registry_ep: u64, radix: u8) {
+/// Sends an ENSURE request for the PL011 UART device and receives the driver's
+/// service endpoint capability via IPC. Once received, initialises the console
+/// to use IPC for output.
+fn request_uart_driver(registry_ep: u64, radix: u8, next_slot: &mut u64) {
     io::puts("[init] Requesting UART driver from device-mgr...\n");
+
+    // Allocate slot for receiving UART endpoint
+    let uart_ep_slot = *next_slot;
+    *next_slot += 1;
 
     let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
 
-    // Send ENSURE request
-    // x0 = ENSURE label (0x0001)
-    // Currently device-mgr uses placeholder logic that finds first unbound device
+    // Set up receive slot hint in IPC buffer
+    // SAFETY: IPC buffer is mapped for init by kernel at bootstrap
+    unsafe { ipc_set_recv_slots(&[uart_ep_slot]); }
+
     const ENSURE: u64 = 0x0001;
 
     // Use the Call syscall for proper RPC semantics
     // Call sends the request and blocks waiting for the reply
     match m6_syscall::invoke::call(cptr(registry_ep), ENSURE, 0, 0, 0) {
         Ok(result) => {
-            // Response code is in label (x0) - reply_recv puts it in x1,
-            // kernel extracts to msg[0], then delivers to receiver's x0
-            let response = result.label;
-            io::puts("[init] ENSURE response: ");
-            io::put_hex(response);
-            io::newline();
+            if result.label == 0 {
+                // Check if we received the endpoint capability
+                // SAFETY: IPC buffer is mapped
+                let ipc_buf = unsafe { IpcBuffer::get() };
+                let recv_count = ipc_buf.recv_extra_caps;
 
-            if response == 0 {
-                io::puts("[init] UART driver spawned successfully\n");
-                // TODO: Once capability transfer is implemented, we would:
-                // 1. Receive the driver's endpoint capability from IPC buffer
-                // 2. Call io::init_console(uart_endpoint_slot) to enable IPC console
+                if recv_count > 0 {
+                    let recv_caps = unsafe { ipc_get_recv_caps() };
+                    let uart_ep_cptr = cptr(recv_caps[0]);
+                    io::init_console(uart_ep_cptr);
+                    io::puts("[init] IPC console initialised\n");
+                } else {
+                    io::puts("[init] Warning: No endpoint received from device-mgr\n");
+                }
             } else {
                 io::puts("[init] ENSURE failed with code: ");
-                io::put_u64(response);
+                io::put_u64(result.label);
                 io::newline();
             }
         }

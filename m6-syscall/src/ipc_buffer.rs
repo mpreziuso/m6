@@ -15,8 +15,9 @@
 
 /// Virtual address where the IPC buffer is mapped.
 ///
-/// This is in the upper part of user address space, below the boot info page.
-pub const IPC_BUFFER_ADDR: u64 = 0x0000_7FFF_F000_0000;
+/// This is in the upper part of user address space, in the IPC buffer region.
+/// Must match `layout::IPC_BUFFER_BASE` in the kernel.
+pub const IPC_BUFFER_ADDR: u64 = 0x0000_7FFF_C000_0000;
 
 /// Size of the IPC buffer (one 4KB page).
 pub const IPC_BUFFER_SIZE: usize = 4096;

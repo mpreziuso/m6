@@ -163,6 +163,8 @@ pub struct Registry {
     pub subscriptions: [Subscription; MAX_SUBSCRIPTIONS],
     /// Next free capability slot for allocations
     pub next_free_slot: u64,
+    /// Console endpoint slot (UART driver), for passing to other drivers
+    pub console_ep_slot: Option<u64>,
 }
 
 impl Registry {
@@ -175,6 +177,7 @@ impl Registry {
             driver_count: 0,
             subscriptions: [const { Subscription::empty() }; MAX_SUBSCRIPTIONS],
             next_free_slot: first_free_slot,
+            console_ep_slot: None,
         }
     }
 

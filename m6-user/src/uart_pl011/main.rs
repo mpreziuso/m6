@@ -19,7 +19,7 @@ mod pl011;
 mod io;
 
 use core::panic::PanicInfo;
-use m6_syscall::invoke::{map_frame, recv, sched_yield, send};
+use m6_syscall::invoke::{map_frame, recv, reply_recv, sched_yield};
 
 use pl011::Pl011;
 
@@ -41,6 +41,9 @@ const ROOT_VSPACE: u64 = cptr(2);
 const DEVICE_FRAME: u64 = cptr(10);
 /// Service endpoint for clients (slot 12)
 const SERVICE_EP: u64 = cptr(12);
+/// Console endpoint (slot 20) - not used by UART driver as it IS the console
+#[allow(dead_code)]
+const CONSOLE_EP: u64 = cptr(20);
 
 /// Virtual address where we map the UART MMIO region.
 /// Must not conflict with other mappings (stack, IPC buffer, etc.)
@@ -88,33 +91,42 @@ pub unsafe extern "C" fn _start() -> ! {
 
 /// Main service loop - handles client IPC requests.
 fn service_loop(uart: &Pl011) -> ! {
+    let mut last_response: u64 = 0;
+    let mut first_message = true;
+
     loop {
-        match recv(SERVICE_EP) {
+        let result = if first_message {
+            // First iteration: just receive (no reply to send yet)
+            first_message = false;
+            recv(SERVICE_EP)
+        } else {
+            // Subsequent iterations: reply to previous caller and wait for next
+            reply_recv(SERVICE_EP, last_response, 0, 0, 0)
+        };
+
+        match result {
             Ok(ipc_result) => {
                 let badge = ipc_result.badge;
                 let label = ipc_result.label;
 
-                let response = handle_request(uart, badge, label);
-
-                // Reply to the caller via send on the same endpoint
-                if send(SERVICE_EP, response, 0, 0, 0).is_err() {
-                    io::puts("[drv-uart] send() failed\n");
-                }
+                // Handle the request and store response for next reply_recv
+                last_response = handle_request(uart, badge, label, &ipc_result.msg);
             }
             Err(err) => {
-                io::puts("[drv-uart] recv() error: ");
+                io::puts("[drv-uart] recv/reply_recv error: ");
                 io::put_u64(err as u64);
                 io::newline();
                 sched_yield();
+                first_message = true; // Reset to recv mode
             }
         }
     }
 }
 
 /// Handle an incoming IPC request.
-fn handle_request(uart: &Pl011, _badge: u64, label: u64) -> u64 {
+fn handle_request(uart: &Pl011, _badge: u64, label: u64, msg: &[u64; 4]) -> u64 {
     match label & 0xFFFF {
-        ipc::request::WRITE_INLINE => handle_write_inline(uart, label),
+        ipc::request::WRITE_INLINE => handle_write_inline(uart, label, msg),
         ipc::request::READ => handle_read(uart),
         ipc::request::GET_STATUS => handle_get_status(uart),
         _ => ipc::response::ERR_INVALID_REQUEST,
@@ -123,26 +135,27 @@ fn handle_request(uart: &Pl011, _badge: u64, label: u64) -> u64 {
 
 /// Handle WRITE_INLINE request.
 ///
-/// Data is packed in x1-x5 (up to 40 bytes). Length is in x0[32:47].
-fn handle_write_inline(uart: &Pl011, x0: u64) -> u64 {
+/// Data is packed in msg[0..2] (up to 24 bytes). Length is in x0[32:47].
+fn handle_write_inline(uart: &Pl011, x0: u64, msg: &[u64; 4]) -> u64 {
     let len = ipc::write_inline_len(x0);
-    if len == 0 || len > 40 {
+    if len == 0 || len > 24 {
         return ipc::response::ERR_INVALID_REQUEST;
     }
 
-    // In a real implementation, we'd read x1-x5 from the IPC message registers
-    // For now, this is a placeholder that just acknowledges the write
-    // The actual data extraction would look like:
-    //
-    // let mut data = [0u8; 40];
-    // for (i, reg) in [x1, x2, x3, x4, x5].iter().enumerate() {
-    //     for j in 0..8 {
-    //         let byte_idx = i * 8 + j;
-    //         if byte_idx >= len { break; }
-    //         data[byte_idx] = ((*reg >> (j * 8)) & 0xFF) as u8;
-    //     }
-    // }
-    // uart.write(&data[..len]);
+    // Extract bytes from message registers and write to UART
+    let mut data = [0u8; 24];
+    for i in 0..3 {
+        let reg = msg[i];
+        for j in 0..8 {
+            let byte_idx = i * 8 + j;
+            if byte_idx >= len {
+                break;
+            }
+            data[byte_idx] = ((reg >> (j * 8)) & 0xFF) as u8;
+        }
+    }
+
+    uart.write(&data[..len]);
 
     ipc::response::OK
 }

@@ -12,7 +12,7 @@
 use m6_arch::exceptions::ExceptionContext;
 use m6_cap::{CapRights, ObjectType};
 use m6_cap::objects::ThreadState;
-use m6_common::VirtAddr;
+use m6_common::{PhysAddr, VirtAddr};
 
 use crate::cap::object_table;
 use crate::ipc;
@@ -94,6 +94,15 @@ pub fn handle_tcb_configure(args: &SyscallArgs) -> SyscallResult {
         return Err(SyscallError::InvalidState);
     }
 
+    // Extract IPC buffer physical address BEFORE taking the TCB lock
+    // (to avoid deadlock with nested object table locks)
+    let ipc_buffer_phys = if let Some(ref buf_ref) = ipc_buffer_ref {
+        object_table::with_frame_mut(*buf_ref, |frame| frame.phys_addr)
+            .unwrap_or(PhysAddr::new(0))
+    } else {
+        PhysAddr::new(0)
+    };
+
     // Configure the TCB
     let _: () = object_table::with_tcb_mut(tcb_cap.obj_ref, |tcb_full| {
         // Set CSpace root
@@ -113,9 +122,11 @@ pub fn handle_tcb_configure(args: &SyscallArgs) -> SyscallResult {
         if let Some(ref buf_ref) = ipc_buffer_ref {
             tcb_full.tcb.ipc_buffer = *buf_ref;
             tcb_full.tcb.ipc_buffer_addr = VirtAddr::new(ipc_buffer_addr);
+            tcb_full.tcb.ipc_buffer_phys = ipc_buffer_phys;
         } else {
             tcb_full.tcb.ipc_buffer = m6_cap::ObjectRef::NULL;
             tcb_full.tcb.ipc_buffer_addr = VirtAddr::new(0);
+            tcb_full.tcb.ipc_buffer_phys = PhysAddr::new(0);
         }
     });
 

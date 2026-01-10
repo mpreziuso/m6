@@ -65,6 +65,10 @@ pub mod driver {
     /// Notification for signalling from device-mgr
     pub const NOTIF: u64 = 14;
 
+    /// Console endpoint for IPC-based output (optional)
+    /// If present, drivers can use io::init_console() with this slot
+    pub const CONSOLE_EP: u64 = 20;
+
     /// First free slot for driver's own allocations
     pub const FIRST_FREE_SLOT: u64 = 32;
 }
