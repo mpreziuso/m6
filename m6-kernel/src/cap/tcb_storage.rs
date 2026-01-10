@@ -53,8 +53,8 @@ pub struct TcbFull {
     /// Previous TCB in IPC wait queue.
     pub ipc_prev: ObjectRef,
 
-    /// Pending IPC message registers (x0-x5) for blocked sender.
-    pub ipc_message: [u64; 6],
+    /// Pending IPC message registers (5 words) for blocked sender.
+    pub ipc_message: [u64; 5],
     /// Badge to deliver with pending message.
     pub ipc_badge: u64,
     /// Object we're blocked on (endpoint/notification).
@@ -87,7 +87,7 @@ impl TcbFull {
             ipc_next: ObjectRef::NULL,
             ipc_prev: ObjectRef::NULL,
             // IPC state
-            ipc_message: [0; 6],
+            ipc_message: [0; 5],
             ipc_badge: 0,
             ipc_blocked_on: ObjectRef::NULL,
             // Async work context
@@ -126,7 +126,7 @@ impl TcbFull {
             (*tcb).ipc_next = ObjectRef::NULL;
             (*tcb).ipc_prev = ObjectRef::NULL;
             // IPC state (already zeroed from alloc_zeroed)
-            (*tcb).ipc_message = [0; 6];
+            (*tcb).ipc_message = [0; 5];
             (*tcb).ipc_badge = 0;
             (*tcb).ipc_blocked_on = ObjectRef::NULL;
             // Async work context
@@ -172,7 +172,7 @@ impl TcbFull {
 
     /// Clear all IPC state (message, badge, blocked_on, links).
     pub fn clear_ipc_state(&mut self) {
-        self.ipc_message = [0; 6];
+        self.ipc_message = [0; 5];
         self.ipc_badge = 0;
         self.ipc_blocked_on = ObjectRef::NULL;
         self.clear_ipc_links();

@@ -42,6 +42,13 @@ pub fn cap_error_to_syscall(e: CapError) -> SyscallError {
 /// Syscall result type.
 pub type SyscallResult = Result<i64, SyscallError>;
 
+/// Sentinel value indicating IPC message was delivered to registers.
+///
+/// When an IPC syscall returns this value, the message has already been
+/// written to the caller's context (x0-x4 for message, x6 for badge).
+/// The syscall dispatcher should NOT overwrite x0 with the return value.
+pub const IPC_MESSAGE_DELIVERED: i64 = i64::MIN;
+
 /// Convert a syscall result to a raw return value.
 #[inline]
 pub fn to_return_value(result: SyscallResult) -> i64 {

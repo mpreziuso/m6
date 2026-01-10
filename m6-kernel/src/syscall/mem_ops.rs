@@ -242,8 +242,15 @@ pub fn handle_map_frame(args: &SyscallArgs) -> SyscallResult {
         CapRights::READ
     };
 
-    // Look up frame capability
-    let frame_cap = ipc::lookup_cap(frame_cptr, ObjectType::Frame, required_rights)?;
+    // Look up frame capability - accept both Frame and DeviceFrame
+    let frame_cap = ipc::lookup_cap(frame_cptr, ObjectType::Frame, required_rights)
+        .or_else(|e| {
+            if matches!(e, SyscallError::TypeMismatch) {
+                ipc::lookup_cap(frame_cptr, ObjectType::DeviceFrame, required_rights)
+            } else {
+                Err(e)
+            }
+        })?;
 
     // Get frame info
     let (frame_phys, frame_size_bits, is_device) = object_table::with_frame_mut(

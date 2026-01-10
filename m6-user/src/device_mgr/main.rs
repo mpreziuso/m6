@@ -30,7 +30,7 @@ mod spawn;
 mod io;
 
 use core::panic::PanicInfo;
-use m6_syscall::invoke::{recv, sched_yield, send, signal};
+use m6_syscall::invoke::{recv, reply_recv, sched_yield, signal};
 
 use boot_info::DevMgrBootInfo;
 use registry::{DeviceState, Registry};
@@ -38,6 +38,16 @@ use spawn::{DeviceInfo, DriverSpawnConfig};
 
 /// Static storage for boot info pointer (set at startup)
 static mut BOOT_INFO: *const DevMgrBootInfo = core::ptr::null();
+
+/// Get a reference to the boot info.
+///
+/// # Safety
+///
+/// Must only be called after _start has initialised BOOT_INFO.
+#[inline]
+pub unsafe fn get_boot_info() -> &'static DevMgrBootInfo {
+    unsafe { &*BOOT_INFO }
+}
 
 /// Entry point for device manager.
 ///
@@ -143,32 +153,34 @@ fn service_loop(registry: &mut Registry) -> ! {
 
     let registry_cptr = cptr(slots::REGISTRY_EP);
 
+    // Wait for the first request
+    let mut last_response: u64 = 0;
+    let mut first_message = true;
+
     loop {
-        // Wait for request on registry endpoint
-        match recv(registry_cptr) {
-            Ok(result) => {
-                let sender_badge = result as u64;
+        let result = if first_message {
+            // First iteration: just receive (no reply to send yet)
+            first_message = false;
+            recv(registry_cptr)
+        } else {
+            // Subsequent iterations: reply to previous caller and wait for next
+            reply_recv(registry_cptr, last_response, 0, 0, 0)
+        };
 
-                io::puts("[device-mgr] Received message, badge=");
-                io::put_hex(sender_badge);
-                io::newline();
+        match result {
+            Ok(ipc_result) => {
+                let sender_badge = ipc_result.badge;
+                let label = ipc_result.label;
 
-                // Read message label from registers (simplified)
-                // In a real implementation, this would come from the IPC message
-                let label = 0u64;
-
-                // Handle the request
-                let response = handle_request(registry, sender_badge, label);
-
-                // Reply to the sender
-                let _ = send(registry_cptr, response, 0, 0, 0);
+                // Handle the request and store response for next reply_recv
+                last_response = handle_request(registry, sender_badge, label);
             }
             Err(err) => {
-                io::puts("[device-mgr] recv() returned error ");
+                io::puts("[device-mgr] recv/reply_recv error: ");
                 io::put_u64(err as u64);
                 io::puts(" - yielding\n");
-                // Error receiving - yield and try again
                 sched_yield();
+                first_message = true; // Reset to recv mode
             }
         }
     }
@@ -232,11 +244,23 @@ fn handle_ensure(registry: &mut Registry, _badge: u64) -> u64 {
     }
 }
 
-/// Find first unbound device in the registry.
+/// Find first unbound device that has a driver available in the initrd.
 fn find_first_unbound_device(registry: &Registry) -> Option<usize> {
+    let initrd = get_initrd()?;
+    let archive = tar_no_std::TarArchiveRef::new(initrd).ok()?;
+
     for i in 0..registry.device_count {
         if registry.devices[i].state == DeviceState::Unbound {
-            return Some(i);
+            // Check if driver exists for this device
+            let compat = registry.devices[i].compatible_str();
+            if let Some(entry) = manifest::find_driver(compat) {
+                // Check if binary exists in initrd
+                let has_binary = archive.entries()
+                    .any(|e| e.filename().as_str() == Ok(entry.binary_name));
+                if has_binary {
+                    return Some(i);
+                }
+            }
         }
     }
     None
@@ -329,9 +353,42 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
             match e {
                 spawn::SpawnError::InvalidElf(_) => io::puts("invalid ELF"),
                 spawn::SpawnError::OutOfMemory => io::puts("out of memory"),
-                spawn::SpawnError::RetypeFailed(_) => io::puts("retype failed"),
-                spawn::SpawnError::TcbConfigureFailed(_) => io::puts("TCB config failed"),
-                _ => io::puts("unknown error"),
+                spawn::SpawnError::RetypeFailed(err) => {
+                    io::puts("retype failed: ");
+                    io::puts(err.name());
+                }
+                spawn::SpawnError::AsidAssignFailed(err) => {
+                    io::puts("ASID assign failed: ");
+                    io::puts(err.name());
+                }
+                spawn::SpawnError::TcbConfigureFailed(err) => {
+                    io::puts("TCB config failed: ");
+                    io::puts(err.name());
+                }
+                spawn::SpawnError::TcbWriteRegistersFailed(err) => {
+                    io::puts("TCB write regs failed: ");
+                    io::puts(err.name());
+                }
+                spawn::SpawnError::TcbResumeFailed(err) => {
+                    io::puts("TCB resume failed: ");
+                    io::puts(err.name());
+                }
+                spawn::SpawnError::FrameMapFailed(err) => {
+                    io::puts("frame map failed: ");
+                    io::puts(err.name());
+                }
+                spawn::SpawnError::CapCopyFailed(err) => {
+                    io::puts("cap copy failed: ");
+                    io::puts(err.name());
+                }
+                spawn::SpawnError::IrqClaimFailed(err) => {
+                    io::puts("IRQ claim failed: ");
+                    io::puts(err.name());
+                }
+                spawn::SpawnError::NoSlots => io::puts("no slots"),
+                spawn::SpawnError::DriverNotFound => io::puts("driver not found"),
+                spawn::SpawnError::TooManyDrivers => io::puts("too many drivers"),
+                spawn::SpawnError::DeviceUntypedNotFound => io::puts("device untyped not found"),
             }
             io::newline();
 

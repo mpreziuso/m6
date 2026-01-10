@@ -32,3 +32,5 @@ pub use cptr::{slot_to_cptr, cptr_to_slot, CptrContext};
 pub use error::SyscallError;
 pub use ipc_buffer::{IpcBuffer, MintArgs, IPC_BUFFER_ADDR, IPC_BUFFER_SIZE};
 pub use numbers::Syscall;
+#[cfg(feature = "userspace")]
+pub use invoke::IpcRecvResult;

@@ -14,7 +14,7 @@
 //! - **Scheduling Context**: CPU time budget
 //! - **Bound Notification**: For combined waiting
 
-use m6_common::VirtAddr;
+use m6_common::{PhysAddr, VirtAddr};
 
 use crate::slot::ObjectRef;
 
@@ -105,8 +105,10 @@ pub struct TcbObject {
     pub vspace: ObjectRef,
     /// IPC buffer frame.
     pub ipc_buffer: ObjectRef,
-    /// IPC buffer virtual address.
+    /// IPC buffer virtual address (for user-space access).
     pub ipc_buffer_addr: VirtAddr,
+    /// IPC buffer physical address (for kernel access via direct map).
+    pub ipc_buffer_phys: PhysAddr,
     /// Fault endpoint (receives fault messages).
     pub fault_endpoint: ObjectRef,
     /// Scheduling context (CPU time budget).
@@ -138,6 +140,7 @@ impl TcbObject {
             vspace: ObjectRef::NULL,
             ipc_buffer: ObjectRef::NULL,
             ipc_buffer_addr: VirtAddr::new(0),
+            ipc_buffer_phys: PhysAddr::new(0),
             fault_endpoint: ObjectRef::NULL,
             sched_context: ObjectRef::NULL,
             bound_notification: ObjectRef::NULL,

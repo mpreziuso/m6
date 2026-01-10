@@ -6,6 +6,7 @@
 //! copied/moved to the receiver's CSpace.
 
 use crate::cap::{cdt_storage, cspace, object_table};
+use crate::memory::translate::phys_to_virt;
 use crate::syscall::error::SyscallError;
 use m6_cap::{CNodeOps, ObjectRef};
 use m6_syscall::IpcBuffer;
@@ -13,32 +14,46 @@ use m6_syscall::IpcBuffer;
 // -- Helper Functions
 
 /// Read IPC buffer for a TCB.
+///
+/// Uses the physical address of the IPC buffer and accesses it via the
+/// kernel's direct map, since user virtual addresses aren't accessible
+/// from kernel mode.
 fn read_ipc_buffer(tcb_ref: ObjectRef) -> Result<&'static IpcBuffer, SyscallError> {
-    let ipc_buf_addr = object_table::with_tcb(tcb_ref, |tcb| Some(tcb.tcb.ipc_buffer_addr.as_u64()))
+    let ipc_buf_phys = object_table::with_tcb(tcb_ref, |tcb| Some(tcb.tcb.ipc_buffer_phys.as_u64()))
         .ok_or(SyscallError::InvalidState)?;
 
-    if ipc_buf_addr == 0 {
+    if ipc_buf_phys == 0 {
         return Err(SyscallError::InvalidState);
     }
 
-    // SAFETY: Address comes from TCB configuration, validated at TCB setup time.
-    // The IPC buffer is mapped into the thread's address space and must remain
-    // valid for the lifetime of the thread.
-    Ok(unsafe { &*(ipc_buf_addr as *const IpcBuffer) })
+    // Convert physical address to kernel virtual address via direct map
+    let kernel_va = phys_to_virt(ipc_buf_phys);
+
+    // SAFETY: Physical address comes from TCB configuration, validated at TCB setup time.
+    // The IPC buffer frame is allocated and remains valid for the lifetime of the thread.
+    // We access it via the kernel's direct map which maps all physical memory.
+    Ok(unsafe { &*(kernel_va as *const IpcBuffer) })
 }
 
 /// Write to IPC buffer for a TCB.
+///
+/// Uses the physical address of the IPC buffer and accesses it via the
+/// kernel's direct map, since user virtual addresses aren't accessible
+/// from kernel mode.
 fn write_ipc_buffer(tcb_ref: ObjectRef) -> Result<&'static mut IpcBuffer, SyscallError> {
-    let ipc_buf_addr = object_table::with_tcb(tcb_ref, |tcb| Some(tcb.tcb.ipc_buffer_addr.as_u64()))
+    let ipc_buf_phys = object_table::with_tcb(tcb_ref, |tcb| Some(tcb.tcb.ipc_buffer_phys.as_u64()))
         .ok_or(SyscallError::InvalidState)?;
 
-    if ipc_buf_addr == 0 {
+    if ipc_buf_phys == 0 {
         return Err(SyscallError::InvalidState);
     }
 
-    // SAFETY: Address comes from TCB configuration, validated at TCB setup time.
+    // Convert physical address to kernel virtual address via direct map
+    let kernel_va = phys_to_virt(ipc_buf_phys);
+
+    // SAFETY: Physical address comes from TCB configuration, validated at TCB setup time.
     // We have exclusive access to this TCB during IPC, so mutable access is safe.
-    Ok(unsafe { &mut *(ipc_buf_addr as *mut IpcBuffer) })
+    Ok(unsafe { &mut *(kernel_va as *mut IpcBuffer) })
 }
 
 /// Find an empty slot in a CSpace starting from a hint.

@@ -123,8 +123,7 @@ pub unsafe extern "C" fn _start() -> ! {
         io::puts("[init] Cannot spawn device-mgr: missing initrd or untyped memory\n");
     }
 
-    io::puts("[init] Initialisation complete\n");
-    io::puts("[init] Init has no more work - system idle with device-mgr waiting for requests\n");
+    io::puts("[init] Complete\n");
 
     // Init has nothing more to do
     // In a real system, init would block on a notification waiting for shutdown/reboot signals
@@ -193,17 +192,26 @@ const DEVMGR_BOOT_INFO_ADDR: u64 = 0x0000_1000_0000; // 256MB mark
 const DEVMGR_DTB_ADDR: u64 = 0x0000_1001_0000;       // Just after boot info
 const DEVMGR_INITRD_ADDR: u64 = 0x0000_2000_0000;    // 512MB mark
 
+/// Maximum number of device untyped regions to pass to device-mgr
+const MAX_DEVICE_UNTYPED: usize = 8;
+
+/// First device untyped slot in device-mgr's CSpace
+const DEVMGR_FIRST_DEVICE_UNTYPED: u64 = 20;
+
 /// DevMgrBootInfo structure layout (must match device_mgr/boot_info.rs)
 #[repr(C)]
 struct DevMgrBootInfoLayout {
     magic: u64,
     version: u32,
     cnode_radix: u8,
-    _reserved: [u8; 3],
+    device_untyped_count: u8,
+    _reserved: [u8; 2],
     dtb_vaddr: u64,
     dtb_size: u64,
     initrd_vaddr: u64,
     initrd_size: u64,
+    device_untyped_phys: [u64; MAX_DEVICE_UNTYPED],
+    device_untyped_size_bits: [u8; MAX_DEVICE_UNTYPED],
 }
 
 /// Spawn the device manager process.
@@ -221,6 +229,37 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     io::puts("[init] Found device-mgr: ");
     io::put_u64(elf_data.len() as u64);
     io::puts(" bytes\n");
+
+    // Find device untypeds from boot_info
+    let mut device_untyped_slots: [u64; MAX_DEVICE_UNTYPED] = [0; MAX_DEVICE_UNTYPED];
+    let mut device_untyped_phys: [u64; MAX_DEVICE_UNTYPED] = [0; MAX_DEVICE_UNTYPED];
+    let mut device_untyped_size_bits: [u8; MAX_DEVICE_UNTYPED] = [0; MAX_DEVICE_UNTYPED];
+    let mut device_untyped_count = 0usize;
+
+    for i in 0..boot_info.untyped_count as usize {
+        if boot_info.untyped_is_device(i) && device_untyped_count < MAX_DEVICE_UNTYPED {
+            let slot = slots::FIRST_UNTYPED + i as u64;
+            device_untyped_slots[device_untyped_count] = slot;
+            device_untyped_phys[device_untyped_count] = boot_info.untyped_phys_base[i];
+            device_untyped_size_bits[device_untyped_count] = boot_info.untyped_size_bits[i];
+
+            io::puts("[init] Device untyped ");
+            io::put_u64(device_untyped_count as u64);
+            io::puts(": slot ");
+            io::put_u64(slot);
+            io::puts(" phys ");
+            io::put_hex(boot_info.untyped_phys_base[i]);
+            io::puts(" size 2^");
+            io::put_u64(boot_info.untyped_size_bits[i] as u64);
+            io::newline();
+
+            device_untyped_count += 1;
+        }
+    }
+
+    io::puts("[init] Found ");
+    io::put_u64(device_untyped_count as u64);
+    io::puts(" device untypeds\n");
 
     // Create registry endpoint for device-mgr
     let registry_ep_slot = FIRST_FREE_SLOT;
@@ -247,6 +286,32 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
 
     io::puts("[init] Registry endpoint created successfully\n");
 
+    // Build initial capabilities list including device untypeds
+    // Max 16 initial caps: 3 standard + up to 8 device untypeds + some margin
+    let mut initial_caps_storage: [InitialCap; 16] = [InitialCap { src_slot: 0, dst_slot: 0 }; 16];
+    let mut cap_idx = 0;
+
+    // Standard caps
+    initial_caps_storage[cap_idx] = InitialCap { src_slot: registry_ep_slot, dst_slot: 12 };
+    cap_idx += 1;
+    initial_caps_storage[cap_idx] = InitialCap { src_slot: slots::IRQ_CONTROL, dst_slot: 14 };
+    cap_idx += 1;
+    initial_caps_storage[cap_idx] = InitialCap { src_slot: slots::FIRST_UNTYPED, dst_slot: 15 };
+    cap_idx += 1;
+    initial_caps_storage[cap_idx] = InitialCap { src_slot: slots::ASID_POOL, dst_slot: 16 };
+    cap_idx += 1;
+
+    // Device untypeds at slots 20+
+    for i in 0..device_untyped_count {
+        initial_caps_storage[cap_idx] = InitialCap {
+            src_slot: device_untyped_slots[i],
+            dst_slot: DEVMGR_FIRST_DEVICE_UNTYPED + i as u64,
+        };
+        cap_idx += 1;
+    }
+
+    let initial_caps = &initial_caps_storage[..cap_idx];
+
     // Configure spawn - don't resume yet, we need to map additional data
     let config = SpawnConfig {
         elf_data,
@@ -255,12 +320,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         ram_untyped: slots::FIRST_UNTYPED,
         asid_pool: slots::ASID_POOL,
         next_free_slot: FIRST_FREE_SLOT + 1, // +1 for the endpoint we just created
-        initial_caps: &[
-            // Give device-mgr its own CNode reference
-            InitialCap { src_slot: slots::ROOT_CNODE, dst_slot: 0 },
-            // Give device-mgr the registry endpoint
-            InitialCap { src_slot: registry_ep_slot, dst_slot: 12 }, // slot 12 = REGISTRY_EP
-        ],
+        initial_caps,
         x0: DEVMGR_BOOT_INFO_ADDR, // Will point to boot info
         resume: false, // Don't resume yet
     };
@@ -315,11 +375,14 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         magic: DEV_MGR_BOOT_INFO_MAGIC,
         version: DEV_MGR_BOOT_INFO_VERSION,
         cnode_radix: 12, // Device-mgr's CNode has radix 12 (set in spawn_process)
-        _reserved: [0; 3],
+        device_untyped_count: device_untyped_count as u8,
+        _reserved: [0; 2],
         dtb_vaddr: if boot_info.has_dtb() { DEVMGR_DTB_ADDR } else { 0 },
         dtb_size: boot_info.dtb_size,
         initrd_vaddr: if boot_info.has_initrd() { DEVMGR_INITRD_ADDR } else { 0 },
         initrd_size: boot_info.initrd_size,
+        device_untyped_phys,
+        device_untyped_size_bits,
     };
 
     // Map boot info, DTB, and initrd into device-mgr's VSpace
@@ -401,6 +464,55 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     io::puts(", ASID: ");
     io::put_u64(result.asid);
     io::newline();
+
+    // Request UART driver via ENSURE
+    // This triggers device-mgr to spawn the PL011 driver
+    request_uart_driver(registry_ep_slot, radix);
+}
+
+/// Request the UART driver from device-mgr.
+///
+/// Sends an ENSURE request for the PL011 UART device. Once capability
+/// transfer is fully implemented, this would receive the driver's service
+/// endpoint and initialise io::init_console() with it.
+fn request_uart_driver(registry_ep: u64, radix: u8) {
+    io::puts("[init] Requesting UART driver from device-mgr...\n");
+
+    let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
+
+    // Send ENSURE request
+    // x0 = ENSURE label (0x0001)
+    // Currently device-mgr uses placeholder logic that finds first unbound device
+    const ENSURE: u64 = 0x0001;
+
+    // Use the Call syscall for proper RPC semantics
+    // Call sends the request and blocks waiting for the reply
+    match m6_syscall::invoke::call(cptr(registry_ep), ENSURE, 0, 0, 0) {
+        Ok(result) => {
+            // Response code is in label (x0) - reply_recv puts it in x1,
+            // kernel extracts to msg[0], then delivers to receiver's x0
+            let response = result.label;
+            io::puts("[init] ENSURE response: ");
+            io::put_hex(response);
+            io::newline();
+
+            if response == 0 {
+                io::puts("[init] UART driver spawned successfully\n");
+                // TODO: Once capability transfer is implemented, we would:
+                // 1. Receive the driver's endpoint capability from IPC buffer
+                // 2. Call io::init_console(uart_endpoint_slot) to enable IPC console
+            } else {
+                io::puts("[init] ENSURE failed with code: ");
+                io::put_u64(response);
+                io::newline();
+            }
+        }
+        Err(e) => {
+            io::puts("[init] Call to device-mgr failed: ");
+            io::put_u64(e as u64);
+            io::newline();
+        }
+    }
 }
 
 fn print_spawn_error(e: process::SpawnError) {

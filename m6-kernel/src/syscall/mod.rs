@@ -24,12 +24,13 @@ pub mod mem_ops;
 pub mod numbers;
 pub mod tcb_ops;
 
+use m6_arch::cpu::cpu_id;
 use m6_arch::exceptions::ExceptionContext;
 use m6_arch::registers::{esr, spsr};
 use m6_cap::{CapRights, ObjectType};
 use m6_pal::console;
 
-use error::{SyscallError, SyscallResult, to_return_value};
+use error::{SyscallError, SyscallResult, to_return_value, IPC_MESSAGE_DELIVERED};
 use numbers::Syscall;
 
 use crate::ipc::{self, IpcMessage};
@@ -63,8 +64,15 @@ pub fn handle_syscall(ctx: &mut ExceptionContext) {
     // Dispatch and get result
     let result = dispatch_syscall(syscall_num, &args, ctx);
 
-    // Store result in x0
-    ctx.gpr[0] = to_return_value(result) as u64;
+    // Store result in x0, unless IPC message was already delivered to registers
+    match result {
+        Ok(IPC_MESSAGE_DELIVERED) => {
+            // IPC message already in x0-x4, badge in x6 - don't overwrite
+        }
+        _ => {
+            ctx.gpr[0] = to_return_value(result) as u64;
+        }
+    }
 }
 
 /// Syscall arguments extracted from registers.
@@ -115,7 +123,7 @@ fn dispatch_syscall(
             // Check if there's another task to run
             let dominated = {
                 let current = crate::sched::current_task();
-                let cpu_id = 0; // TODO: get actual CPU ID
+                let cpu_id = cpu_id();
                 let sched_state = crate::sched::get_sched_state();
                 let sched = sched_state[cpu_id].lock();
                 let next = crate::sched::eevdf::find_next_runnable(&sched);
@@ -172,6 +180,7 @@ fn dispatch_syscall(
         Syscall::IrqAck => irq_ops::handle_irq_ack(args),
         Syscall::IrqSetHandler => irq_ops::handle_irq_set_handler(args),
         Syscall::IrqClearHandler => irq_ops::handle_irq_clear_handler(args),
+        Syscall::IrqControlGet => irq_ops::handle_irq_control_get(args),
 
         // IOMMU operations
         Syscall::IOSpaceCreate => iommu_ops::handle_iospace_create(args),
@@ -228,7 +237,7 @@ fn handle_send(args: &SyscallArgs, ctx: &ExceptionContext, blocking: bool) -> Sy
 /// Handle Recv/NBRecv syscall.
 ///
 /// x0: endpoint capability pointer
-/// Returns: x0-x5 = message, x6 = badge
+/// Returns: x0-x4 = message, x6 = badge
 fn handle_recv(
     args: &SyscallArgs,
     ctx: &mut ExceptionContext,
@@ -251,10 +260,12 @@ fn handle_recv(
             // Message received - write to context
             msg.to_context(ctx);
             ctx.gpr[6] = badge;
-            Ok(0)
+            // Return sentinel to prevent x0 being overwritten
+            Ok(IPC_MESSAGE_DELIVERED)
         }
         None => {
-            // Blocked - will be delivered when sender arrives
+            // Blocked - message will be delivered when sender arrives
+            // Return 0 to set x0, but context will be overwritten on resume
             Ok(0)
         }
     }
@@ -290,7 +301,7 @@ fn handle_call(args: &SyscallArgs, ctx: &ExceptionContext) -> SyscallResult {
 ///
 /// x0: endpoint capability pointer
 /// x1-x5: reply message payload
-/// Returns: x0-x5 = new request message, x6 = badge
+/// Returns: x0-x4 = new request message, x6 = badge
 fn handle_reply_recv(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallResult {
     let cptr = args.arg0;
     let reply_msg = IpcMessage::from_context(ctx);
@@ -309,7 +320,8 @@ fn handle_reply_recv(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallR
         Some((badge, msg)) => {
             msg.to_context(ctx);
             ctx.gpr[6] = badge;
-            Ok(0)
+            // Return sentinel to prevent x0 being overwritten
+            Ok(IPC_MESSAGE_DELIVERED)
         }
         None => {
             // Blocked waiting for next request

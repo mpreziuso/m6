@@ -6,12 +6,42 @@
 //! # ARM64 ABI
 //!
 //! - x7: syscall number
-//! - x0-x5: arguments
+//! - x0-x5: arguments (x0 = endpoint cptr for IPC)
 //! - x0: return value (negative = error)
+//!
+//! # IPC Message Layout
+//!
+//! On send/call: message is in x1-x5 (x0 = endpoint cptr)
+//! On recv: message is delivered to x0-x4, badge in x6
 
 use crate::error::{SyscallResult, check_result};
 use crate::numbers::Syscall;
 use crate::IpcBuffer;
+
+/// Result of an IPC receive operation.
+///
+/// Contains both the sender badge and the message payload.
+#[derive(Clone, Copy, Debug)]
+pub struct IpcRecvResult {
+    /// Badge identifying the sender.
+    pub badge: u64,
+    /// Message label (first word, typically request type).
+    pub label: u64,
+    /// Additional message words.
+    pub msg: [u64; 4],
+}
+
+impl IpcRecvResult {
+    /// Get message word by index (0 = label, 1-4 = additional words).
+    #[inline]
+    pub fn get(&self, index: usize) -> Option<u64> {
+        match index {
+            0 => Some(self.label),
+            1..=4 => Some(self.msg[index - 1]),
+            _ => None,
+        }
+    }
+}
 
 /// Raw syscall with 0 arguments.
 #[inline]
@@ -189,10 +219,137 @@ pub fn send(dest: u64, msg0: u64, msg1: u64, msg2: u64, msg3: u64) -> SyscallRes
 /// * `src` - Capability slot of the endpoint
 ///
 /// # Returns
-/// Badge of the sender on success.
+/// On success, returns the badge and message. On error, returns the syscall error.
 #[inline]
-pub fn recv(src: u64) -> SyscallResult {
-    check_result(syscall1(Syscall::Recv, src))
+pub fn recv(src: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
+    let x0: i64;
+    let x1: u64;
+    let x2: u64;
+    let x3: u64;
+    let x4: u64;
+    let badge: u64;
+    // SAFETY: Inline assembly for syscall. Capture all message registers and badge.
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x7") Syscall::Recv as u64,
+            inlateout("x0") src as i64 => x0,
+            lateout("x1") x1,
+            lateout("x2") x2,
+            lateout("x3") x3,
+            lateout("x4") x4,
+            lateout("x6") badge,
+            options(nostack)
+        );
+    }
+    // If x0 is negative, it's an error code from the kernel
+    // If x0 is non-negative, the message was delivered
+    if x0 < 0 {
+        Err(crate::error::SyscallError::from_i64(x0).unwrap_or(crate::error::SyscallError::InvalidArg))
+    } else {
+        Ok(IpcRecvResult {
+            badge,
+            label: x0 as u64,
+            msg: [x1, x2, x3, x4],
+        })
+    }
+}
+
+/// Perform a call operation (send + wait for reply).
+///
+/// This is the client side of RPC. The caller sends a message and blocks
+/// waiting for the server to reply. The reply message is delivered directly
+/// to the caller's registers when it arrives.
+///
+/// # Arguments
+///
+/// * `dest` - Endpoint capability pointer (requires WRITE + GRANT_REPLY rights)
+/// * `msg0`-`msg3` - Message payload (x1-x4)
+///
+/// # Returns
+///
+/// The full reply message including label and payload registers.
+#[inline]
+pub fn call(dest: u64, msg0: u64, msg1: u64, msg2: u64, msg3: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
+    let x0: i64;
+    let x1: u64;
+    let x2: u64;
+    let x3: u64;
+    let x4: u64;
+    let badge: u64;
+    // SAFETY: Inline assembly for syscall. Capture all reply registers.
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x7") Syscall::Call as u64,
+            inlateout("x0") dest as i64 => x0,
+            inlateout("x1") msg0 => x1,
+            inlateout("x2") msg1 => x2,
+            inlateout("x3") msg2 => x3,
+            inlateout("x4") msg3 => x4,
+            lateout("x6") badge,
+            options(nostack)
+        );
+    }
+    // If x0 is negative, it's an error code from the kernel
+    // If x0 is non-negative, the reply was delivered
+    if x0 < 0 {
+        Err(crate::error::SyscallError::from_i64(x0).unwrap_or(crate::error::SyscallError::InvalidArg))
+    } else {
+        Ok(IpcRecvResult {
+            badge,
+            label: x0 as u64,
+            msg: [x1, x2, x3, x4],
+        })
+    }
+}
+
+/// Perform a reply-receive operation (reply + wait for next message).
+///
+/// This is the server side of RPC. The server replies to the previous caller
+/// (if any) and then blocks waiting for the next message.
+///
+/// # Arguments
+///
+/// * `ep` - Endpoint capability pointer (requires READ + WRITE rights)
+/// * `msg0`-`msg3` - Reply message payload (x1-x4)
+///
+/// # Returns
+///
+/// On success, returns the badge and message from the new sender.
+#[inline]
+pub fn reply_recv(ep: u64, msg0: u64, msg1: u64, msg2: u64, msg3: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
+    let x0: i64;
+    let x1: u64;
+    let x2: u64;
+    let x3: u64;
+    let x4: u64;
+    let badge: u64;
+    // SAFETY: Inline assembly for syscall. Capture all message registers and badge.
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x7") Syscall::ReplyRecv as u64,
+            inlateout("x0") ep as i64 => x0,
+            inlateout("x1") msg0 => x1,
+            inlateout("x2") msg1 => x2,
+            inlateout("x3") msg2 => x3,
+            inlateout("x4") msg3 => x4,
+            lateout("x6") badge,
+            options(nostack)
+        );
+    }
+    // If x0 is negative, it's an error code from the kernel
+    // If x0 is non-negative, the message was delivered
+    if x0 < 0 {
+        Err(crate::error::SyscallError::from_i64(x0).unwrap_or(crate::error::SyscallError::InvalidArg))
+    } else {
+        Ok(IpcRecvResult {
+            badge,
+            label: x0 as u64,
+            msg: [x1, x2, x3, x4],
+        })
+    }
 }
 
 /// Non-blocking send.
@@ -207,8 +364,38 @@ pub fn nb_send(dest: u64, msg0: u64, msg1: u64, msg2: u64, msg3: u64) -> Syscall
 ///
 /// Returns immediately if no sender is ready.
 #[inline]
-pub fn nb_recv(src: u64) -> SyscallResult {
-    check_result(syscall1(Syscall::NBRecv, src))
+pub fn nb_recv(src: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
+    let x0: i64;
+    let x1: u64;
+    let x2: u64;
+    let x3: u64;
+    let x4: u64;
+    let badge: u64;
+    // SAFETY: Inline assembly for syscall. Capture all message registers and badge.
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x7") Syscall::NBRecv as u64,
+            inlateout("x0") src as i64 => x0,
+            lateout("x1") x1,
+            lateout("x2") x2,
+            lateout("x3") x3,
+            lateout("x4") x4,
+            lateout("x6") badge,
+            options(nostack)
+        );
+    }
+    // If x0 is negative, it's an error code from the kernel
+    // If x0 is non-negative, the message was delivered
+    if x0 < 0 {
+        Err(crate::error::SyscallError::from_i64(x0).unwrap_or(crate::error::SyscallError::InvalidArg))
+    } else {
+        Ok(IpcRecvResult {
+            badge,
+            label: x0 as u64,
+            msg: [x1, x2, x3, x4],
+        })
+    }
 }
 
 /// Signal a notification.
@@ -643,6 +830,42 @@ pub fn tcb_resume(tcb: u64) -> SyscallResult {
 #[inline]
 pub fn tcb_suspend(tcb: u64) -> SyscallResult {
     check_result(syscall1(Syscall::TcbSuspend, tcb))
+}
+
+// -- IRQ Operations
+
+/// Claim an IRQ from IRQControl and create an IRQHandler capability.
+///
+/// This syscall allocates an IRQHandler object for the specified hardware
+/// interrupt and places the capability in the destination CNode slot.
+///
+/// # Arguments
+///
+/// * `irq_control` - CPtr to the IRQControl capability
+/// * `irq` - Hardware IRQ number to claim
+/// * `dest_cnode` - CPtr to the destination CNode
+/// * `dest_index` - Slot index in the destination CNode
+/// * `depth` - Bits to consume resolving dest CNode (0 = auto)
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn irq_control_get(
+    irq_control: u64,
+    irq: u32,
+    dest_cnode: u64,
+    dest_index: u64,
+    depth: u64,
+) -> SyscallResult {
+    check_result(syscall5(
+        Syscall::IrqControlGet,
+        irq_control,
+        irq as u64,
+        dest_cnode,
+        dest_index,
+        depth,
+    ))
 }
 
 // -- IPC Buffer Helpers

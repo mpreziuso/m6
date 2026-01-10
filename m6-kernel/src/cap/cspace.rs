@@ -48,7 +48,13 @@ pub fn resolve_cptr(cptr: u64, depth_bits: u8) -> Result<SlotLocation, SyscallEr
 
     let cspace_root: ObjectRef = object_table::with_tcb(current, |tcb| tcb.tcb.cspace_root);
 
+    log::trace!(
+        "resolve_cptr: cptr={:#x} current_task={:?} cspace_root={:?}",
+        cptr, current, cspace_root
+    );
+
     if !cspace_root.is_valid() {
+        log::warn!("resolve_cptr: cspace_root is invalid!");
         return Err(SyscallError::InvalidCap);
     }
 
@@ -113,21 +119,40 @@ pub fn resolve_cnode_slot(
     // Get the CNode and verify the slot index is valid
     let cnode_ref = get_cnode_from_slot(cnode_loc)?;
 
+    log::trace!(
+        "resolve_cnode_slot: cnode_ref={:?} checking slot_index={}",
+        cnode_ref, slot_index
+    );
+
     // Verify the slot index is within bounds
-    object_table::with_object(cnode_ref, |obj| {
+    let result = object_table::with_object(cnode_ref, |obj| {
         if obj.obj_type != KernelObjectType::CNode {
+            log::warn!(
+                "resolve_cnode_slot: obj_type is {:?}, expected CNode",
+                obj.obj_type
+            );
             return Err(SyscallError::TypeMismatch);
         }
 
         let cnode_ptr = unsafe { obj.data.cnode_ptr };
         if cnode_ptr.is_null() {
+            log::warn!("resolve_cnode_slot: cnode_ptr is null");
             return Err(SyscallError::InvalidCap);
         }
 
         let cnode = unsafe { &*cnode_ptr };
         let num_slots = cnode.meta().num_slots();
 
+        log::trace!(
+            "resolve_cnode_slot: cnode has {} slots, checking index {}",
+            num_slots, slot_index
+        );
+
         if slot_index >= num_slots {
+            log::warn!(
+                "resolve_cnode_slot: slot_index {} >= num_slots {}",
+                slot_index, num_slots
+            );
             return Err(SyscallError::InvalidCap);
         }
 
@@ -135,38 +160,71 @@ pub fn resolve_cnode_slot(
             cnode_ref,
             slot_index,
         })
-    })
-    .ok_or(SyscallError::InvalidCap)?
+    });
+
+    match result {
+        Some(r) => r,
+        None => {
+            log::warn!(
+                "resolve_cnode_slot: with_object returned None for {:?}",
+                cnode_ref
+            );
+            Err(SyscallError::InvalidCap)
+        }
+    }
 }
 
 /// Get the CNode ObjectRef from a resolved slot location.
 ///
 /// The slot at the location must contain a CNode capability.
 fn get_cnode_from_slot(loc: SlotLocation) -> Result<ObjectRef, SyscallError> {
-    object_table::with_object(loc.cnode_ref, |obj| {
+    log::trace!(
+        "get_cnode_from_slot: cnode_ref={:?} slot_index={}",
+        loc.cnode_ref, loc.slot_index
+    );
+
+    let result = object_table::with_object(loc.cnode_ref, |obj| {
         if obj.obj_type != KernelObjectType::CNode {
+            log::warn!("get_cnode_from_slot: obj_type is {:?}, expected CNode", obj.obj_type);
             return Err(SyscallError::TypeMismatch);
         }
 
         let cnode_ptr = unsafe { obj.data.cnode_ptr };
         if cnode_ptr.is_null() {
+            log::warn!("get_cnode_from_slot: cnode_ptr is null");
             return Err(SyscallError::InvalidCap);
         }
 
         let cnode = unsafe { &*cnode_ptr };
-        let slot = cnode.get_slot(loc.slot_index).ok_or(SyscallError::InvalidCap)?;
+        let slot = cnode.get_slot(loc.slot_index).ok_or_else(|| {
+            log::warn!("get_cnode_from_slot: slot {} not found", loc.slot_index);
+            SyscallError::InvalidCap
+        })?;
 
         if slot.is_empty() {
+            log::warn!("get_cnode_from_slot: slot {} is empty", loc.slot_index);
             return Err(SyscallError::EmptySlot);
         }
 
-        if slot.cap_type() != ObjectType::CNode {
+        let cap_type = slot.cap_type();
+        if cap_type != ObjectType::CNode {
+            log::warn!(
+                "get_cnode_from_slot: slot {} has type {:?}, expected CNode",
+                loc.slot_index, cap_type
+            );
             return Err(SyscallError::TypeMismatch);
         }
 
         Ok(slot.object_ref())
-    })
-    .ok_or(SyscallError::InvalidCap)?
+    });
+
+    match result {
+        Some(r) => r,
+        None => {
+            log::warn!("get_cnode_from_slot: with_object returned None for {:?}", loc.cnode_ref);
+            Err(SyscallError::InvalidCap)
+        }
+    }
 }
 
 /// Recursive CPtr resolution.

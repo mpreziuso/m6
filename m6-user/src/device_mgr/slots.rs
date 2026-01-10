@@ -32,6 +32,14 @@ pub const ASID_POOL: u64 = 16;
 /// Notification bound to this TCB for driver fault delivery
 pub const FAULT_NOTIF: u64 = 17;
 
+/// First device untyped slot
+/// Device untyped capabilities are placed starting here
+/// Each covers a device MMIO region that can be retyped to DeviceFrame
+pub const FIRST_DEVICE_UNTYPED: u64 = 20;
+
+/// Maximum number of device untyped regions
+pub const MAX_DEVICE_UNTYPED: usize = 8;
+
 /// First free slot for dynamic allocation
 pub const FIRST_FREE_SLOT: u64 = 32;
 

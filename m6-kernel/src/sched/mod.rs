@@ -270,6 +270,9 @@ pub fn schedule() {
     let next_option = eevdf::find_next_runnable(&sched);
     let next = next_option.unwrap_or(sched.idle_thread);
 
+    log::trace!("schedule: next={:?} (from {:?}), run_queue len={}",
+        next, sched.current_thread, sched.run_queue.len());
+
     if !next.is_valid() {
         log::error!("No runnable task and no idle task!");
         return;

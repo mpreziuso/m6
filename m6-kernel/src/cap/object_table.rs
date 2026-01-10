@@ -617,8 +617,23 @@ where
                 // SAFETY: The IrqControl was heap-allocated and is valid.
                 // We hold the object table lock so no concurrent access.
                 return Some(f(unsafe { &mut *ptr }));
+            } else {
+                log::warn!(
+                    "with_irq_control_mut: irq_control_ptr is null for {:?}",
+                    control_ref
+                );
             }
+        } else {
+            log::warn!(
+                "with_irq_control_mut: obj_type is {:?}, expected IrqControl for {:?}",
+                obj.obj_type, control_ref
+            );
         }
+    } else {
+        log::warn!(
+            "with_irq_control_mut: table.get returned None for {:?}",
+            control_ref
+        );
     }
     None
 }

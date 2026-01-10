@@ -4,11 +4,13 @@
 //! - IrqAck: Acknowledge an IRQ (unmask it)
 //! - IrqSetHandler: Bind an IRQ to a notification
 //! - IrqClearHandler: Unbind an IRQ from its notification
+//! - IrqControlGet: Claim an IRQ from IRQControl and create IRQHandler
 
-use m6_cap::{Badge, CapRights, ObjectType};
-use m6_cap::objects::IrqState;
+use m6_cap::{Badge, CapRights, CapSlot, ObjectType, SlotFlags};
+use m6_cap::objects::{IrqHandlerObject, IrqState, MAX_IRQ};
 
-use crate::cap::object_table;
+use crate::cap::{cspace, object_table};
+use crate::cap::object_table::KernelObjectType;
 use crate::ipc;
 
 use super::SyscallArgs;
@@ -142,4 +144,131 @@ pub fn handle_irq_clear_handler(args: &SyscallArgs) -> SyscallResult {
         Some(Err(e)) => Err(e),
         None => Err(SyscallError::InvalidCap),
     }
+}
+
+/// Handle IrqControlGet syscall.
+///
+/// Claims an IRQ from IRQControl and creates an IRQHandler capability.
+///
+/// # ABI
+///
+/// - x0: IRQControl capability pointer
+/// - x1: IRQ number to claim
+/// - x2: Destination CNode capability pointer
+/// - x3: Destination slot index
+/// - x4: Depth (0 = auto)
+///
+/// # Returns
+///
+/// - 0 on success
+/// - Negative error code on failure
+pub fn handle_irq_control_get(args: &SyscallArgs) -> SyscallResult {
+    let irq_control_cptr = args.arg0;
+    let irq = args.arg1 as u32;
+    let dest_cnode_cptr = args.arg2;
+    let dest_index = args.arg3 as usize;
+    let dest_depth = args.arg4 as u8;
+
+    log::trace!(
+        "irq_control_get: control={:#x} irq={} dest_cnode={:#x} dest_index={}",
+        irq_control_cptr, irq, dest_cnode_cptr, dest_index
+    );
+
+    // Validate IRQ number
+    if irq > MAX_IRQ {
+        return Err(SyscallError::InvalidArg);
+    }
+
+    // Look up IRQControl capability with ALL rights
+    let control_cap = ipc::lookup_cap(irq_control_cptr, ObjectType::IRQControl, CapRights::ALL)?;
+
+    log::trace!(
+        "irq_control_get: lookup succeeded, obj_ref={:?}",
+        control_cap.obj_ref
+    );
+
+    // Resolve destination CNode slot
+    let dest_loc = cspace::resolve_cnode_slot(dest_cnode_cptr, dest_depth, dest_index)?;
+
+    log::trace!(
+        "irq_control_get: dest resolved to cnode={:?} slot={}",
+        dest_loc.cnode_ref, dest_loc.slot_index
+    );
+
+    // Check destination slot is empty
+    let slot_empty = cspace::with_slot(&dest_loc, |slot| Ok(slot.is_empty()))?;
+    if !slot_empty {
+        log::warn!("irq_control_get: destination slot {} is occupied", dest_index);
+        return Err(SyscallError::SlotOccupied);
+    }
+
+    log::trace!("irq_control_get: dest slot {} is empty, claiming IRQ {}", dest_index, irq);
+
+    // Try to claim the IRQ from IRQControl
+    let claimed = object_table::with_irq_control_mut(control_cap.obj_ref, |control| {
+        control.claim(irq)
+    });
+
+    if claimed.is_none() {
+        // Debug why with_irq_control_mut failed
+        let obj_info = object_table::with_object(control_cap.obj_ref, |obj| {
+            (obj.obj_type, obj.is_free())
+        });
+        log::warn!(
+            "irq_control_get: with_irq_control_mut returned None for obj_ref={:?}, obj_info={:?}",
+            control_cap.obj_ref, obj_info
+        );
+        return Err(SyscallError::InvalidCap);
+    }
+
+    let claimed = claimed.unwrap();
+
+    if !claimed {
+        return Err(SyscallError::ObjectInUse);
+    }
+
+    // Allocate IRQHandler object
+    let handler_ref = object_table::alloc(KernelObjectType::IrqHandler)
+        .ok_or_else(|| {
+            // Release the IRQ if allocation fails
+            let _ = object_table::with_irq_control_mut(control_cap.obj_ref, |control| {
+                control.release(irq);
+            });
+            SyscallError::NoMemory
+        })?;
+
+    // Initialise the IRQHandler object
+    object_table::with_table(|table| {
+        if let Some(obj) = table.get_mut(handler_ref) {
+            obj.data.irq_handler = core::mem::ManuallyDrop::new(IrqHandlerObject::new(irq));
+        }
+    });
+
+    // Install capability in destination slot
+    let cap_result = cspace::with_slot_mut(&dest_loc, |slot| {
+        *slot = CapSlot::new(
+            handler_ref,
+            ObjectType::IRQHandler,
+            CapRights::ALL,
+            Badge::NONE,
+            SlotFlags::IS_ORIGINAL,
+        );
+        Ok(())
+    });
+
+    if let Err(e) = cap_result {
+        // Cleanup on failure
+        let _ = object_table::with_irq_control_mut(control_cap.obj_ref, |control| {
+            control.release(irq);
+        });
+        // SAFETY: Object was just created and not yet referenced.
+        unsafe { object_table::free(handler_ref) };
+        return Err(e);
+    }
+
+    // Increment reference count
+    object_table::with_table(|table| table.inc_ref(handler_ref));
+
+    log::trace!("irq_control_get: created IRQHandler for IRQ {} at slot {}", irq, dest_index);
+    Ok(0)
 }

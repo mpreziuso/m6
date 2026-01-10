@@ -51,9 +51,19 @@ pub fn handle_cap_copy(args: &SyscallArgs) -> SyscallResult {
     let src_index = args.arg4 as usize;
     let src_depth = args.arg5 as u8;
 
+    log::trace!(
+        "cap_copy: dest_cnode={:#x} dest_idx={} src_cnode={:#x} src_idx={}",
+        dest_cnode_cptr, dest_index, src_cnode_cptr, src_index
+    );
+
     // Resolve both CNode locations
     let src_loc = cspace::resolve_cnode_slot(src_cnode_cptr, src_depth, src_index)?;
     let dest_loc = cspace::resolve_cnode_slot(dest_cnode_cptr, dest_depth, dest_index)?;
+
+    log::trace!(
+        "cap_copy: resolved src=({:?}, {}) dest=({:?}, {})",
+        src_loc.cnode_ref, src_loc.slot_index, dest_loc.cnode_ref, dest_loc.slot_index
+    );
 
     // Look up source CDT node (if tracked)
     let src_cdt_node = cdt_storage::lookup_cdt_node(src_loc.cnode_ref, src_loc.slot_index as u32)

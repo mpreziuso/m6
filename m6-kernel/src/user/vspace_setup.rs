@@ -242,6 +242,45 @@ pub fn map_user_boot_info(
     Ok(layout::USER_BOOT_INFO_ADDR)
 }
 
+/// Map the IPC buffer for the root task.
+///
+/// Allocates a single 4KB frame for the IPC buffer and maps it RW.
+///
+/// # Arguments
+///
+/// * `l0_phys` - Physical address of the L0 page table
+///
+/// # Returns
+///
+/// Tuple of (virtual address, physical address) of the IPC buffer.
+pub fn map_ipc_buffer(l0_phys: PhysAddr) -> Result<(u64, PhysAddr), VSpaceSetupError> {
+    // SAFETY: l0_phys was allocated by create_user_vspace.
+    let mut l0 = unsafe { get_l0_table(l0_phys) };
+    let mut allocator = KernelPageAllocator;
+
+    // Allocate a frame for the IPC buffer
+    let ipc_buf_phys = alloc_frame_zeroed().ok_or(VSpaceSetupError::FrameAllocationFailed)?;
+
+    // Map as read-write for user
+    let perms = PtePermissions::rw(true); // user=true, read-write
+
+    map_user_page(
+        &mut l0,
+        &mut allocator,
+        ipc_buf_phys,
+        layout::IPC_BUFFER_BASE,
+        perms,
+    )?;
+
+    log::debug!(
+        "Mapped IPC buffer: phys={:#x} -> virt={:#x}",
+        ipc_buf_phys,
+        layout::IPC_BUFFER_BASE
+    );
+
+    Ok((layout::IPC_BUFFER_BASE, PhysAddr::new(ipc_buf_phys)))
+}
+
 /// Map the DTB into the user VSpace (read-only).
 ///
 /// # Arguments
@@ -352,6 +391,10 @@ pub struct RootVSpaceSetup {
     pub initrd_vaddr: u64,
     /// Initrd size in bytes.
     pub initrd_size: u64,
+    /// IPC buffer virtual address.
+    pub ipc_buffer_vaddr: u64,
+    /// IPC buffer physical address.
+    pub ipc_buffer_phys: PhysAddr,
 }
 
 /// Set up the complete root task VSpace.
@@ -406,13 +449,17 @@ pub fn setup_root_vspace(
         (0, 0)
     };
 
+    // Map IPC buffer for init
+    let (ipc_buffer_vaddr, ipc_buffer_phys) = map_ipc_buffer(l0_phys)?;
+
     log::info!(
-        "Root VSpace ready: L0={:#x} ASID={} gen={} entry={:#x} SP={:#x}",
+        "Root VSpace ready: L0={:#x} ASID={} gen={} entry={:#x} SP={:#x} IPC={:#x}",
         l0_phys.0,
         asid.asid,
         asid.generation,
         entry,
-        stack_top
+        stack_top,
+        ipc_buffer_vaddr,
     );
 
     Ok(RootVSpaceSetup {
@@ -424,5 +471,7 @@ pub fn setup_root_vspace(
         dtb_size: dtb_mapped_size,
         initrd_vaddr,
         initrd_size: initrd_mapped_size,
+        ipc_buffer_vaddr,
+        ipc_buffer_phys,
     })
 }

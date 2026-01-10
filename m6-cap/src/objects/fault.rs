@@ -81,13 +81,12 @@ impl FaultType {
 ///
 /// # Message Register Layout
 ///
-/// When delivered via IPC, the message is encoded as:
-/// - x0: fault_type (FaultType enum value)
-/// - x1: faulting_pc (ELR - instruction that faulted)
-/// - x2: fault_address (FAR - for memory faults, 0 otherwise)
-/// - x3: esr_raw (raw Exception Syndrome Register)
-/// - x4: flags (packed access information)
-/// - x5: reserved (0)
+/// When delivered via IPC, the message is encoded as (5 words):
+/// - msg[0]: fault_type (FaultType enum value)
+/// - msg[1]: faulting_pc (ELR - instruction that faulted)
+/// - msg[2]: fault_address (FAR - for memory faults, 0 otherwise)
+/// - msg[3]: esr_raw (raw Exception Syndrome Register)
+/// - msg[4]: flags (packed access information)
 /// - x6 (badge): identifies the faulting thread's capability
 #[derive(Clone, Copy, Debug, Default)]
 #[repr(C)]
@@ -112,8 +111,6 @@ pub struct FaultMessage {
     /// - Bits 16-23: Exception class (EC)
     /// - Bits 24-63: Reserved
     pub flags: u64,
-    /// Reserved for future use.
-    pub reserved: u64,
 }
 
 impl FaultMessage {
@@ -132,7 +129,6 @@ impl FaultMessage {
             fault_address,
             esr_raw,
             flags,
-            reserved: 0,
         }
     }
 
@@ -169,27 +165,25 @@ impl FaultMessage {
 
     /// Convert to IPC message register array.
     #[must_use]
-    pub const fn to_regs(&self) -> [u64; 6] {
+    pub const fn to_regs(&self) -> [u64; 5] {
         [
             self.fault_type,
             self.faulting_pc,
             self.fault_address,
             self.esr_raw,
             self.flags,
-            self.reserved,
         ]
     }
 
     /// Create from IPC message register array.
     #[must_use]
-    pub const fn from_regs(regs: [u64; 6]) -> Self {
+    pub const fn from_regs(regs: [u64; 5]) -> Self {
         Self {
             fault_type: regs[0],
             faulting_pc: regs[1],
             fault_address: regs[2],
             esr_raw: regs[3],
             flags: regs[4],
-            reserved: regs[5],
         }
     }
 }

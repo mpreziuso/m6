@@ -92,6 +92,8 @@ pub enum Syscall {
     IrqSetHandler = 81,
     /// Clear IRQ handler.
     IrqClearHandler = 82,
+    /// Get IRQ handler from IRQ control.
+    IrqControlGet = 83,
 
     // === IOMMU Operations ===
     /// Create IOSpace from untyped memory.
@@ -154,6 +156,7 @@ impl Syscall {
             80 => Some(Self::IrqAck),
             81 => Some(Self::IrqSetHandler),
             82 => Some(Self::IrqClearHandler),
+            83 => Some(Self::IrqControlGet),
             96 => Some(Self::IOSpaceCreate),
             97 => Some(Self::IOSpaceMapFrame),
             98 => Some(Self::IOSpaceUnmapFrame),
@@ -204,6 +207,7 @@ impl Syscall {
             Self::IrqAck => "IrqAck",
             Self::IrqSetHandler => "IrqSetHandler",
             Self::IrqClearHandler => "IrqClearHandler",
+            Self::IrqControlGet => "IrqControlGet",
             Self::IOSpaceCreate => "IOSpaceCreate",
             Self::IOSpaceMapFrame => "IOSpaceMapFrame",
             Self::IOSpaceUnmapFrame => "IOSpaceUnmapFrame",

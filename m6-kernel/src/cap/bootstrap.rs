@@ -22,7 +22,7 @@ use core::mem::ManuallyDrop;
 
 use m6_cap::{
     Badge, CapRights, CapSlot, CNodeGuard, CNodeOps, ObjectRef, ObjectType, SlotFlags,
-    objects::{Asid, AsidPoolObject, UntypedObject, VSpaceObject},
+    objects::{Asid, AsidPoolObject, IrqControlObject, UntypedObject, VSpaceObject},
 };
 use m6_common::PhysAddr;
 use m6_common::boot::BootInfo;
@@ -227,8 +227,22 @@ fn create_root_tcb(cspace_root: ObjectRef, vspace: ObjectRef) -> BootstrapResult
 
 /// Create the IRQ control object (singleton).
 fn create_irq_control() -> BootstrapResult<ObjectRef> {
-    object_table::alloc(KernelObjectType::IrqControl)
-        .ok_or(BootstrapError::NoObjectSlots)
+    use alloc::boxed::Box;
+
+    // Allocate object table entry
+    let obj_ref = object_table::alloc(KernelObjectType::IrqControl)
+        .ok_or(BootstrapError::NoObjectSlots)?;
+
+    // Create IRQ control object (heap-allocated due to large bitmap)
+    let ctrl = Box::new(IrqControlObject::new());
+    let ctrl_ptr = Box::into_raw(ctrl);
+
+    // Store pointer in object table
+    object_table::with_object_mut(obj_ref, |obj| {
+        obj.data.irq_control_ptr = ctrl_ptr;
+    });
+
+    Ok(obj_ref)
 }
 
 /// Create the ASID control object (singleton).
@@ -311,6 +325,40 @@ fn create_untyped_cap_with_table(
     install_cap(cnode, slot, obj_ref, ObjectType::Untyped, CapRights::ALL);
 
     Ok(obj_ref)
+}
+
+/// Device memory region for creating device untyped capabilities.
+struct DeviceRegion {
+    /// Physical base address.
+    phys_base: u64,
+    /// Size in bits (log2).
+    size_bits: u8,
+    /// Human-readable name for debugging.
+    name: &'static str,
+}
+
+/// Get the list of device memory regions for the current platform.
+///
+/// This returns MMIO regions that should be provided to userspace as device
+/// untyped capabilities. Currently hardcoded for known platforms.
+fn get_device_regions() -> &'static [DeviceRegion] {
+    // Check platform via PAL
+    let platform_name = m6_pal::platform::platform().name();
+
+    if platform_name.contains("virt") || platform_name.contains("QEMU") {
+        // QEMU virt machine device regions
+        static QEMU_VIRT_DEVICES: [DeviceRegion; 1] = [
+            DeviceRegion {
+                phys_base: 0x0900_0000,
+                size_bits: 12, // 4KB - PL011 UART
+                name: "pl011-uart",
+            },
+        ];
+        &QEMU_VIRT_DEVICES
+    } else {
+        // Unknown platform - no device regions
+        &[]
+    }
 }
 
 /// Bootstrap the root task from initrd.
@@ -458,19 +506,50 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         untyped_count = 1;
         log::debug!("Created untyped cap: {:?}", untyped_ref);
 
+        // Create device untyped capabilities for MMIO regions
+        // For QEMU virt: PL011 UART at 0x0900_0000
+        let device_regions = get_device_regions();
+        for (i, region) in device_regions.iter().enumerate() {
+            let slot = slots::FIRST_UNTYPED + untyped_count as usize;
+            log::debug!(
+                "Creating device untyped at slot {} for {:#x} ({} bytes)",
+                slot,
+                region.phys_base,
+                1u64 << region.size_bits
+            );
+            let _device_ref = create_untyped_cap_with_table(
+                table,
+                cnode,
+                slot,
+                PhysAddr::new(region.phys_base),
+                region.size_bits,
+                true, // device memory
+            )?;
+            cap_count += 1;
+            untyped_count += 1;
+            log::debug!("Created device untyped cap {} for {:?}", i, region.name);
+        }
+
         Ok(())
     })?;
 
-    // 10. Update UserBootInfo with untyped region info
-    update_user_boot_info_untyped(
+    // 10. Update UserBootInfo with untyped region info (RAM + device regions)
+    let device_regions = get_device_regions();
+    update_user_boot_info_all_untyped(
         user_boot_info_phys,
-        untyped_count,
         untyped_phys,
         UNTYPED_SIZE_BITS,
+        device_regions,
     );
 
     // 11. Configure TCB for EL0 entry
-    configure_tcb_for_el0(tcb_ref, vspace_result.entry, vspace_result.stack_top)?;
+    configure_tcb_for_el0(
+        tcb_ref,
+        vspace_result.entry,
+        vspace_result.stack_top,
+        vspace_result.ipc_buffer_vaddr,
+        vspace_result.ipc_buffer_phys,
+    )?;
 
     log::info!(
         "Root task bootstrap complete: entry={:#x}, SP={:#x}, {} capabilities",
@@ -616,6 +695,50 @@ fn update_user_boot_info_untyped(
     );
 }
 
+/// Update UserBootInfo with all untyped regions (RAM + device).
+fn update_user_boot_info_all_untyped(
+    boot_info_phys: PhysAddr,
+    ram_phys_base: u64,
+    ram_size_bits: u8,
+    device_regions: &[DeviceRegion],
+) {
+    let virt = phys_to_virt(boot_info_phys.0);
+    // SAFETY: boot_info_phys points to a valid UserBootInfo we allocated
+    let info = unsafe { &mut *(virt as *mut UserBootInfo) };
+
+    let total_count = 1 + device_regions.len();
+    info.untyped_count = total_count as u32;
+
+    // First region: RAM untyped
+    info.untyped_size_bits[0] = ram_size_bits;
+    info.untyped_is_device[0] = 0; // not device memory
+    info.untyped_phys_base[0] = ram_phys_base;
+
+    // Remaining regions: device untyped
+    for (i, region) in device_regions.iter().enumerate() {
+        let idx = i + 1;
+        info.untyped_size_bits[idx] = region.size_bits;
+        info.untyped_is_device[idx] = 1; // device memory
+        info.untyped_phys_base[idx] = region.phys_base;
+    }
+
+    log::debug!(
+        "Updated UserBootInfo: {} untyped region(s) ({} RAM, {} device)",
+        total_count,
+        1,
+        device_regions.len()
+    );
+    for (i, region) in device_regions.iter().enumerate() {
+        log::debug!(
+            "  Device region {}: {} at {:#x} ({} bytes)",
+            i,
+            region.name,
+            region.phys_base,
+            1u64 << region.size_bits
+        );
+    }
+}
+
 /// Configure a TCB for EL0 (userspace) execution.
 ///
 /// Sets up the exception context so that when this thread is scheduled,
@@ -624,6 +747,8 @@ fn configure_tcb_for_el0(
     tcb_ref: ObjectRef,
     entry: u64,
     stack_top: u64,
+    ipc_buffer_vaddr: u64,
+    ipc_buffer_phys: PhysAddr,
 ) -> BootstrapResult<()> {
     object_table::with_object_mut(tcb_ref, |obj| {
         // SAFETY: tcb_ref points to a valid TCB.
@@ -641,6 +766,10 @@ fn configure_tcb_for_el0(
 
         // Pass UserBootInfo address in x0
         tcb.context.gpr[0] = USER_BOOT_INFO_ADDR;
+
+        // Set IPC buffer addresses for capability transfer
+        tcb.tcb.ipc_buffer_addr = m6_common::VirtAddr::new(ipc_buffer_vaddr);
+        tcb.tcb.ipc_buffer_phys = ipc_buffer_phys;
 
         // Set thread state to Running (ready to be scheduled)
         tcb.tcb.state = m6_cap::objects::ThreadState::Running;

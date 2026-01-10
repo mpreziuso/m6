@@ -12,7 +12,6 @@ use crate::cap::object_table::{self, KernelObjectType};
 use crate::syscall::error::SyscallError;
 
 use super::message::IpcMessage;
-use super::queue::{ipc_dequeue, ipc_enqueue};
 
 /// Perform a send operation to an endpoint.
 ///
@@ -37,55 +36,116 @@ pub fn do_send(
     blocking: bool,
     has_grant: bool,
 ) -> Result<bool, SyscallError> {
-    object_table::with_endpoint_mut(ep_ref, |endpoint| {
+    // Determine action inside endpoint lock, execute outside
+    enum Action {
+        DeliverTo(ObjectRef),
+        BlockInSendQueue,
+        WouldBlock,
+    }
+
+    let action = object_table::with_endpoint_mut(ep_ref, |endpoint| {
         match endpoint.state {
             EndpointState::RecvQueue => {
-                // Receiver waiting - transfer message directly
-                let receiver_ref = ipc_dequeue(&mut endpoint.queue_head, &mut endpoint.queue_tail)
-                    .expect("RecvQueue but empty queue");
-
-                // Update endpoint state
-                if endpoint.queue_head.is_null() {
-                    endpoint.state = EndpointState::Idle;
+                // Get receiver from queue head
+                let receiver_ref = endpoint.queue_head;
+                if !receiver_ref.is_valid() {
+                    panic!("RecvQueue but empty queue");
                 }
-
-                // Transfer capabilities if Grant right present
-                if let Err(e) = super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant) {
-                    // If capability transfer fails, we still deliver the message
-                    // but log the error. The receiver will see 0 capabilities transferred.
-                    log::debug!("Capability transfer failed during send: {:?}", e);
-                }
-
-                // Transfer message to receiver
-                transfer_message(receiver_ref, msg, badge);
-
-                // Wake receiver
-                wake_thread(receiver_ref);
-
-                Ok(true)
+                Action::DeliverTo(receiver_ref)
             }
-
             EndpointState::Idle | EndpointState::SendQueue => {
-                // No receiver waiting
                 if !blocking {
-                    return Err(SyscallError::WouldBlock);
+                    Action::WouldBlock
+                } else {
+                    Action::BlockInSendQueue
                 }
-
-                // Store message in sender's TCB for later transfer
-                store_pending_message(sender_ref, msg, badge);
-
-                // Block sender
-                block_thread(sender_ref, ep_ref, ThreadState::BlockedOnSend);
-
-                // Add to send queue
-                endpoint.state = EndpointState::SendQueue;
-                ipc_enqueue(&mut endpoint.queue_head, &mut endpoint.queue_tail, sender_ref);
-
-                Ok(false)
             }
         }
     })
-    .ok_or(SyscallError::InvalidCap)?
+    .ok_or(SyscallError::InvalidCap)?;
+
+    // Execute action OUTSIDE the endpoint lock
+    match action {
+        Action::DeliverTo(receiver_ref) => {
+            // Get next in queue and clear receiver's links
+            let next_in_queue: ObjectRef = object_table::with_tcb_mut(receiver_ref, |tcb| {
+                let next = tcb.ipc_next;
+                tcb.clear_ipc_links();
+                next
+            });
+
+            // Update endpoint queue state
+            object_table::with_endpoint_mut(ep_ref, |endpoint| {
+                endpoint.queue_head = next_in_queue;
+                if !next_in_queue.is_valid() {
+                    endpoint.queue_tail = ObjectRef::NULL;
+                    endpoint.state = EndpointState::Idle;
+                }
+            });
+
+            // Clear prev link of new head if it exists
+            if next_in_queue.is_valid() {
+                let _: () = object_table::with_tcb_mut(next_in_queue, |new_head| {
+                    new_head.ipc_prev = ObjectRef::NULL;
+                });
+            }
+
+            // Transfer capabilities if Grant right present
+            if let Err(e) = super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant) {
+                log::debug!("Capability transfer failed during send: {:?}", e);
+            }
+
+            // Transfer message to receiver
+            transfer_message(receiver_ref, msg, badge);
+
+            // Wake receiver
+            wake_thread(receiver_ref);
+
+            Ok(true)
+        }
+
+        Action::BlockInSendQueue => {
+            // Store message in sender's TCB
+            store_pending_message(sender_ref, msg, badge);
+
+            // Block sender
+            block_thread(sender_ref, ep_ref, ThreadState::BlockedOnSend);
+
+            // Get current queue tail
+            let old_tail = object_table::with_endpoint_mut(ep_ref, |endpoint| {
+                endpoint.queue_tail
+            }).ok_or(SyscallError::InvalidCap)?;
+
+            // Set up sender's queue links
+            let _: () = object_table::with_tcb_mut(sender_ref, |tcb| {
+                tcb.ipc_prev = old_tail;
+                tcb.ipc_next = ObjectRef::NULL;
+            });
+
+            // Link old tail to sender
+            if old_tail.is_valid() {
+                let _: () = object_table::with_tcb_mut(old_tail, |old_tail_tcb| {
+                    old_tail_tcb.ipc_next = sender_ref;
+                });
+            }
+
+            // Update endpoint queue
+            object_table::with_endpoint_mut(ep_ref, |endpoint| {
+                endpoint.state = EndpointState::SendQueue;
+                if old_tail.is_valid() {
+                    endpoint.queue_tail = sender_ref;
+                } else {
+                    // Queue was empty
+                    endpoint.queue_head = sender_ref;
+                    endpoint.queue_tail = sender_ref;
+                }
+            });
+
+            Ok(false)
+        }
+
+        Action::WouldBlock => Err(SyscallError::WouldBlock),
+    }
 }
 
 /// Perform a receive operation from an endpoint.
@@ -107,7 +167,7 @@ pub fn do_recv(
     blocking: bool,
     has_grant: bool,
 ) -> Result<Option<(u64, IpcMessage)>, SyscallError> {
-    // Check endpoint state WITHOUT holding the lock for long
+    // Determine action inside endpoint lock, execute outside
     enum Action {
         ReceiveFrom(ObjectRef),
         Block,
@@ -117,15 +177,11 @@ pub fn do_recv(
     let action = object_table::with_endpoint_mut(ep_ref, |endpoint| {
         match endpoint.state {
             EndpointState::SendQueue => {
-                // Sender waiting - dequeue it
-                let sender_ref = ipc_dequeue(&mut endpoint.queue_head, &mut endpoint.queue_tail)
-                    .expect("SendQueue but empty queue");
-
-                // Update endpoint state
-                if endpoint.queue_head.is_null() {
-                    endpoint.state = EndpointState::Idle;
+                // Get sender from queue head (don't dequeue inside lock!)
+                let sender_ref = endpoint.queue_head;
+                if !sender_ref.is_valid() {
+                    panic!("SendQueue but empty queue");
                 }
-
                 Action::ReceiveFrom(sender_ref)
             }
 
@@ -144,6 +200,29 @@ pub fn do_recv(
     // Now execute the action WITHOUT holding any locks
     match action {
         Action::ReceiveFrom(sender_ref) => {
+            // Get next in queue and clear sender's links (outside endpoint lock)
+            let next_in_queue: ObjectRef = object_table::with_tcb_mut(sender_ref, |tcb| {
+                let next = tcb.ipc_next;
+                tcb.clear_ipc_links();
+                next
+            });
+
+            // Update endpoint queue state
+            object_table::with_endpoint_mut(ep_ref, |endpoint| {
+                endpoint.queue_head = next_in_queue;
+                if !next_in_queue.is_valid() {
+                    endpoint.queue_tail = ObjectRef::NULL;
+                    endpoint.state = EndpointState::Idle;
+                }
+            });
+
+            // Clear prev link of new head if it exists
+            if next_in_queue.is_valid() {
+                let _: () = object_table::with_tcb_mut(next_in_queue, |new_head| {
+                    new_head.ipc_prev = ObjectRef::NULL;
+                });
+            }
+
             // Transfer capabilities if Grant right present
             if let Err(e) = super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant) {
                 // If capability transfer fails, we still deliver the message
@@ -153,14 +232,40 @@ pub fn do_recv(
             // Get pending message from sender
             let (msg, badge) = get_pending_message(sender_ref);
 
-            // Wake sender
-            wake_thread(sender_ref);
+            // Check if sender was a Call operation (has reply_slot set)
+            let sender_reply_slot: ObjectRef = object_table::with_tcb(sender_ref, |tcb| {
+                tcb.tcb.reply_slot
+            });
+
+            if sender_reply_slot.is_valid() {
+                // This was a Call - transfer reply capability to receiver and keep sender blocked
+                log::trace!(
+                    "do_recv: sender {:?} was Call, reply_slot={:?}, transferring to receiver {:?}",
+                    sender_ref, sender_reply_slot, receiver_ref
+                );
+
+                // Grant reply capability to receiver
+                let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
+                    tcb.tcb.caller = sender_reply_slot;
+                });
+
+                // Change sender state from BlockedOnSend to BlockedOnReply
+                let _: () = object_table::with_tcb_mut(sender_ref, |tcb| {
+                    tcb.tcb.state = ThreadState::BlockedOnReply;
+                    tcb.ipc_blocked_on = ObjectRef::NULL;
+                    // Clear reply_slot since it's been transferred
+                    tcb.tcb.reply_slot = ObjectRef::NULL;
+                });
+            } else {
+                // This was a normal Send - wake the sender
+                wake_thread(sender_ref);
+            }
 
             Ok(Some((badge, msg)))
         }
 
         Action::Block => {
-            // Block the receiver first
+            // Block the receiver
             block_thread(receiver_ref, ep_ref, ThreadState::BlockedOnRecv);
 
             // Get current queue state
@@ -226,61 +331,125 @@ pub fn do_call(
     msg: &IpcMessage,
     has_grant: bool,
 ) -> Result<bool, SyscallError> {
-    // Create Reply object
+    // Create Reply object BEFORE locking endpoint
     let reply_ref = create_reply_object(caller_ref)?;
 
-    // Store reply reference in caller's TCB
+    // Store reply reference in caller's TCB BEFORE locking endpoint
     let _: () = object_table::with_tcb_mut(caller_ref, |tcb| {
         tcb.tcb.reply_slot = reply_ref;
     });
 
-    object_table::with_endpoint_mut(ep_ref, |endpoint| {
+    // Determine action inside endpoint lock, execute outside
+    enum Action {
+        DeliverTo(ObjectRef),
+        BlockInSendQueue,
+    }
+
+    let action = object_table::with_endpoint_mut(ep_ref, |endpoint| {
         match endpoint.state {
             EndpointState::RecvQueue => {
-                // Receiver waiting - transfer message and reply cap
-                let receiver_ref = ipc_dequeue(&mut endpoint.queue_head, &mut endpoint.queue_tail)
-                    .expect("RecvQueue but empty queue");
-
-                if endpoint.queue_head.is_null() {
-                    endpoint.state = EndpointState::Idle;
+                // Get receiver from queue head
+                let receiver_ref = endpoint.queue_head;
+                if !receiver_ref.is_valid() {
+                    panic!("RecvQueue but empty queue");
                 }
-
-                // Transfer capabilities if Grant right present
-                if let Err(e) = super::cap_transfer::transfer_capabilities(caller_ref, receiver_ref, has_grant) {
-                    log::debug!("Capability transfer failed during call: {:?}", e);
-                }
-
-                // Transfer message to receiver
-                transfer_message(receiver_ref, msg, badge);
-
-                // Grant reply capability to receiver
-                let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
-                    tcb.tcb.caller = reply_ref;
-                });
-
-                // Block caller waiting for reply
-                block_thread(caller_ref, ObjectRef::NULL, ThreadState::BlockedOnReply);
-
-                // Wake receiver
-                wake_thread(receiver_ref);
-
-                Ok(true)
+                Action::DeliverTo(receiver_ref)
             }
-
             EndpointState::Idle | EndpointState::SendQueue => {
-                // No receiver - block caller in send queue
-                // The reply cap transfer happens when receiver finally dequeues us
-                store_pending_message(caller_ref, msg, badge);
-                block_thread(caller_ref, ep_ref, ThreadState::BlockedOnSend);
-
-                endpoint.state = EndpointState::SendQueue;
-                ipc_enqueue(&mut endpoint.queue_head, &mut endpoint.queue_tail, caller_ref);
-
-                Ok(false)
+                Action::BlockInSendQueue
             }
         }
     })
-    .ok_or(SyscallError::InvalidCap)?
+    .ok_or(SyscallError::InvalidCap)?;
+
+    // Execute action OUTSIDE the endpoint lock
+    match action {
+        Action::DeliverTo(receiver_ref) => {
+            // Get next in queue and clear receiver's links (outside endpoint lock)
+            let next_in_queue: ObjectRef = object_table::with_tcb_mut(receiver_ref, |tcb| {
+                let next = tcb.ipc_next;
+                tcb.clear_ipc_links();
+                next
+            });
+
+            // Update endpoint queue state
+            object_table::with_endpoint_mut(ep_ref, |endpoint| {
+                endpoint.queue_head = next_in_queue;
+                if !next_in_queue.is_valid() {
+                    endpoint.queue_tail = ObjectRef::NULL;
+                    endpoint.state = EndpointState::Idle;
+                }
+            });
+
+            // Clear prev link of new head if it exists
+            if next_in_queue.is_valid() {
+                let _: () = object_table::with_tcb_mut(next_in_queue, |new_head| {
+                    new_head.ipc_prev = ObjectRef::NULL;
+                });
+            }
+
+            // Transfer capabilities if Grant right present
+            if let Err(e) = super::cap_transfer::transfer_capabilities(caller_ref, receiver_ref, has_grant) {
+                log::debug!("Capability transfer failed during call: {:?}", e);
+            }
+
+            // Transfer message to receiver
+            transfer_message(receiver_ref, msg, badge);
+
+            // Grant reply capability to receiver
+            let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
+                tcb.tcb.caller = reply_ref;
+            });
+
+            // Block caller waiting for reply
+            block_thread(caller_ref, ObjectRef::NULL, ThreadState::BlockedOnReply);
+
+            // Wake receiver
+            wake_thread(receiver_ref);
+
+            Ok(true)
+        }
+
+        Action::BlockInSendQueue => {
+            // Store message in caller's TCB
+            store_pending_message(caller_ref, msg, badge);
+
+            // Block caller
+            block_thread(caller_ref, ep_ref, ThreadState::BlockedOnSend);
+
+            // Get current queue tail
+            let old_tail = object_table::with_endpoint_mut(ep_ref, |endpoint| {
+                endpoint.queue_tail
+            }).ok_or(SyscallError::InvalidCap)?;
+
+            // Set up caller's queue links
+            let _: () = object_table::with_tcb_mut(caller_ref, |tcb| {
+                tcb.ipc_prev = old_tail;
+                tcb.ipc_next = ObjectRef::NULL;
+            });
+
+            // Link old tail to caller
+            if old_tail.is_valid() {
+                let _: () = object_table::with_tcb_mut(old_tail, |old_tail_tcb| {
+                    old_tail_tcb.ipc_next = caller_ref;
+                });
+            }
+
+            // Update endpoint queue
+            object_table::with_endpoint_mut(ep_ref, |endpoint| {
+                endpoint.state = EndpointState::SendQueue;
+                if old_tail.is_valid() {
+                    endpoint.queue_tail = caller_ref;
+                } else {
+                    // Queue was empty
+                    endpoint.queue_head = caller_ref;
+                    endpoint.queue_tail = caller_ref;
+                }
+            });
+
+            Ok(false)
+        }
+    }
 }
 
 /// Perform a reply-receive operation.
@@ -307,6 +476,11 @@ pub fn do_reply_recv(
     // First, reply to any waiting caller
     let reply_ref: ObjectRef = object_table::with_tcb(server_ref, |tcb| tcb.tcb.caller);
 
+    log::trace!(
+        "do_reply_recv: server={:?}, reply_ref={:?}, reply_msg[0]={:#x}",
+        server_ref, reply_ref, reply_msg.regs[0]
+    );
+
     if reply_ref.is_valid() {
         do_reply_internal(reply_ref, reply_msg)?;
 
@@ -314,6 +488,8 @@ pub fn do_reply_recv(
         let _: () = object_table::with_tcb_mut(server_ref, |tcb| {
             tcb.tcb.caller = ObjectRef::NULL;
         });
+    } else {
+        log::trace!("do_reply_recv: no caller to reply to");
     }
 
     // Then receive on endpoint
@@ -322,6 +498,11 @@ pub fn do_reply_recv(
 
 /// Internal reply operation using Reply capability.
 fn do_reply_internal(reply_ref: ObjectRef, msg: &IpcMessage) -> Result<(), SyscallError> {
+    log::trace!(
+        "do_reply_internal: reply_ref={:?}, msg[0]={:#x}",
+        reply_ref, msg.regs[0]
+    );
+
     let caller_ref = object_table::with_reply_mut(reply_ref, |reply| {
         if reply.is_used() {
             return Err(SyscallError::InvalidState);
@@ -330,6 +511,8 @@ fn do_reply_internal(reply_ref: ObjectRef, msg: &IpcMessage) -> Result<(), Sysca
         Ok(reply.caller)
     })
     .ok_or(SyscallError::InvalidCap)??;
+
+    log::trace!("do_reply_internal: caller_ref={:?}", caller_ref);
 
     // Transfer reply message to caller
     transfer_message(caller_ref, msg, 0);
@@ -385,10 +568,15 @@ fn get_pending_message(tcb_ref: ObjectRef) -> (IpcMessage, u64) {
 /// Transfer a message to a receiver's saved context.
 fn transfer_message(receiver_ref: ObjectRef, msg: &IpcMessage, badge: u64) {
     let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
+        log::trace!(
+            "transfer_message: before x0={:#x}, writing msg[0]={:#x}",
+            tcb.context.gpr[0], msg.regs[0]
+        );
         // Write message to receiver's saved register context
         msg.to_context(&mut tcb.context);
         // Badge goes in x6
         tcb.context.gpr[6] = badge;
+        log::trace!("transfer_message: after x0={:#x}", tcb.context.gpr[0]);
     });
 }
 

@@ -4,7 +4,7 @@
 //! capabilities for their device (MMIO access, IRQ, IOSpace for DMA).
 
 use m6_cap::ObjectType;
-use m6_syscall::{error::SyscallError, invoke::*};
+use m6_syscall::{error::SyscallError, invoke::*, slot_to_cptr};
 
 use crate::registry::{DeviceEntry, DriverEntry, Registry};
 use crate::manifest::DriverManifest;
@@ -48,6 +48,8 @@ pub enum SpawnError {
     DriverNotFound,
     /// Too many drivers
     TooManyDrivers,
+    /// No device untyped capability covers the required address
+    DeviceUntypedNotFound,
 }
 
 impl From<ElfError> for SpawnError {
@@ -145,6 +147,11 @@ pub fn spawn_driver(
     config: &DriverSpawnConfig,
     registry: &mut Registry,
 ) -> Result<DriverSpawnResult, SpawnError> {
+    // Get CNode radix for CPtr conversion
+    // SAFETY: Called after _start has initialised BOOT_INFO
+    let boot_info = unsafe { crate::get_boot_info() };
+    let cptr = |slot: u64| slot_to_cptr(slot, boot_info.cnode_radix);
+
     // Parse ELF binary
     let elf = Elf64::parse(config.elf_data)?;
 
@@ -171,64 +178,63 @@ pub fn spawn_driver(
 
     // Create VSpace (page table root)
     retype(
-        slots::RAM_UNTYPED,
+        cptr(slots::RAM_UNTYPED),
         ObjectType::VSpace as u64,
         0,
-        slots::ROOT_CNODE,
+        cptr(slots::ROOT_CNODE),
         vspace_slot,
         1,
     ).map_err(SpawnError::RetypeFailed)?;
 
-    // Assign ASID to VSpace
-    asid_pool_assign(slots::ASID_POOL, vspace_slot)
+    asid_pool_assign(cptr(slots::ASID_POOL), cptr(vspace_slot))
         .map_err(SpawnError::AsidAssignFailed)?;
 
     // Create CSpace (radix 10 = 1024 slots for drivers)
     retype(
-        slots::RAM_UNTYPED,
+        cptr(slots::RAM_UNTYPED),
         ObjectType::CNode as u64,
         10, // radix
-        slots::ROOT_CNODE,
+        cptr(slots::ROOT_CNODE),
         cspace_slot,
         1,
     ).map_err(SpawnError::RetypeFailed)?;
 
     // Create TCB
     retype(
-        slots::RAM_UNTYPED,
+        cptr(slots::RAM_UNTYPED),
         ObjectType::TCB as u64,
         0,
-        slots::ROOT_CNODE,
+        cptr(slots::ROOT_CNODE),
         tcb_slot,
         1,
     ).map_err(SpawnError::RetypeFailed)?;
 
     // Create IPC buffer frame
     retype(
-        slots::RAM_UNTYPED,
+        cptr(slots::RAM_UNTYPED),
         ObjectType::Frame as u64,
         12, // 4KB
-        slots::ROOT_CNODE,
+        cptr(slots::ROOT_CNODE),
         ipc_buf_slot,
         1,
     ).map_err(SpawnError::RetypeFailed)?;
 
     // Create driver's service endpoint
     retype(
-        slots::RAM_UNTYPED,
+        cptr(slots::RAM_UNTYPED),
         ObjectType::Endpoint as u64,
         0,
-        slots::ROOT_CNODE,
+        cptr(slots::ROOT_CNODE),
         driver_ep_slot,
         1,
     ).map_err(SpawnError::RetypeFailed)?;
 
     // Create fault endpoint for death detection
     retype(
-        slots::RAM_UNTYPED,
+        cptr(slots::RAM_UNTYPED),
         ObjectType::Endpoint as u64,
         0,
-        slots::ROOT_CNODE,
+        cptr(slots::ROOT_CNODE),
         fault_ep_slot,
         1,
     ).map_err(SpawnError::RetypeFailed)?;
@@ -237,11 +243,11 @@ pub fn spawn_driver(
     // Note: In a full implementation, this would retype from device untyped
     // or use a kernel-provided device frame capability
     // For now, we create a placeholder
-    create_device_frame(device_frame_slot, &config.device_info)?;
+    create_device_frame(device_frame_slot, &config.device_info, &cptr)?;
 
     // Claim IRQ handler if needed
     if let Some(irq_slot) = irq_handler_slot {
-        claim_irq(irq_slot, config.device_info.irq)?;
+        claim_irq(irq_slot, config.device_info.irq, &cptr)?;
     }
 
     // Create IOSpace if needed
@@ -251,22 +257,30 @@ pub fn spawn_driver(
 
     // Load ELF and create stack
     let entry = elf.entry();
-    let stack_top = load_elf_and_stack(vspace_slot, &elf, config.elf_data, registry)?;
+    let stack_top = load_elf_and_stack(vspace_slot, &elf, config.elf_data, registry, &cptr)?;
 
-    // Map IPC buffer
+    // Map IPC buffer - ensure page tables exist first
     const IPC_BUFFER_ADDR: u64 = 0x0000_7FFF_F000_0000;
-    map_frame(vspace_slot, ipc_buf_slot, IPC_BUFFER_ADDR, MapRights::RW.to_bits(), 0)
+    ensure_page_tables(vspace_slot, IPC_BUFFER_ADDR, IPC_BUFFER_ADDR + PAGE_SIZE as u64, registry, &cptr)?;
+    map_frame(cptr(vspace_slot), cptr(ipc_buf_slot), IPC_BUFFER_ADDR, MapRights::RW.to_bits(), 0)
         .map_err(SpawnError::FrameMapFailed)?;
+
+    // Ensure page tables exist for the MMIO region so driver can map its DeviceFrame
+    // Drivers use a standard MMIO address range starting at 0x8000_0000 (2GB)
+    const MMIO_VADDR: u64 = 0x0000_8000_0000;
+    ensure_page_tables(vspace_slot, MMIO_VADDR, MMIO_VADDR + PAGE_SIZE as u64, registry, &cptr)?;
 
     // Install initial capabilities in driver's CSpace
     install_driver_caps(
-        cspace_slot,
-        vspace_slot,
-        tcb_slot,
-        driver_ep_slot,
-        device_frame_slot,
-        irq_handler_slot,
-        iospace_slot,
+        cptr(cspace_slot),           // dest cspace CPtr
+        cptr(slots::ROOT_CNODE),     // src cnode CPtr
+        cspace_slot,                  // cspace slot number
+        vspace_slot,                  // vspace slot number
+        tcb_slot,                     // tcb slot number
+        driver_ep_slot,               // endpoint slot number
+        device_frame_slot,            // device frame slot number
+        irq_handler_slot,             // optional irq handler slot
+        iospace_slot,                 // optional iospace slot
     )?;
 
     // Calculate fault badge for this driver
@@ -275,20 +289,20 @@ pub fn spawn_driver(
 
     // Configure TCB with fault endpoint
     tcb_configure(
-        tcb_slot,
-        fault_ep_slot,
-        cspace_slot,
-        vspace_slot,
+        cptr(tcb_slot),
+        cptr(fault_ep_slot),
+        cptr(cspace_slot),
+        cptr(vspace_slot),
         IPC_BUFFER_ADDR,
-        ipc_buf_slot,
+        cptr(ipc_buf_slot),
     ).map_err(SpawnError::TcbConfigureFailed)?;
 
     // Set initial registers
-    tcb_write_registers(tcb_slot, entry, stack_top, 0)
+    tcb_write_registers(cptr(tcb_slot), entry, stack_top, 0)
         .map_err(SpawnError::TcbWriteRegistersFailed)?;
 
     // Resume the driver
-    tcb_resume(tcb_slot).map_err(SpawnError::TcbResumeFailed)?;
+    tcb_resume(cptr(tcb_slot)).map_err(SpawnError::TcbResumeFailed)?;
 
     // Add driver to registry
     let driver_entry = DriverEntry {
@@ -319,30 +333,41 @@ pub fn spawn_driver(
 }
 
 /// Create a DeviceFrame for the device's MMIO region.
-fn create_device_frame(slot: u64, device_info: &DeviceInfo) -> Result<(), SpawnError> {
-    // In a full implementation:
-    // 1. Find the untyped capability covering this physical region
-    // 2. Retype to DeviceFrame
-    // For now, this is a placeholder that assumes the capability exists
-    // or would be provided by init
+fn create_device_frame(slot: u64, device_info: &DeviceInfo, cptr: &impl Fn(u64) -> u64) -> Result<(), SpawnError> {
+    // SAFETY: Called after _start has initialised BOOT_INFO
+    let boot_info = unsafe { crate::get_boot_info() };
 
-    // The device-mgr would need to have been given untyped caps
-    // covering device MMIO regions, or init would provide pre-made
-    // DeviceFrame caps for known devices
+    // Find the device untyped that covers this physical address
+    let (device_untyped_slot, _size) = boot_info
+        .find_device_untyped(device_info.phys_base)
+        .ok_or(SpawnError::DeviceUntypedNotFound)?;
 
-    // Placeholder: just succeed for now
-    let _ = (slot, device_info);
+    // Retype the device untyped to DeviceFrame
+    // DeviceFrame size is always 4KB (size_bits = 12)
+    retype(
+        cptr(device_untyped_slot),
+        ObjectType::DeviceFrame as u64,
+        12, // 4KB
+        cptr(slots::ROOT_CNODE),
+        slot,
+        1,
+    ).map_err(SpawnError::RetypeFailed)?;
+
     Ok(())
 }
 
-/// Claim an IRQ handler.
-fn claim_irq(slot: u64, irq: u32) -> Result<(), SpawnError> {
-    // Use IRQ_CONTROL to create an IRQHandler for this IRQ
-    // irq_control_get(slots::IRQ_CONTROL, irq, slot)
-    //     .map_err(SpawnError::IrqClaimFailed)?;
-
-    // Placeholder
-    let _ = (slot, irq);
+/// Claim an IRQ handler from IRQControl.
+///
+/// Creates an IRQHandler capability for the specified hardware IRQ and
+/// places it in the given slot.
+fn claim_irq(slot: u64, irq: u32, cptr: &impl Fn(u64) -> u64) -> Result<(), SpawnError> {
+    irq_control_get(
+        cptr(slots::IRQ_CONTROL),
+        irq,
+        cptr(slots::ROOT_CNODE),
+        slot,
+        0,
+    ).map_err(SpawnError::IrqClaimFailed)?;
     Ok(())
 }
 
@@ -359,13 +384,75 @@ fn create_iospace(slot: u64) -> Result<(), SpawnError> {
     Ok(())
 }
 
+/// Ensure page tables exist for an address range in a VSpace.
+fn ensure_page_tables(
+    vspace_slot: u64,
+    vaddr_start: u64,
+    vaddr_end: u64,
+    registry: &mut Registry,
+    cptr: &impl Fn(u64) -> u64,
+) -> Result<(), SpawnError> {
+    const L1_SIZE: u64 = 512 * 1024 * 1024 * 1024; // 512GB
+    const L2_SIZE: u64 = 1024 * 1024 * 1024;       // 1GB
+    const L3_SIZE: u64 = 2 * 1024 * 1024;          // 2MB
+
+    let l1_base = vaddr_start & !(L1_SIZE - 1);
+    let l2_base = vaddr_start & !(L2_SIZE - 1);
+    let l3_base = vaddr_start & !(L3_SIZE - 1);
+
+    // Create L1 table (level 1)
+    let l1_slot = registry.alloc_slot();
+    retype(cptr(slots::RAM_UNTYPED), 5, 0, cptr(slots::ROOT_CNODE), l1_slot, 1)
+        .map_err(SpawnError::RetypeFailed)?;
+    let _ = map_page_table(cptr(vspace_slot), cptr(l1_slot), l1_base, 1);
+
+    // Create L2 table (level 2)
+    let l2_slot = registry.alloc_slot();
+    retype(cptr(slots::RAM_UNTYPED), 6, 0, cptr(slots::ROOT_CNODE), l2_slot, 1)
+        .map_err(SpawnError::RetypeFailed)?;
+    let _ = map_page_table(cptr(vspace_slot), cptr(l2_slot), l2_base, 2);
+
+    // Create L3 table (level 3)
+    let l3_slot = registry.alloc_slot();
+    retype(cptr(slots::RAM_UNTYPED), 7, 0, cptr(slots::ROOT_CNODE), l3_slot, 1)
+        .map_err(SpawnError::RetypeFailed)?;
+    let _ = map_page_table(cptr(vspace_slot), cptr(l3_slot), l3_base, 3);
+
+    // Handle case where end address is in a different L3 region
+    let l3_end_base = (vaddr_end - 1) & !(L3_SIZE - 1);
+    if l3_end_base != l3_base {
+        let l3_slot2 = registry.alloc_slot();
+        retype(cptr(slots::RAM_UNTYPED), 7, 0, cptr(slots::ROOT_CNODE), l3_slot2, 1)
+            .map_err(SpawnError::RetypeFailed)?;
+        let _ = map_page_table(cptr(vspace_slot), cptr(l3_slot2), l3_end_base, 3);
+    }
+
+    Ok(())
+}
+
 /// Load ELF segments and create stack.
 fn load_elf_and_stack(
     vspace: u64,
     elf: &Elf64,
-    elf_data: &[u8],
+    _elf_data: &[u8],
     registry: &mut Registry,
+    cptr: &impl Fn(u64) -> u64,
 ) -> Result<u64, SpawnError> {
+    // Ensure page tables exist for ELF segments
+    for segment in elf.segments() {
+        if segment.mem_size > 0 {
+            let vaddr_start = segment.vaddr;
+            let vaddr_end = segment.vaddr + segment.mem_size;
+            ensure_page_tables(vspace, vaddr_start, vaddr_end, registry, &cptr)?;
+        }
+    }
+
+    // Ensure page tables exist for stack region
+    let stack_pages = 16;
+    let stack_top = 0x0000_7FFF_F000u64;
+    let stack_base = stack_top - (stack_pages * PAGE_SIZE) as u64;
+    ensure_page_tables(vspace, stack_base, stack_top, registry, &cptr)?;
+
     // Map ELF segments
     for segment in elf.segments() {
         let rights = if segment.executable {
@@ -377,33 +464,30 @@ fn load_elf_and_stack(
         };
 
         if let Some(data) = elf.segment_data(&segment) {
-            map_segment(vspace, segment.vaddr, segment.mem_size, data, rights, registry)?;
+            map_segment(vspace, segment.vaddr, segment.mem_size, data, rights, registry, &cptr)?;
         }
     }
 
-    // Create stack (16 pages = 64KB)
-    let stack_pages = 16;
-    let stack_top = 0x0000_7FFF_F000u64;
-    let stack_base = stack_top - (stack_pages * PAGE_SIZE) as u64;
-
+    // Create stack frames
     for i in 0..stack_pages {
         let page_vaddr = stack_base + (i * PAGE_SIZE) as u64;
-        let frame_slot = alloc_frame(registry)?;
-        map_frame(vspace, frame_slot, page_vaddr, MapRights::RW.to_bits(), 0)
+        let frame_slot = alloc_frame(registry, &cptr)?;
+        map_frame(cptr(vspace), cptr(frame_slot), page_vaddr, MapRights::RW.to_bits(), 0)
             .map_err(SpawnError::FrameMapFailed)?;
     }
 
     Ok(stack_top)
 }
 
-/// Map a memory segment.
+/// Map a memory segment using frame_write syscall (no temporary mapping needed).
 fn map_segment(
-    vspace: u64,
+    vspace_slot: u64,
     vaddr: u64,
     size: u64,
     data: &[u8],
     rights: MapRights,
     registry: &mut Registry,
+    cptr: &impl Fn(u64) -> u64,
 ) -> Result<(), SpawnError> {
     let vaddr_start = vaddr & !(PAGE_SIZE as u64 - 1);
     let vaddr_end = (vaddr + size + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
@@ -411,39 +495,59 @@ fn map_segment(
 
     let data_offset = (vaddr - vaddr_start) as usize;
 
+    // Static zero buffer for zeroing pages
+    static ZEROS: [u8; PAGE_SIZE] = [0u8; PAGE_SIZE];
+
     for i in 0..num_pages {
         let page_vaddr = vaddr_start + (i * PAGE_SIZE) as u64;
-        let frame_slot = alloc_frame(registry)?;
+        let frame_slot = alloc_frame(registry, &cptr)?;
 
-        // Map temporarily to copy data
-        const TEMP_MAP: u64 = 0x1_0000_0000;
-        map_frame(slots::ROOT_VSPACE, frame_slot, TEMP_MAP, MapRights::RW.to_bits(), 0)
-            .map_err(SpawnError::FrameMapFailed)?;
+        // Calculate data range for this page
+        let page_data_start = if i == 0 { 0 } else { i * PAGE_SIZE - data_offset };
+        let page_data_end = core::cmp::min(page_data_start + PAGE_SIZE, data.len());
 
-        // Copy data
-        unsafe {
-            let dest = core::slice::from_raw_parts_mut(TEMP_MAP as *mut u8, PAGE_SIZE);
-            dest.fill(0);
+        // Use frame_write syscall to write data directly to the frame
+        if page_data_start < data.len() {
+            if i == 0 {
+                // First page: may need leading zeros and data starting at offset
+                let copy_len = core::cmp::min(PAGE_SIZE - data_offset, data.len());
 
-            let page_data_start = if i == 0 { 0 } else { i * PAGE_SIZE - data_offset };
-            let page_data_end = core::cmp::min(page_data_start + PAGE_SIZE, data.len());
+                // Zero the page first (before the data)
+                if data_offset > 0 {
+                    frame_write(cptr(frame_slot), 0, ZEROS.as_ptr(), data_offset)
+                        .map_err(SpawnError::FrameMapFailed)?;
+                }
 
-            if page_data_start < data.len() {
-                if i == 0 {
-                    let copy_len = core::cmp::min(PAGE_SIZE - data_offset, data.len());
-                    dest[data_offset..data_offset + copy_len].copy_from_slice(&data[..copy_len]);
-                } else if page_data_start < page_data_end {
-                    let copy_len = page_data_end - page_data_start;
-                    dest[..copy_len].copy_from_slice(&data[page_data_start..page_data_end]);
+                // Write the actual data
+                frame_write(cptr(frame_slot), data_offset as u64, data.as_ptr(), copy_len)
+                    .map_err(SpawnError::FrameMapFailed)?;
+
+                // Zero remainder if needed
+                let remainder_start = data_offset + copy_len;
+                if remainder_start < PAGE_SIZE {
+                    frame_write(cptr(frame_slot), remainder_start as u64, ZEROS.as_ptr(), PAGE_SIZE - remainder_start)
+                        .map_err(SpawnError::FrameMapFailed)?;
+                }
+            } else if page_data_start < page_data_end {
+                // Subsequent pages with data
+                let copy_len = page_data_end - page_data_start;
+                frame_write(cptr(frame_slot), 0, data[page_data_start..].as_ptr(), copy_len)
+                    .map_err(SpawnError::FrameMapFailed)?;
+
+                // Zero remainder if partial page
+                if copy_len < PAGE_SIZE {
+                    frame_write(cptr(frame_slot), copy_len as u64, ZEROS.as_ptr(), PAGE_SIZE - copy_len)
+                        .map_err(SpawnError::FrameMapFailed)?;
                 }
             }
+        } else {
+            // No data for this page - just zero it
+            frame_write(cptr(frame_slot), 0, ZEROS.as_ptr(), PAGE_SIZE)
+                .map_err(SpawnError::FrameMapFailed)?;
         }
 
-        // Unmap from our space
-        unmap_frame(frame_slot).map_err(SpawnError::FrameMapFailed)?;
-
-        // Map to driver's space
-        map_frame(vspace, frame_slot, page_vaddr, rights.to_bits(), 0)
+        // Map frame into driver's VSpace
+        map_frame(cptr(vspace_slot), cptr(frame_slot), page_vaddr, rights.to_bits(), 0)
             .map_err(SpawnError::FrameMapFailed)?;
     }
 
@@ -451,13 +555,13 @@ fn map_segment(
 }
 
 /// Allocate a frame.
-fn alloc_frame(registry: &mut Registry) -> Result<u64, SpawnError> {
+fn alloc_frame(registry: &mut Registry, cptr: &impl Fn(u64) -> u64) -> Result<u64, SpawnError> {
     let slot = registry.alloc_slot();
     retype(
-        slots::RAM_UNTYPED,
+        cptr(slots::RAM_UNTYPED),
         ObjectType::Frame as u64,
         12, // 4KB
-        slots::ROOT_CNODE,
+        cptr(slots::ROOT_CNODE),
         slot,
         1,
     ).map_err(SpawnError::RetypeFailed)?;
@@ -465,8 +569,15 @@ fn alloc_frame(registry: &mut Registry) -> Result<u64, SpawnError> {
 }
 
 /// Install initial capabilities into driver's CSpace.
+///
+/// Parameters:
+/// - child_cspace_cptr: CPtr of the child's CSpace (destination)
+/// - src_cnode_cptr: CPtr of device-mgr's root CNode (source)
+/// - vspace_slot, tcb_slot, etc.: raw slot numbers in source CNode
 fn install_driver_caps(
-    child_cspace: u64,
+    child_cspace_cptr: u64,
+    src_cnode_cptr: u64,
+    cspace_slot: u64,
     vspace_slot: u64,
     tcb_slot: u64,
     endpoint_slot: u64,
@@ -475,34 +586,34 @@ fn install_driver_caps(
     iospace_slot: Option<u64>,
 ) -> Result<(), SpawnError> {
     // Slot 0: CSpace self-reference
-    cap_copy(child_cspace, slots::driver::ROOT_CNODE, 0, slots::ROOT_CNODE, child_cspace, 0)
+    cap_copy(child_cspace_cptr, slots::driver::ROOT_CNODE, 0, src_cnode_cptr, cspace_slot, 0)
         .map_err(SpawnError::CapCopyFailed)?;
 
     // Slot 1: TCB
-    cap_copy(child_cspace, slots::driver::ROOT_TCB, 0, slots::ROOT_CNODE, tcb_slot, 0)
+    cap_copy(child_cspace_cptr, slots::driver::ROOT_TCB, 0, src_cnode_cptr, tcb_slot, 0)
         .map_err(SpawnError::CapCopyFailed)?;
 
     // Slot 2: VSpace
-    cap_copy(child_cspace, slots::driver::ROOT_VSPACE, 0, slots::ROOT_CNODE, vspace_slot, 0)
+    cap_copy(child_cspace_cptr, slots::driver::ROOT_VSPACE, 0, src_cnode_cptr, vspace_slot, 0)
         .map_err(SpawnError::CapCopyFailed)?;
 
     // Slot 10: DeviceFrame
-    cap_copy(child_cspace, slots::driver::DEVICE_FRAME, 0, slots::ROOT_CNODE, device_frame_slot, 0)
+    cap_copy(child_cspace_cptr, slots::driver::DEVICE_FRAME, 0, src_cnode_cptr, device_frame_slot, 0)
         .map_err(SpawnError::CapCopyFailed)?;
 
     // Slot 11: IRQHandler (if present)
     if let Some(irq_slot) = irq_handler_slot {
-        cap_copy(child_cspace, slots::driver::IRQ_HANDLER, 0, slots::ROOT_CNODE, irq_slot, 0)
+        cap_copy(child_cspace_cptr, slots::driver::IRQ_HANDLER, 0, src_cnode_cptr, irq_slot, 0)
             .map_err(SpawnError::CapCopyFailed)?;
     }
 
     // Slot 12: Service endpoint
-    cap_copy(child_cspace, slots::driver::SERVICE_EP, 0, slots::ROOT_CNODE, endpoint_slot, 0)
+    cap_copy(child_cspace_cptr, slots::driver::SERVICE_EP, 0, src_cnode_cptr, endpoint_slot, 0)
         .map_err(SpawnError::CapCopyFailed)?;
 
     // Slot 13: IOSpace (if present)
     if let Some(io_slot) = iospace_slot {
-        cap_copy(child_cspace, slots::driver::IOSPACE, 0, slots::ROOT_CNODE, io_slot, 0)
+        cap_copy(child_cspace_cptr, slots::driver::IOSPACE, 0, src_cnode_cptr, io_slot, 0)
             .map_err(SpawnError::CapCopyFailed)?;
     }
 

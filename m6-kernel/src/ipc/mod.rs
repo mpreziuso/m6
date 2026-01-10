@@ -84,10 +84,16 @@ pub fn lookup_cap(
     // Resolve CPtr through hierarchical CSpace (depth 0 = auto)
     let loc = cspace::resolve_cptr(cptr, 0)?;
 
+    log::trace!(
+        "lookup_cap: cptr={:#x} resolved to cnode={:?} slot={}",
+        cptr, loc.cnode_ref, loc.slot_index
+    );
+
     // Access the resolved slot and validate
     cspace::with_slot(&loc, |slot| {
         // Check if slot is empty
         if slot.is_empty() {
+            log::trace!("lookup_cap: slot {} is EMPTY", loc.slot_index);
             return Err(SyscallError::EmptySlot);
         }
 
