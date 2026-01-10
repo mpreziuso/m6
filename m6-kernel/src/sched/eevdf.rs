@@ -90,8 +90,6 @@ pub fn is_runnable(tcb: &TcbFull) -> bool {
 ///
 /// Sets up initial EEVDF parameters and inserts into the queue.
 pub fn add_to_run_queue(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
-    log::info!("add_to_run_queue: adding tcb_ref index={}", tcb_ref.index());
-
     // Advance virtual clock before accounting
     advance_vclock(sched);
 

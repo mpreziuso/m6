@@ -84,7 +84,7 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
     let dest_index = args.arg4 as usize;
     let count = args.arg5 as usize;
 
-    log::debug!(
+    log::trace!(
         "Retype: untyped={} type={} size_bits={} dest_cnode={} dest_idx={} count={}",
         untyped_cptr, target_type_raw, size_bits, dest_cnode_cptr, dest_index, count
     );
@@ -122,7 +122,7 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
             e
         })?;
 
-    log::debug!("Retype: capabilities looked up successfully");
+    log::trace!("Retype: capabilities looked up successfully");
 
     // Get object size and alignment
     let obj_size = object_size(target_type, size_bits)
@@ -569,7 +569,7 @@ fn install_mapping(
         // SAFETY: We verified the entry is not occupied
         unsafe { l2.set_desc(va, new_desc) };
 
-        log::debug!(
+        log::trace!(
             "MapFrame: installed 2MB block at va={:#x} -> pa={:#x}",
             vaddr,
             phys_addr.as_u64()
@@ -597,7 +597,7 @@ fn install_mapping(
         // SAFETY: We verified the entry is not occupied
         unsafe { l3.set_desc(va, new_desc) };
 
-        log::debug!(
+        log::trace!(
             "MapFrame: installed 4KB page at va={:#x} -> pa={:#x}",
             vaddr,
             phys_addr.as_u64()
@@ -713,7 +713,7 @@ fn install_page_table(
             // SAFETY: We verified the entry is not occupied
             unsafe { l0.set_desc(va, new_desc) };
 
-            log::debug!(
+            log::trace!(
                 "MapPageTable: installed L1 table at va={:#x} -> pa={:#x}",
                 vaddr,
                 pt_phys.as_u64()
@@ -735,7 +735,7 @@ fn install_page_table(
             // SAFETY: We verified the entry is not occupied
             unsafe { l1.set_desc(va, new_desc) };
 
-            log::debug!(
+            log::trace!(
                 "MapPageTable: installed L2 table at va={:#x} -> pa={:#x}",
                 vaddr,
                 pt_phys.as_u64()
@@ -763,7 +763,7 @@ fn install_page_table(
             // SAFETY: We verified the entry is not occupied
             unsafe { l2.set_desc(va, new_desc) };
 
-            log::debug!(
+            log::trace!(
                 "MapPageTable: installed L3 table at va={:#x} -> pa={:#x}",
                 vaddr,
                 pt_phys.as_u64()

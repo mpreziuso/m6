@@ -61,7 +61,7 @@ pub fn handle_asid_pool_assign(args: &SyscallArgs) -> SyscallResult {
     })
     .ok_or(SyscallError::InvalidCap)??;
 
-    log::debug!(
+    log::trace!(
         "Assigned ASID {} to VSpace {:?} (generation {})",
         pool_asid,
         vspace_cap.obj_ref,
