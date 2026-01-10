@@ -139,6 +139,10 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
     gic::enable_irq(timer_irq);
     log::info!("Timer IRQ {} enabled", timer_irq);
 
+    // Register userspace IRQ dispatcher for capability-based interrupt delivery
+    gic::register_userspace_dispatcher(m6_kernel::irq::dispatch_userspace_irq);
+    log::info!("Userspace IRQ dispatcher registered");
+
     // Register IRQ dispatcher with exception system
     exceptions::set_irq_handler(irq_handler);
 

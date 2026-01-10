@@ -868,6 +868,65 @@ pub fn irq_control_get(
     ))
 }
 
+/// Bind an IRQ handler to a notification.
+///
+/// When the hardware interrupt fires, the kernel will signal the
+/// notification with the specified badge.
+///
+/// # Arguments
+///
+/// * `irq_handler` - CPtr to the IRQHandler capability
+/// * `notification` - CPtr to the Notification capability
+/// * `badge` - Badge value to OR into notification on interrupt
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn irq_set_handler(irq_handler: u64, notification: u64, badge: u64) -> SyscallResult {
+    check_result(syscall3(
+        Syscall::IrqSetHandler,
+        irq_handler,
+        notification,
+        badge,
+    ))
+}
+
+/// Acknowledge an IRQ, allowing it to fire again.
+///
+/// Must be called after handling an interrupt to re-enable it.
+/// The IRQ handler must be in the Masked state (after receiving
+/// a notification from the kernel).
+///
+/// # Arguments
+///
+/// * `irq_handler` - CPtr to the IRQHandler capability
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn irq_ack(irq_handler: u64) -> SyscallResult {
+    check_result(syscall1(Syscall::IrqAck, irq_handler))
+}
+
+/// Unbind an IRQ handler from its notification.
+///
+/// Disables the IRQ and clears the handler binding.
+/// After this call, the IRQ will no longer generate notifications.
+///
+/// # Arguments
+///
+/// * `irq_handler` - CPtr to the IRQHandler capability
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn irq_clear_handler(irq_handler: u64) -> SyscallResult {
+    check_result(syscall1(Syscall::IrqClearHandler, irq_handler))
+}
+
 // -- IPC Buffer Helpers
 
 /// Prepare IPC buffer for sending capabilities.

@@ -31,6 +31,7 @@
 pub mod cap;
 pub mod initrd;
 pub mod ipc;
+pub mod irq;
 pub mod logging;
 pub mod memory;
 pub mod sched;

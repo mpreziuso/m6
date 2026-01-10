@@ -56,6 +56,20 @@ pub const LCR_H_FEN: u32 = 1 << 4;
 /// Word length 8 bits
 pub const LCR_H_WLEN_8: u32 = 3 << 5;
 
+// -- Interrupt mask register bits (IMSC)
+
+/// Receive interrupt mask
+pub const IMSC_RXIM: u32 = 1 << 4;
+/// Transmit interrupt mask
+pub const IMSC_TXIM: u32 = 1 << 5;
+/// Receive timeout interrupt mask
+pub const IMSC_RTIM: u32 = 1 << 6;
+
+// -- Interrupt clear register bits (ICR)
+
+/// Clear all interrupts
+pub const ICR_ALL: u32 = 0x7FF;
+
 /// PL011 UART driver state.
 pub struct Pl011 {
     base: usize,
@@ -157,6 +171,50 @@ impl Pl011 {
         for &byte in buf {
             self.putc(byte);
         }
+    }
+
+    // -- Interrupt control
+
+    /// Enable RX interrupt (and receive timeout).
+    ///
+    /// When enabled, an interrupt is generated when the RX FIFO reaches
+    /// its trigger level or a receive timeout occurs.
+    pub fn enable_rx_interrupt(&self) {
+        let imsc = self.read_reg(IMSC);
+        self.write_reg(IMSC, imsc | IMSC_RXIM | IMSC_RTIM);
+    }
+
+    /// Disable RX interrupt.
+    pub fn disable_rx_interrupt(&self) {
+        let imsc = self.read_reg(IMSC);
+        self.write_reg(IMSC, imsc & !(IMSC_RXIM | IMSC_RTIM));
+    }
+
+    /// Clear all pending interrupts.
+    pub fn clear_interrupts(&self) {
+        self.write_reg(ICR, ICR_ALL);
+    }
+
+    /// Read masked interrupt status.
+    ///
+    /// Returns the MIS register value, which indicates which interrupts
+    /// are currently active (masked by IMSC).
+    #[allow(dead_code)]
+    pub fn read_interrupt_status(&self) -> u32 {
+        self.read_reg(MIS)
+    }
+
+    /// Drain all available RX data into buffer.
+    ///
+    /// Returns number of bytes read. This is useful for interrupt handlers
+    /// to drain the FIFO after receiving an RX interrupt.
+    pub fn drain_rx(&self, buf: &mut [u8]) -> usize {
+        let mut count = 0;
+        while self.rx_ready() && count < buf.len() {
+            buf[count] = (self.read_reg(DR) & 0xFF) as u8;
+            count += 1;
+        }
+        count
     }
 
     // -- Private helpers

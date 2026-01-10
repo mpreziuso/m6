@@ -172,6 +172,12 @@ pub fn spawn_driver(
     } else {
         None
     };
+    // Allocate notification for IRQ delivery if driver needs IRQ
+    let irq_notif_slot = if config.manifest.needs_irq && config.device_info.irq != 0 {
+        Some(registry.alloc_slot())
+    } else {
+        None
+    };
     let iospace_slot = if config.manifest.needs_iommu {
         Some(registry.alloc_slot())
     } else {
@@ -252,6 +258,18 @@ pub fn spawn_driver(
         claim_irq(irq_slot, config.device_info.irq, &cptr)?;
     }
 
+    // Create notification for IRQ delivery if needed
+    if let Some(notif_slot) = irq_notif_slot {
+        retype(
+            cptr(slots::RAM_UNTYPED),
+            ObjectType::Notification as u64,
+            0,
+            cptr(slots::ROOT_CNODE),
+            notif_slot,
+            1,
+        ).map_err(SpawnError::RetypeFailed)?;
+    }
+
     // Create IOSpace if needed
     if let Some(io_slot) = iospace_slot {
         create_iospace(io_slot)?;
@@ -282,6 +300,7 @@ pub fn spawn_driver(
         driver_ep_slot,               // endpoint slot number
         device_frame_slot,            // device frame slot number
         irq_handler_slot,             // optional irq handler slot
+        irq_notif_slot,               // optional notification for IRQ delivery
         iospace_slot,                 // optional iospace slot
         config.console_ep_slot,       // optional console endpoint slot
     )?;
@@ -586,6 +605,7 @@ fn install_driver_caps(
     endpoint_slot: u64,
     device_frame_slot: u64,
     irq_handler_slot: Option<u64>,
+    irq_notif_slot: Option<u64>,
     iospace_slot: Option<u64>,
     console_ep_slot: Option<u64>,
 ) -> Result<(), SpawnError> {
@@ -608,6 +628,12 @@ fn install_driver_caps(
     // Slot 11: IRQHandler (if present)
     if let Some(irq_slot) = irq_handler_slot {
         cap_copy(child_cspace_cptr, slots::driver::IRQ_HANDLER, 0, src_cnode_cptr, irq_slot, 0)
+            .map_err(SpawnError::CapCopyFailed)?;
+    }
+
+    // Slot 14: Notification for IRQ delivery (if present)
+    if let Some(notif_slot) = irq_notif_slot {
+        cap_copy(child_cspace_cptr, slots::driver::NOTIF, 0, src_cnode_cptr, notif_slot, 0)
             .map_err(SpawnError::CapCopyFailed)?;
     }
 

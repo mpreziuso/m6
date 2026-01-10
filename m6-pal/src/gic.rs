@@ -24,6 +24,12 @@ pub type IrqHandler = fn(intid: u32);
 static IRQ_HANDLERS: Mutex<[Option<IrqHandler>; MAX_HANDLERS]> =
     Mutex::new([None; MAX_HANDLERS]);
 
+/// Callback for userspace IRQ dispatch.
+///
+/// When set, this function is called for interrupts that don't have
+/// a kernel-registered handler. Returns true if the interrupt was handled.
+static USERSPACE_DISPATCHER: Mutex<Option<fn(u32) -> bool>> = Mutex::new(None);
+
 /// GIC driver abstraction supporting both v2 and v3
 enum GicDriver {
     V2(GicV2<'static>),
@@ -285,6 +291,19 @@ pub fn unregister_handler(intid: u32) {
     }
 }
 
+/// Register a userspace IRQ dispatcher callback.
+///
+/// This callback is invoked for interrupts that don't have a kernel
+/// handler registered. Typically used to dispatch IRQs to userspace
+/// drivers via the capability system.
+///
+/// # Arguments
+///
+/// * `dispatcher` - Function that takes an INTID and returns true if handled
+pub fn register_userspace_dispatcher(dispatcher: fn(u32) -> bool) {
+    *USERSPACE_DISPATCHER.lock() = Some(dispatcher);
+}
+
 /// Dispatch an IRQ to its registered handler
 ///
 /// This function is called from the IRQ exception handler.
@@ -315,6 +334,12 @@ pub fn dispatch_irq() {
     if let Some(handler) = handler {
         // Handler is called without holding any locks
         handler(intid);
+    } else {
+        // No kernel handler - try userspace dispatcher
+        let dispatcher = { *USERSPACE_DISPATCHER.lock() };
+        if let Some(dispatch_fn) = dispatcher {
+            dispatch_fn(intid);
+        }
     }
 
     // Signal end of interrupt
