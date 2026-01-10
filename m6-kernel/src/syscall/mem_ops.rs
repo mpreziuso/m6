@@ -84,29 +84,52 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
     let dest_index = args.arg4 as usize;
     let count = args.arg5 as usize;
 
+    log::debug!(
+        "Retype: untyped={} type={} size_bits={} dest_cnode={} dest_idx={} count={}",
+        untyped_cptr, target_type_raw, size_bits, dest_cnode_cptr, dest_index, count
+    );
+
     // Validate count
     if count == 0 || count > 256 {
+        log::debug!("Retype: invalid count");
         return Err(SyscallError::Range);
     }
 
     // Parse target object type
     let target_type = object_type_from_raw(target_type_raw as u8)
-        .ok_or(SyscallError::InvalidArg)?;
+        .ok_or_else(|| {
+            log::debug!("Retype: invalid target type {}", target_type_raw);
+            SyscallError::InvalidArg
+        })?;
 
     // Can't retype to Empty
     if target_type == ObjectType::Empty {
+        log::debug!("Retype: can't retype to Empty");
         return Err(SyscallError::InvalidArg);
     }
 
     // Look up untyped capability with WRITE right
-    let untyped_cap = ipc::lookup_cap(untyped_cptr, ObjectType::Untyped, CapRights::WRITE)?;
+    let untyped_cap = ipc::lookup_cap(untyped_cptr, ObjectType::Untyped, CapRights::WRITE)
+        .map_err(|e| {
+            log::debug!("Retype: untyped lookup failed: {:?}", e);
+            e
+        })?;
 
     // Look up destination CNode with WRITE right
-    let _dest_cnode_cap = ipc::lookup_cap(dest_cnode_cptr, ObjectType::CNode, CapRights::WRITE)?;
+    let _dest_cnode_cap = ipc::lookup_cap(dest_cnode_cptr, ObjectType::CNode, CapRights::WRITE)
+        .map_err(|e| {
+            log::debug!("Retype: dest CNode lookup failed: {:?}", e);
+            e
+        })?;
+
+    log::debug!("Retype: capabilities looked up successfully");
 
     // Get object size and alignment
     let obj_size = object_size(target_type, size_bits)
-        .map_err(|_| SyscallError::InvalidArg)?;
+        .map_err(|e| {
+            log::debug!("Retype: invalid object size: {:?}", e);
+            SyscallError::InvalidArg
+        })?;
     let obj_align = object_alignment(target_type, size_bits);
 
     // Map target type to kernel object type
@@ -458,9 +481,25 @@ fn init_kernel_object(
                 obj.data.tcb_ptr = tcb_ptr;
             }
             KernelObjectType::CNode => {
-                // CNode needs heap allocation based on size_bits
-                // For now, return error - needs more complex initialisation
-                return Err(SyscallError::NotSupported);
+                // CNode needs heap allocation based on size_bits (radix)
+                let cnode_ptr = crate::cap::cnode_storage::create_cnode(
+                    size_bits,
+                    m6_cap::CNodeGuard::NONE,
+                ).map_err(|_| SyscallError::NoMemory)?;
+                obj.data.cnode_ptr = cnode_ptr;
+            }
+            KernelObjectType::PageTable => {
+                // Determine level from the specific ObjectType passed in
+                use m6_cap::objects::{PageTableLevel, PageTableObject};
+                let level = match _obj_type {
+                    ObjectType::PageTableL0 => PageTableLevel::L0,
+                    ObjectType::PageTableL1 => PageTableLevel::L1,
+                    ObjectType::PageTableL2 => PageTableLevel::L2,
+                    ObjectType::PageTableL3 => PageTableLevel::L3,
+                    _ => return Err(SyscallError::InvalidArg),
+                };
+                let page_table = PageTableObject::new(phys_addr, level, ObjectRef::NULL);
+                obj.data.page_table = ManuallyDrop::new(page_table);
             }
             _ => {
                 // Other objects: zeroed is valid initial state
@@ -754,6 +793,82 @@ fn invalidate_tlb_entry(_vaddr: u64, _asid: u16) {
             options(nostack, preserves_flags)
         );
     }
+}
+
+/// Handle FrameWrite syscall.
+///
+/// Writes data from userspace directly into a frame without needing to map it.
+/// The kernel copies data from the source buffer into the frame's physical memory.
+///
+/// # ABI
+///
+/// - x0: Frame capability pointer
+/// - x1: Offset within frame to start writing
+/// - x2: Source address in userspace
+/// - x3: Length in bytes
+///
+/// # Returns
+///
+/// - Number of bytes written on success
+/// - Negative error code on failure
+pub fn handle_frame_write(args: &SyscallArgs) -> SyscallResult {
+    let frame_cptr = args.arg0;
+    let offset = args.arg1 as usize;
+    let src_addr = args.arg2;
+    let len = args.arg3 as usize;
+
+    // Validate source is in user address space
+    if src_addr > USER_SPACE_MAX || src_addr.saturating_add(len as u64) > USER_SPACE_MAX {
+        return Err(SyscallError::Range);
+    }
+
+    // Look up frame capability with WRITE right
+    let frame_cap = ipc::lookup_cap(frame_cptr, ObjectType::Frame, CapRights::WRITE)?;
+
+    // Get frame info
+    let (frame_phys, frame_size_bits) = object_table::with_frame_mut(
+        frame_cap.obj_ref,
+        |frame| (frame.phys_addr, frame.size_bits),
+    ).ok_or(SyscallError::InvalidCap)?;
+
+    let frame_size = 1usize << frame_size_bits;
+
+    // Validate offset and length fit within frame
+    if offset >= frame_size || len > frame_size - offset {
+        return Err(SyscallError::Range);
+    }
+
+    if len == 0 {
+        return Ok(0);
+    }
+
+    // Convert frame physical address to kernel virtual address
+    // The kernel has all physical memory mapped at a known offset
+    let kernel_va = phys_to_kernel_va(frame_phys);
+    let dest_ptr = (kernel_va + offset as u64) as *mut u8;
+
+    // Copy from userspace
+    // SAFETY: We've validated the source is in user space and the destination
+    // is within a valid frame. The kernel has all physical memory mapped.
+    unsafe {
+        let src_ptr = src_addr as *const u8;
+        core::ptr::copy_nonoverlapping(src_ptr, dest_ptr, len);
+    }
+
+    // Ensure the write is visible
+    m6_arch::cpu::dsb_sy();
+
+    Ok(len as i64)
+}
+
+/// Convert physical address to kernel virtual address.
+///
+/// The kernel maps all physical memory at a fixed offset in the higher half.
+/// Virtual = KERNEL_PHYS_MAP_BASE + Physical
+#[inline]
+fn phys_to_kernel_va(phys: PhysAddr) -> u64 {
+    use m6_common::boot::KERNEL_PHYS_MAP_BASE;
+    KERNEL_PHYS_MAP_BASE + phys.as_u64()
 }
 
 /// Convert a raw u8 value to an ObjectType.

@@ -242,26 +242,144 @@ pub fn map_user_boot_info(
     Ok(layout::USER_BOOT_INFO_ADDR)
 }
 
+/// Map the DTB into the user VSpace (read-only).
+///
+/// # Arguments
+///
+/// * `l0_phys` - Physical address of the L0 page table
+/// * `dtb_phys` - Physical address of the DTB
+/// * `dtb_size` - Size of the DTB in bytes
+///
+/// # Returns
+///
+/// The virtual address and size of the mapped DTB.
+pub fn map_dtb(
+    l0_phys: PhysAddr,
+    dtb_phys: PhysAddr,
+    dtb_size: u64,
+) -> Result<(u64, u64), VSpaceSetupError> {
+    if dtb_size == 0 || dtb_size > layout::DTB_MAX_SIZE {
+        return Ok((0, 0)); // No DTB or too large
+    }
+
+    // SAFETY: l0_phys was allocated by create_user_vspace.
+    let mut l0 = unsafe { get_l0_table(l0_phys) };
+    let mut allocator = KernelPageAllocator;
+
+    // Map as read-only for user
+    let perms = PtePermissions::ro(true);
+
+    // Map all pages covering the DTB
+    let num_pages = ((dtb_size + 0xFFF) / 0x1000) as usize;
+    for i in 0..num_pages {
+        let phys = dtb_phys.0 + (i * 0x1000) as u64;
+        let virt = layout::DTB_MAP_ADDR + (i * 0x1000) as u64;
+        map_user_page(&mut l0, &mut allocator, phys, virt, perms)?;
+    }
+
+    log::debug!(
+        "Mapped DTB: phys={:#x} -> virt={:#x} ({} bytes, {} pages)",
+        dtb_phys.0,
+        layout::DTB_MAP_ADDR,
+        dtb_size,
+        num_pages
+    );
+
+    Ok((layout::DTB_MAP_ADDR, dtb_size))
+}
+
+/// Map the initrd into the user VSpace (read-only).
+///
+/// # Arguments
+///
+/// * `l0_phys` - Physical address of the L0 page table
+/// * `initrd_phys` - Physical address of the initrd
+/// * `initrd_size` - Size of the initrd in bytes
+///
+/// # Returns
+///
+/// The virtual address and size of the mapped initrd.
+pub fn map_initrd(
+    l0_phys: PhysAddr,
+    initrd_phys: PhysAddr,
+    initrd_size: u64,
+) -> Result<(u64, u64), VSpaceSetupError> {
+    if initrd_size == 0 || initrd_size > layout::INITRD_MAX_SIZE {
+        return Ok((0, 0)); // No initrd or too large
+    }
+
+    // SAFETY: l0_phys was allocated by create_user_vspace.
+    let mut l0 = unsafe { get_l0_table(l0_phys) };
+    let mut allocator = KernelPageAllocator;
+
+    // Map as read-only for user
+    let perms = PtePermissions::ro(true);
+
+    // Map all pages covering the initrd
+    let num_pages = ((initrd_size + 0xFFF) / 0x1000) as usize;
+    for i in 0..num_pages {
+        let phys = initrd_phys.0 + (i * 0x1000) as u64;
+        let virt = layout::INITRD_MAP_ADDR + (i * 0x1000) as u64;
+        map_user_page(&mut l0, &mut allocator, phys, virt, perms)?;
+    }
+
+    log::debug!(
+        "Mapped initrd: phys={:#x} -> virt={:#x} ({} bytes, {} pages)",
+        initrd_phys.0,
+        layout::INITRD_MAP_ADDR,
+        initrd_size,
+        num_pages
+    );
+
+    Ok((layout::INITRD_MAP_ADDR, initrd_size))
+}
+
+/// Result of setting up the root VSpace.
+pub struct RootVSpaceSetup {
+    /// Physical address of the L0 page table.
+    pub l0_phys: PhysAddr,
+    /// Allocated ASID.
+    pub asid: AllocatedAsid,
+    /// Entry point address.
+    pub entry: u64,
+    /// Stack top address.
+    pub stack_top: u64,
+    /// DTB virtual address (0 if not mapped).
+    pub dtb_vaddr: u64,
+    /// DTB size in bytes.
+    pub dtb_size: u64,
+    /// Initrd virtual address (0 if not mapped).
+    pub initrd_vaddr: u64,
+    /// Initrd size in bytes.
+    pub initrd_size: u64,
+}
+
 /// Set up the complete root task VSpace.
 ///
-/// This is a convenience function that:
+/// This function:
 /// 1. Creates a new VSpace
 /// 2. Loads the ELF binary
 /// 3. Sets up the bootstrap stack
 /// 4. Maps the UserBootInfo page
+/// 5. Maps DTB if available
+/// 6. Maps initrd if available
 ///
 /// # Arguments
 ///
 /// * `elf_data` - Raw bytes of the init ELF binary
 /// * `boot_info_phys` - Physical address of the UserBootInfo page
-///
-/// # Returns
-///
-/// A tuple of (L0 physical address, AllocatedAsid, entry point, stack pointer).
+/// * `dtb_phys` - Physical address of DTB (or 0 if none)
+/// * `dtb_size` - Size of DTB in bytes
+/// * `initrd_phys` - Physical address of initrd (or 0 if none)
+/// * `initrd_size` - Size of initrd in bytes
 pub fn setup_root_vspace(
     elf_data: &[u8],
     boot_info_phys: PhysAddr,
-) -> Result<(PhysAddr, AllocatedAsid, u64, u64), VSpaceSetupError> {
+    dtb_phys: PhysAddr,
+    dtb_size: u64,
+    initrd_phys: PhysAddr,
+    initrd_size: u64,
+) -> Result<RootVSpaceSetup, VSpaceSetupError> {
     // Create the VSpace
     let (l0_phys, asid) = create_user_vspace()?;
 
@@ -274,6 +392,20 @@ pub fn setup_root_vspace(
     // Map UserBootInfo
     map_user_boot_info(l0_phys, boot_info_phys)?;
 
+    // Map DTB if available
+    let (dtb_vaddr, dtb_mapped_size) = if dtb_phys.0 != 0 {
+        map_dtb(l0_phys, dtb_phys, dtb_size)?
+    } else {
+        (0, 0)
+    };
+
+    // Map initrd if available
+    let (initrd_vaddr, initrd_mapped_size) = if initrd_phys.0 != 0 {
+        map_initrd(l0_phys, initrd_phys, initrd_size)?
+    } else {
+        (0, 0)
+    };
+
     log::info!(
         "Root VSpace ready: L0={:#x} ASID={} gen={} entry={:#x} SP={:#x}",
         l0_phys.0,
@@ -283,5 +415,14 @@ pub fn setup_root_vspace(
         stack_top
     );
 
-    Ok((l0_phys, asid, entry, stack_top))
+    Ok(RootVSpaceSetup {
+        l0_phys,
+        asid,
+        entry,
+        stack_top,
+        dtb_vaddr,
+        dtb_size: dtb_mapped_size,
+        initrd_vaddr,
+        initrd_size: initrd_mapped_size,
+    })
 }

@@ -26,11 +26,23 @@ pub const USER_BASE: u64 = 0x0000_0000_0001_0000;
 /// Default ELF load address (matches linker script).
 pub const ELF_LOAD_BASE: u64 = USER_BASE;
 
-/// Heap region start.
-pub const HEAP_BASE: u64 = 0x0000_0001_0000_0000;
+/// DTB mapping address (read-only, 2 MiB max).
+pub const DTB_MAP_ADDR: u64 = 0x0000_0001_0000_0000;
 
-/// Maximum heap region size (127 TiB theoretical).
-pub const HEAP_MAX_SIZE: u64 = 0x0000_7FFE_0000_0000;
+/// DTB maximum size (2 MiB - QEMU virt DTBs can be ~1MB).
+pub const DTB_MAX_SIZE: u64 = 2 * 1024 * 1024;
+
+/// Initrd mapping address (read-only, 16 MiB max).
+pub const INITRD_MAP_ADDR: u64 = 0x0000_0002_0000_0000;
+
+/// Initrd maximum size (16 MiB).
+pub const INITRD_MAX_SIZE: u64 = 16 * 1024 * 1024;
+
+/// Heap region start (after DTB/initrd mappings).
+pub const HEAP_BASE: u64 = 0x0000_0003_0000_0000;
+
+/// Maximum heap region size.
+pub const HEAP_MAX_SIZE: u64 = 0x0000_7FFC_0000_0000;
 
 /// Stack guard page address (single unmapped page to detect overflow).
 pub const STACK_GUARD_ADDR: u64 = 0x0000_7FFF_BFF0_0000;
@@ -56,7 +68,7 @@ pub const IPC_BUFFER_SIZE: u64 = 0x0000_0000_2000_0000;
 
 /// UserBootInfo page address (read-only mapping).
 /// This is where the kernel maps the boot information structure.
-pub const USER_BOOT_INFO_ADDR: u64 = 0x0000_7FFF_E000_0000;
+pub const USER_BOOT_INFO_ADDR: u64 = m6_syscall::USER_BOOT_INFO_ADDR;
 
 /// Maximum user virtual address (just below kernel space).
 pub const USER_MAX: u64 = 0x0000_FFFF_FFFF_FFFF;

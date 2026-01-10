@@ -66,6 +66,8 @@ pub enum Syscall {
     MapPageTable = 51,
     /// Assign ASID from pool to VSpace.
     AsidPoolAssign = 52,
+    /// Write data from userspace into a frame.
+    FrameWrite = 53,
 
     // === TCB Operations ===
     /// Configure TCB (set CSpace, VSpace, etc.).
@@ -141,6 +143,7 @@ impl Syscall {
             50 => Some(Self::UnmapFrame),
             51 => Some(Self::MapPageTable),
             52 => Some(Self::AsidPoolAssign),
+            53 => Some(Self::FrameWrite),
             64 => Some(Self::TcbConfigure),
             65 => Some(Self::TcbWriteRegisters),
             66 => Some(Self::TcbReadRegisters),
@@ -190,6 +193,7 @@ impl Syscall {
             Self::UnmapFrame => "UnmapFrame",
             Self::MapPageTable => "MapPageTable",
             Self::AsidPoolAssign => "AsidPoolAssign",
+            Self::FrameWrite => "FrameWrite",
             Self::TcbConfigure => "TcbConfigure",
             Self::TcbWriteRegisters => "TcbWriteRegisters",
             Self::TcbReadRegisters => "TcbReadRegisters",

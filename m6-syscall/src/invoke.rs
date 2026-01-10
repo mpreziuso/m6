@@ -513,6 +513,27 @@ pub fn asid_pool_assign(asid_pool: u64, vspace: u64) -> SyscallResult {
     check_result(syscall2(Syscall::AsidPoolAssign, asid_pool, vspace))
 }
 
+/// Write data from userspace into a frame capability.
+///
+/// This syscall allows writing data into a frame without needing to map it
+/// into the caller's address space. The kernel copies data from the source
+/// buffer directly into the frame's physical memory.
+///
+/// # Arguments
+///
+/// * `frame` - CPtr to the frame capability (must have Write right)
+/// * `offset` - Byte offset within the frame to start writing
+/// * `src` - Pointer to source data in userspace
+/// * `len` - Number of bytes to write
+///
+/// # Returns
+///
+/// Number of bytes written on success, negative error code on failure.
+#[inline]
+pub fn frame_write(frame: u64, offset: u64, src: *const u8, len: usize) -> SyscallResult {
+    check_result(syscall4(Syscall::FrameWrite, frame, offset, src as u64, len as u64))
+}
+
 // -- TCB Operations
 
 /// Configure a TCB with its execution environment.
@@ -569,7 +590,29 @@ pub fn tcb_configure(
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn tcb_write_registers(tcb: u64, pc: u64, sp: u64, arg0: u64) -> SyscallResult {
-    check_result(syscall4(Syscall::TcbWriteRegisters, tcb, pc, sp, arg0))
+    // The kernel expects a buffer of register values:
+    // [x0..x30, sp, pc, spsr] as u64 array
+    // We write: x0, sp (index 31), pc (index 32), spsr (index 33)
+    let mut regs = [0u64; 34];
+    regs[0] = arg0;         // x0
+    regs[31] = sp;          // SP
+    regs[32] = pc;          // ELR (PC)
+    regs[33] = 0;           // SPSR (EL0 AArch64 = 0)
+
+    // Syscall ABI:
+    // x0: TCB cptr
+    // x1: resume flag (0 = don't resume)
+    // x2: arch flags (reserved, must be 0)
+    // x3: number of registers
+    // x4: buffer address
+    check_result(syscall5(
+        Syscall::TcbWriteRegisters,
+        tcb,
+        0,                      // resume = false
+        0,                      // arch_flags = 0
+        34,                     // count = 34 registers
+        regs.as_ptr() as u64,   // buffer address
+    ))
 }
 
 /// Resume a TCB, transitioning it to the Running state.

@@ -61,15 +61,30 @@ pub fn resolve_cptr(cptr: u64, depth_bits: u8) -> Result<SlotLocation, SyscallEr
 ///
 /// * `root` - The CSpace root CNode
 /// * `cptr` - The capability pointer to resolve
-/// * `depth_bits` - Number of bits to consume (0 = auto-detect)
+/// * `depth_bits` - Number of bits to consume (0 = single-level resolution using CNode's radix)
 pub fn resolve_cptr_from_root(
     root: ObjectRef,
     cptr: u64,
     depth_bits: u8,
 ) -> Result<SlotLocation, SyscallError> {
     let cptr_val = CPtr::from_raw(cptr);
+
+    // If depth_bits is 0, do single-level resolution using the root CNode's radix
+    // This provides flat CSpace semantics where cptr = slot_index << (64 - radix)
     let max_depth = if depth_bits == 0 {
-        CptrDepth::MAX
+        // Get the root CNode's radix for single-level resolution
+        let radix = object_table::with_object(root, |obj| {
+            if obj.obj_type != KernelObjectType::CNode {
+                return 0u8;
+            }
+            let cnode_ptr = unsafe { obj.data.cnode_ptr };
+            if cnode_ptr.is_null() {
+                return 0u8;
+            }
+            let cnode = unsafe { &*cnode_ptr };
+            cnode.meta().radix()
+        }).unwrap_or(12); // default to radix 12 if lookup fails
+        CptrDepth::new(radix)
     } else {
         CptrDepth::new(depth_bits)
     };
@@ -338,9 +353,11 @@ pub fn with_two_cnodes<F, R>(
 where
     F: FnOnce(&mut CNodeStorage, &mut CNodeStorage, bool) -> Result<R, SyscallError>,
 {
-    // Handle same-CNode case
-    if ref1 == ref2 {
-        return object_table::with_object(ref1, |obj| {
+    // Use a single lock acquisition to avoid self-deadlock when nesting
+    object_table::with_table(|table| {
+        // Handle same-CNode case
+        if ref1 == ref2 {
+            let obj = table.get(ref1).ok_or(SyscallError::InvalidCap)?;
             if obj.obj_type != KernelObjectType::CNode {
                 return Err(SyscallError::TypeMismatch);
             }
@@ -357,21 +374,20 @@ where
             // 3. The caller ensures they don't modify the same slot twice
             let cnode1 = unsafe { &mut *ptr };
             let cnode2 = unsafe { &mut *ptr };
-            f(cnode1, cnode2, false)
-        })
-        .ok_or(SyscallError::InvalidCap)?;
-    }
+            return f(cnode1, cnode2, false);
+        }
 
-    // Order by ObjectRef index to prevent deadlock
-    let swapped = ref1.index() > ref2.index();
-    let (first_ref, second_ref) = if swapped {
-        (ref2, ref1)
-    } else {
-        (ref1, ref2)
-    };
+        // Order by ObjectRef index for consistent ordering (not for deadlock
+        // prevention since we use a single lock)
+        let swapped = ref1.index() > ref2.index();
+        let (first_ref, second_ref) = if swapped {
+            (ref2, ref1)
+        } else {
+            (ref1, ref2)
+        };
 
-    // Access both CNodes through the object table
-    object_table::with_object(first_ref, |obj1| {
+        // Access both objects within the same lock scope
+        let obj1 = table.get(first_ref).ok_or(SyscallError::InvalidCap)?;
         if obj1.obj_type != KernelObjectType::CNode {
             return Err(SyscallError::TypeMismatch);
         }
@@ -380,27 +396,24 @@ where
             return Err(SyscallError::InvalidCap);
         }
 
-        object_table::with_object(second_ref, |obj2| {
-            if obj2.obj_type != KernelObjectType::CNode {
-                return Err(SyscallError::TypeMismatch);
-            }
-            let ptr2 = unsafe { obj2.data.cnode_ptr };
-            if ptr2.is_null() {
-                return Err(SyscallError::InvalidCap);
-            }
+        let obj2 = table.get(second_ref).ok_or(SyscallError::InvalidCap)?;
+        if obj2.obj_type != KernelObjectType::CNode {
+            return Err(SyscallError::TypeMismatch);
+        }
+        let ptr2 = unsafe { obj2.data.cnode_ptr };
+        if ptr2.is_null() {
+            return Err(SyscallError::InvalidCap);
+        }
 
-            // SAFETY: We've verified both pointers are valid CNodes
-            // and they are different objects (checked above).
-            let cnode1 = unsafe { &mut *ptr1 };
-            let cnode2 = unsafe { &mut *ptr2 };
+        // SAFETY: We've verified both pointers are valid CNodes
+        // and they are different objects (checked above).
+        let cnode1 = unsafe { &mut *ptr1 };
+        let cnode2 = unsafe { &mut *ptr2 };
 
-            if swapped {
-                f(cnode2, cnode1, swapped)
-            } else {
-                f(cnode1, cnode2, swapped)
-            }
-        })
-        .ok_or(SyscallError::InvalidCap)?
+        if swapped {
+            f(cnode2, cnode1, swapped)
+        } else {
+            f(cnode1, cnode2, swapped)
+        }
     })
-    .ok_or(SyscallError::InvalidCap)?
 }

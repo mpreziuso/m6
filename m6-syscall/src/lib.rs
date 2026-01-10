@@ -11,11 +11,13 @@
 //! - [`invoke`] - Userspace syscall invocation (feature-gated)
 //! - [`boot_info`] - Boot information passed from kernel to init
 //! - [`ipc_buffer`] - IPC buffer for extended syscall arguments
+//! - [`cptr`] - CPtr formatting utilities
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod boot_info;
+pub mod cptr;
 pub mod error;
 pub mod ipc_buffer;
 #[cfg(feature = "userspace")]
@@ -26,6 +28,7 @@ pub mod numbers;
 pub use boot_info::{
     CapSlot, UserBootInfo, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION,
 };
+pub use cptr::{slot_to_cptr, cptr_to_slot, CptrContext};
 pub use error::SyscallError;
 pub use ipc_buffer::{IpcBuffer, MintArgs, IPC_BUFFER_ADDR, IPC_BUFFER_SIZE};
 pub use numbers::Syscall;

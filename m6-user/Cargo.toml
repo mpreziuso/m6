@@ -10,7 +10,13 @@ repository.workspace = true
 name = "init"
 path = "src/main.rs"
 
+[[bin]]
+name = "device-mgr"
+path = "src/device_mgr/main.rs"
+
 [dependencies]
 m6-syscall = { path = "../m6-syscall", features = ["userspace"] }
 m6-cap = { path = "../m6-cap" }
 m6-common = { path = "../m6-common" }
+fdt = "0.1"
+tar-no-std = "0.4"

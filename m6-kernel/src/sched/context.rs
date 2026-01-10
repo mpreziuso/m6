@@ -87,7 +87,7 @@ pub fn context_switch(sched: &mut PerCpuSched, ctx: &mut ExceptionContext) {
 /// - If the VSpace's ASID generation is current, no TLB invalidation needed
 /// - If the generation is stale (ASID was recycled), invalidate ASID-specific
 ///   entries before reuse
-fn switch_vspace(vspace_ref: Option<ObjectRef>) {
+pub fn switch_vspace(vspace_ref: Option<ObjectRef>) {
     let vspace_ref = match vspace_ref {
         Some(r) if r.is_valid() => r,
         _ => return, // No VSpace or invalid - stay in current

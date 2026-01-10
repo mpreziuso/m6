@@ -109,6 +109,9 @@ fn dispatch_syscall(
         Syscall::NBSend => handle_send(args, ctx, false),
         Syscall::NBRecv => handle_recv(args, ctx, false),
         Syscall::Yield => {
+            // Update current task's EEVDF times first, then check for other tasks
+            crate::sched::yield_current();
+
             // Check if there's another task to run
             let dominated = {
                 let current = crate::sched::current_task();
@@ -128,8 +131,6 @@ fn dispatch_syscall(
                 // Note: interrupt handler will run, then we continue here
             }
 
-            // Yield to scheduler
-            crate::sched::yield_current();
             Ok(0)
         }
 
@@ -156,6 +157,7 @@ fn dispatch_syscall(
         Syscall::UnmapFrame => mem_ops::handle_unmap_frame(args),
         Syscall::MapPageTable => mem_ops::handle_map_page_table(args),
         Syscall::AsidPoolAssign => asid_ops::handle_asid_pool_assign(args),
+        Syscall::FrameWrite => mem_ops::handle_frame_write(args),
 
         // TCB operations
         Syscall::TcbConfigure => tcb_ops::handle_tcb_configure(args),

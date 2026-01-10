@@ -22,7 +22,7 @@ use core::mem::ManuallyDrop;
 
 use m6_cap::{
     Badge, CapRights, CapSlot, CNodeGuard, CNodeOps, ObjectRef, ObjectType, SlotFlags,
-    objects::{Asid, UntypedObject, VSpaceObject},
+    objects::{Asid, AsidPoolObject, UntypedObject, VSpaceObject},
 };
 use m6_common::PhysAddr;
 use m6_common::boot::BootInfo;
@@ -33,7 +33,7 @@ use super::object_table::{self, KernelObjectType};
 use super::tcb_storage::create_tcb;
 
 use crate::initrd;
-use crate::memory::frame::alloc_frame_zeroed;
+use crate::memory::frame::{alloc_frame_zeroed, alloc_frames_zeroed};
 use crate::memory::translate::phys_to_virt;
 use crate::user::layout::USER_BOOT_INFO_ADDR;
 use crate::user::vspace_setup;
@@ -52,8 +52,10 @@ pub mod slots {
     pub const ASID_CONTROL: usize = 4;
     /// Scheduling control capability.
     pub const SCHED_CONTROL: usize = 5;
+    /// ASID pool for spawning child processes.
+    pub const ASID_POOL: usize = 6;
     /// First untyped memory slot.
-    pub const FIRST_UNTYPED: usize = 6;
+    pub const FIRST_UNTYPED: usize = 7;
 }
 
 /// Bootstrap error type.
@@ -241,6 +243,26 @@ fn create_sched_control() -> BootstrapResult<ObjectRef> {
         .ok_or(BootstrapError::NoObjectSlots)
 }
 
+/// Create an ASID pool for init to spawn child processes.
+fn create_asid_pool() -> BootstrapResult<ObjectRef> {
+    use alloc::boxed::Box;
+
+    // Allocate object table entry
+    let obj_ref = object_table::alloc(KernelObjectType::AsidPool)
+        .ok_or(BootstrapError::NoObjectSlots)?;
+
+    // Create ASID pool object (base ASID 0, first pool)
+    let pool = Box::new(AsidPoolObject::new(0));
+    let pool_ptr = Box::into_raw(pool);
+
+    // Store pointer in object table
+    object_table::with_object_mut(obj_ref, |obj| {
+        obj.data.asid_pool_ptr = pool_ptr;
+    });
+
+    Ok(obj_ref)
+}
+
 /// Install a capability in a CNode slot.
 fn install_cap(
     cnode: &mut CNodeStorage,
@@ -265,21 +287,25 @@ fn install_cap(
 ///
 /// This is called during bootstrap to create capabilities for all
 /// available physical memory.
-pub fn create_untyped_cap(
+///
+/// This version takes a reference to the object table to avoid deadlocks
+/// when called from within a `with_table` closure.
+fn create_untyped_cap_with_table(
+    table: &mut object_table::ObjectTable,
     cnode: &mut CNodeStorage,
     slot: usize,
     phys_base: PhysAddr,
     size_bits: u8,
     is_device: bool,
 ) -> BootstrapResult<ObjectRef> {
-    // Allocate object table entry
-    let obj_ref = object_table::alloc(KernelObjectType::Untyped)
+    // Allocate object table entry using the passed-in table
+    let obj_ref = table.alloc(KernelObjectType::Untyped)
         .ok_or(BootstrapError::NoObjectSlots)?;
 
     // Create untyped object
-    object_table::with_object_mut(obj_ref, |obj| {
+    if let Some(obj) = table.get_mut(obj_ref) {
         obj.data.untyped = ManuallyDrop::new(UntypedObject::new(phys_base, size_bits, is_device));
-    });
+    }
 
     // Install capability
     install_cap(cnode, slot, obj_ref, ObjectType::Untyped, CapRights::ALL);
@@ -343,26 +369,54 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
     let irq_control_ref = create_irq_control()?;
     let asid_control_ref = create_asid_control()?;
     let sched_control_ref = create_sched_control()?;
+    let asid_pool_ref = create_asid_pool()?;
+    log::debug!("Created ASID pool for init: {:?}", asid_pool_ref);
 
-    // 5. Set up user VSpace with ELF and stack
-    let (l0_phys, asid, entry, stack_top) = vspace_setup::setup_root_vspace(
+    // 5. Set up user VSpace with ELF, stack, DTB, and initrd
+    let vspace_result = vspace_setup::setup_root_vspace(
         init_data,
         user_boot_info_phys,
+        boot_info.dtb_address,
+        get_dtb_size(boot_info),
+        boot_info.initrd_phys_base,
+        boot_info.initrd_size,
     ).map_err(|e| {
         log::error!("Failed to set up root VSpace: {:?}", e);
         BootstrapError::VSpaceSetupFailed
     })?;
 
-    // 6. Update VSpace object with L0 table and ASID (including generation)
+    // 6. Update UserBootInfo with DTB/initrd virtual addresses
+    update_user_boot_info(
+        user_boot_info_phys,
+        vspace_result.dtb_vaddr,
+        vspace_result.dtb_size,
+        vspace_result.initrd_vaddr,
+        vspace_result.initrd_size,
+    );
+
+    // 7. Update VSpace object with L0 table and ASID (including generation)
     object_table::with_object_mut(vspace_ref, |obj| {
         // SAFETY: We just created this VSpace object.
         let vspace = unsafe { &mut *core::ptr::addr_of_mut!(obj.data.vspace) };
-        vspace.root_table = l0_phys;
-        vspace.assign_asid_with_generation(Asid::new(asid.asid), asid.generation);
+        vspace.root_table = vspace_result.l0_phys;
+        vspace.assign_asid_with_generation(Asid::new(vspace_result.asid.asid), vspace_result.asid.generation);
     });
 
-    // 7. Populate root CNode with initial capabilities
+    // 8. Allocate untyped memory for init (8 MiB = 2^23 bytes = 2048 frames)
+    const UNTYPED_SIZE_BITS: u8 = 23; // 8 MiB
+    const UNTYPED_FRAMES: usize = 1 << (UNTYPED_SIZE_BITS - 12); // frames = size / 4K
+    let untyped_phys = alloc_frames_zeroed(UNTYPED_FRAMES)
+        .ok_or(BootstrapError::OutOfMemory)?;
+    log::info!(
+        "Allocated {} MiB untyped memory for init at {:#x}",
+        1 << (UNTYPED_SIZE_BITS - 20),
+        untyped_phys
+    );
+
+    // 9. Populate root CNode with initial capabilities
+    log::debug!("Installing capabilities in root CNode...");
     let mut cap_count = 0;
+    let mut untyped_count = 0u32;
     object_table::with_table(|table| {
         let cnode_obj = table.get(cnode_ref).ok_or(BootstrapError::InvalidConfig)?;
         // SAFETY: We just created this CNode.
@@ -386,16 +440,42 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         install_cap(cnode, slots::SCHED_CONTROL, sched_control_ref, ObjectType::SchedControl, CapRights::ALL);
         cap_count += 1;
 
+        install_cap(cnode, slots::ASID_POOL, asid_pool_ref, ObjectType::ASIDPool, CapRights::ALL);
+        cap_count += 1;
+        log::debug!("Installed {} control capabilities", cap_count);
+
+        // Create untyped capability (using table-aware version to avoid deadlock)
+        log::debug!("Creating untyped capability at slot {}...", slots::FIRST_UNTYPED);
+        let untyped_ref = create_untyped_cap_with_table(
+            table,
+            cnode,
+            slots::FIRST_UNTYPED,
+            PhysAddr::new(untyped_phys),
+            UNTYPED_SIZE_BITS,
+            false, // not device memory
+        )?;
+        cap_count += 1;
+        untyped_count = 1;
+        log::debug!("Created untyped cap: {:?}", untyped_ref);
+
         Ok(())
     })?;
 
-    // 8. Configure TCB for EL0 entry
-    configure_tcb_for_el0(tcb_ref, entry, stack_top)?;
+    // 10. Update UserBootInfo with untyped region info
+    update_user_boot_info_untyped(
+        user_boot_info_phys,
+        untyped_count,
+        untyped_phys,
+        UNTYPED_SIZE_BITS,
+    );
+
+    // 11. Configure TCB for EL0 entry
+    configure_tcb_for_el0(tcb_ref, vspace_result.entry, vspace_result.stack_top)?;
 
     log::info!(
         "Root task bootstrap complete: entry={:#x}, SP={:#x}, {} capabilities",
-        entry,
-        stack_top,
+        vspace_result.entry,
+        vspace_result.stack_top,
         cap_count
     );
 
@@ -404,7 +484,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         tcb_ref,
         vspace_ref,
         cap_count,
-        entry_point: entry,
+        entry_point: vspace_result.entry,
     })
 }
 
@@ -449,6 +529,91 @@ fn create_user_boot_info(_boot_info: &BootInfo) -> BootstrapResult<PhysAddr> {
     );
 
     Ok(PhysAddr::new(phys))
+}
+
+/// Get the DTB size from boot info.
+///
+/// We parse the DTB header to determine the actual size rather than assuming
+/// a maximum. Returns 0 if DTB is not available or invalid.
+fn get_dtb_size(boot_info: &BootInfo) -> u64 {
+    if boot_info.dtb_address.is_null() {
+        return 0;
+    }
+
+    // DTB header: magic (4 bytes) + totalsize (4 bytes, big-endian)
+    let dtb_virt = phys_to_virt(boot_info.dtb_address.0);
+    // SAFETY: Bootloader guarantees DTB is valid and mapped in direct map
+    let dtb_header = unsafe { core::slice::from_raw_parts(dtb_virt as *const u8, 8) };
+
+    // Check FDT magic (0xd00dfeed in big-endian)
+    if dtb_header[0..4] != [0xd0, 0x0d, 0xfe, 0xed] {
+        log::warn!("Invalid DTB magic");
+        return 0;
+    }
+
+    // Read totalsize from header (big-endian u32 at offset 4)
+    let size = u32::from_be_bytes([
+        dtb_header[4],
+        dtb_header[5],
+        dtb_header[6],
+        dtb_header[7],
+    ]);
+
+    size as u64
+}
+
+/// Update UserBootInfo with DTB/initrd virtual addresses.
+///
+/// Called after VSpace setup to populate the mapped addresses.
+fn update_user_boot_info(
+    boot_info_phys: PhysAddr,
+    dtb_vaddr: u64,
+    dtb_size: u64,
+    initrd_vaddr: u64,
+    initrd_size: u64,
+) {
+    let virt = phys_to_virt(boot_info_phys.0);
+    // SAFETY: boot_info_phys points to a valid UserBootInfo we allocated
+    let info = unsafe { &mut *(virt as *mut UserBootInfo) };
+
+    info.dtb_vaddr = dtb_vaddr;
+    info.dtb_size = dtb_size;
+    info.initrd_vaddr = initrd_vaddr;
+    info.initrd_size = initrd_size;
+
+    log::debug!(
+        "Updated UserBootInfo: DTB={:#x}({} bytes), initrd={:#x}({} bytes)",
+        dtb_vaddr,
+        dtb_size,
+        initrd_vaddr,
+        initrd_size
+    );
+}
+
+/// Update UserBootInfo with untyped memory region info.
+fn update_user_boot_info_untyped(
+    boot_info_phys: PhysAddr,
+    count: u32,
+    phys_base: u64,
+    size_bits: u8,
+) {
+    let virt = phys_to_virt(boot_info_phys.0);
+    // SAFETY: boot_info_phys points to a valid UserBootInfo we allocated
+    let info = unsafe { &mut *(virt as *mut UserBootInfo) };
+
+    info.untyped_count = count;
+    if count > 0 {
+        info.untyped_size_bits[0] = size_bits;
+        info.untyped_is_device[0] = 0; // not device memory
+        info.untyped_phys_base[0] = phys_base;
+    }
+
+    log::debug!(
+        "Updated UserBootInfo: {} untyped region(s), first at {:#x} ({} bytes)",
+        count,
+        phys_base,
+        1u64 << size_bits
+    );
 }
 
 /// Configure a TCB for EL0 (userspace) execution.

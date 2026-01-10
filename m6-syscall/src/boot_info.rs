@@ -12,7 +12,8 @@
 pub const USER_BOOT_INFO_MAGIC: u64 = 0x00_54_4F_4F_42_55_36_4D;
 
 /// Version of the UserBootInfo structure.
-pub const USER_BOOT_INFO_VERSION: u32 = 1;
+/// Version 2: Added DTB and initrd virtual addresses
+pub const USER_BOOT_INFO_VERSION: u32 = 2;
 
 /// Virtual address where UserBootInfo is mapped.
 pub const USER_BOOT_INFO_ADDR: u64 = 0x0000_7FFF_E000_0000;
@@ -38,8 +39,10 @@ pub enum CapSlot {
     AsidControl = 4,
     /// Scheduling control capability.
     SchedControl = 5,
+    /// ASID pool for spawning child processes.
+    AsidPool = 6,
     /// First untyped memory slot.
-    FirstUntyped = 6,
+    FirstUntyped = 7,
 }
 
 impl CapSlot {
@@ -113,8 +116,14 @@ pub struct UserBootInfo {
     pub untyped_is_device: [u8; MAX_UNTYPED_REGIONS],
     /// Physical base address of each untyped region.
     pub untyped_phys_base: [u64; MAX_UNTYPED_REGIONS],
-    /// Reserved for future use.
-    pub _reserved: [u64; 8],
+    /// Virtual address where DTB is mapped (0 if not available).
+    pub dtb_vaddr: u64,
+    /// Size of the DTB in bytes.
+    pub dtb_size: u64,
+    /// Virtual address where initrd is mapped (0 if not available).
+    pub initrd_vaddr: u64,
+    /// Size of the initrd in bytes.
+    pub initrd_size: u64,
 }
 
 impl UserBootInfo {
@@ -165,6 +174,50 @@ impl UserBootInfo {
             self.untyped_phys_base[idx]
         } else {
             0
+        }
+    }
+
+    /// Check if DTB is available.
+    #[inline]
+    pub const fn has_dtb(&self) -> bool {
+        self.dtb_vaddr != 0 && self.dtb_size != 0
+    }
+
+    /// Check if initrd is available.
+    #[inline]
+    pub const fn has_initrd(&self) -> bool {
+        self.initrd_vaddr != 0 && self.initrd_size != 0
+    }
+
+    /// Get DTB as a byte slice (requires valid pointer).
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure dtb_vaddr points to valid mapped memory.
+    #[inline]
+    pub unsafe fn dtb_slice(&self) -> Option<&[u8]> {
+        if self.has_dtb() {
+            Some(unsafe {
+                core::slice::from_raw_parts(self.dtb_vaddr as *const u8, self.dtb_size as usize)
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Get initrd as a byte slice (requires valid pointer).
+    ///
+    /// # Safety
+    ///
+    /// Caller must ensure initrd_vaddr points to valid mapped memory.
+    #[inline]
+    pub unsafe fn initrd_slice(&self) -> Option<&[u8]> {
+        if self.has_initrd() {
+            Some(unsafe {
+                core::slice::from_raw_parts(self.initrd_vaddr as *const u8, self.initrd_size as usize)
+            })
+        } else {
+            None
         }
     }
 }

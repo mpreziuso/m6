@@ -90,6 +90,8 @@ pub fn is_runnable(tcb: &TcbFull) -> bool {
 ///
 /// Sets up initial EEVDF parameters and inserts into the queue.
 pub fn add_to_run_queue(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
+    log::info!("add_to_run_queue: adding tcb_ref index={}", tcb_ref.index());
+
     // Advance virtual clock before accounting
     advance_vclock(sched);
 
@@ -149,7 +151,10 @@ pub fn find_next_runnable(sched: &PerCpuSched) -> Option<ObjectRef> {
 
     while current.is_valid() {
         let is_candidate = with_tcb(current, |tcb| {
-            is_runnable(tcb) && is_eligible(tcb, vclock) && has_budget(tcb)
+            let r = is_runnable(tcb);
+            let e = is_eligible(tcb, vclock);
+            let b = has_budget(tcb);
+            r && e && b
         }).unwrap_or(false);
 
         if is_candidate {
@@ -219,6 +224,59 @@ pub fn switch_to(sched: &mut PerCpuSched, next: ObjectRef) {
     });
 
     sched.current_thread = Some(next);
+}
+
+// -- Yield Handling
+
+/// Update a task's EEVDF times when it voluntarily yields.
+///
+/// This pushes the task's deadline forward so other eligible tasks can run.
+/// The task is removed and re-inserted to maintain queue ordering.
+pub fn yield_task(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
+    let now_ticks = timer::read_counter();
+
+    // Advance virtual clock
+    advance_vclock(sched);
+
+    // Remove from queue first (we'll re-insert with new deadline)
+    sched.run_queue_mut().remove(tcb_ref);
+
+    // Update weight tracking (temporarily decrement)
+    let weight = with_tcb(tcb_ref, |tcb| {
+        priority_to_weight(tcb.tcb.priority as i8)
+    }).unwrap_or(1);
+    sched.total_weight = sched.total_weight.saturating_sub(weight as u64);
+
+    // Update EEVDF times
+    let new_deadline = with_tcb_mut(tcb_ref, |tcb| {
+        // Account for time consumed
+        if tcb.exec_start_ticks > 0 {
+            let freq = timer::frequency();
+            if freq > 0 {
+                let delta_ticks = now_ticks.saturating_sub(tcb.exec_start_ticks);
+                let delta_ns = (delta_ticks as u128 * 1_000_000_000) / freq as u128;
+                let w = priority_to_weight(tcb.tcb.priority as i8) as u128;
+                let dv = (delta_ns << VT_FIXED_SHIFT) / w;
+
+                tcb.v_runtime = tcb.v_runtime.saturating_add(dv);
+                tcb.v_eligible = tcb.v_eligible.saturating_add(dv);
+            }
+        }
+
+        // Reset execution start
+        tcb.exec_start_ticks = 0;
+
+        // Push deadline forward by a full time slice to let other tasks run
+        let w = priority_to_weight(tcb.tcb.priority as i8) as u128;
+        let q_ns: u128 = (DEFAULT_TIME_SLICE_MS as u128) * 1_000_000;
+        let v_delta = (q_ns << VT_FIXED_SHIFT) / w;
+        tcb.v_deadline = sched.vclock.saturating_add(v_delta);
+        tcb.v_deadline
+    }).unwrap_or(0);
+
+    // Re-insert with new deadline (this will place it in correct position)
+    sched.run_queue_mut().insert(tcb_ref, new_deadline);
+    sched.total_weight = sched.total_weight.saturating_add(weight as u64);
 }
 
 // -- Time Charging

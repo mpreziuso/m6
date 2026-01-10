@@ -121,6 +121,10 @@ impl<T: CapObjectType> CPtr<T> {
 
     /// Extract the index for a CNode with the given radix.
     ///
+    /// Uses MSB-first extraction (seL4-style): bits are consumed from the most
+    /// significant end of the CPtr. For a flat CSpace with radix R, a cptr to
+    /// slot S should be formatted as `S << (64 - R)`.
+    ///
     /// # Parameters
     ///
     /// - `radix`: The radix of the CNode
@@ -132,12 +136,15 @@ impl<T: CapObjectType> CPtr<T> {
     #[inline]
     #[must_use]
     pub const fn extract_index(self, radix: u8, depth: u8) -> usize {
+        // MSB-first: shift down to align the index bits, then mask
         let shift = 64u8.saturating_sub(depth).saturating_sub(radix);
         let mask = (1u64 << radix) - 1;
         ((self.value >> shift) & mask) as usize
     }
 
     /// Check if the guard matches at the given depth.
+    ///
+    /// Uses MSB-first extraction (seL4-style) for consistency with extract_index.
     ///
     /// # Parameters
     ///
@@ -154,6 +161,7 @@ impl<T: CapObjectType> CPtr<T> {
         if guard_bits == 0 {
             return true;
         }
+        // MSB-first: shift down to align guard bits, then mask and compare
         let shift = 64u8.saturating_sub(depth).saturating_sub(guard_bits);
         let mask = (1u64 << guard_bits) - 1;
         let extracted = (self.value >> shift) & mask;

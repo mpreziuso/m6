@@ -221,6 +221,15 @@ pub fn remove_task(tcb_ref: ObjectRef) {
 /// task to run. Note: The syscall handler checks if we're the only task
 /// and waits for an interrupt if so, to avoid busy-looping.
 pub fn yield_current() {
+    let cpu_id = current_cpu_id();
+    let sched_state = get_sched_state();
+    let mut sched = sched_state[cpu_id].lock();
+
+    // Update the current task's EEVDF times so other tasks become eligible
+    if let Some(current_ref) = sched.current_thread {
+        eevdf::yield_task(&mut sched, current_ref);
+    }
+
     request_reschedule();
 }
 
@@ -231,6 +240,10 @@ pub fn schedule() {
     let cpu_id = current_cpu_id();
     let sched_state = get_sched_state();
     let mut sched = sched_state[cpu_id].lock();
+
+    // Get previous task's VSpace for comparison
+    let prev_vspace = sched.current_thread
+        .and_then(|tcb_ref| run_queue::with_tcb(tcb_ref, |tcb| tcb.tcb.vspace));
 
     // Mark current task as runnable (if it was running)
     if let Some(current_ref) = sched.current_thread {
@@ -251,6 +264,14 @@ pub fn schedule() {
     if !next.is_valid() {
         log::error!("No runnable task and no idle task!");
         return;
+    }
+
+    // Get next task's VSpace
+    let next_vspace = run_queue::with_tcb(next, |tcb| tcb.tcb.vspace);
+
+    // Switch VSpace (TTBR0) if address spaces differ
+    if prev_vspace != next_vspace {
+        context::switch_vspace(next_vspace);
     }
 
     eevdf::switch_to(&mut sched, next);

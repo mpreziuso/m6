@@ -4,7 +4,7 @@
 //! Uses VSpace, TCB, CSpace, and Frame capabilities to create isolated processes.
 
 use m6_cap::ObjectType;
-use m6_syscall::{invoke::*, error::SyscallError};
+use m6_syscall::{error::SyscallError, invoke::*, slot_to_cptr};
 
 use crate::elf::{Elf64, ElfError};
 
@@ -51,7 +51,8 @@ pub mod slots {
     pub const IRQ_CONTROL: u64 = 3;
     pub const ASID_CONTROL: u64 = 4;
     pub const SCHED_CONTROL: u64 = 5;
-    pub const FIRST_UNTYPED: u64 = 6;
+    pub const ASID_POOL: u64 = 6;
+    pub const FIRST_UNTYPED: u64 = 7;
 }
 
 /// Page size constant (4KB)
@@ -102,6 +103,8 @@ pub struct SpawnConfig<'a> {
     pub elf_data: &'a [u8],
     /// Root CNode capability slot
     pub root_cnode: u64,
+    /// CNode radix (log2 of number of slots) - needed for CPtr formatting
+    pub cnode_radix: u8,
     /// Untyped memory capability slot to use for allocations
     pub ram_untyped: u64,
     /// ASID pool capability slot
@@ -112,6 +115,9 @@ pub struct SpawnConfig<'a> {
     pub initial_caps: &'a [InitialCap],
     /// Initial value for x0 register (e.g., pointer to passed data)
     pub x0: u64,
+    /// Whether to resume the TCB immediately (default: true)
+    /// Set to false if you need to do additional setup before starting
+    pub resume: bool,
 }
 
 /// Result of successful spawn
@@ -134,16 +140,103 @@ struct VSpaceBuilder {
     root_cnode: u64,
     ram_untyped: u64,
     next_free_slot: u64,
+    cnode_radix: u8,
+    /// Track installed L1 region (512GB aligned base addresses, 0 = not used)
+    l1_regions: [u64; 4],
+    l1_count: usize,
+    /// Track installed L2 regions (1GB aligned base addresses)
+    l2_regions: [u64; 8],
+    l2_count: usize,
+    /// Track installed L3 regions (2MB aligned base addresses)
+    l3_regions: [u64; 32],
+    l3_count: usize,
 }
 
 impl VSpaceBuilder {
-    fn new(vspace_slot: u64, root_cnode: u64, ram_untyped: u64, next_free_slot: u64) -> Self {
+    fn new(vspace_slot: u64, root_cnode: u64, ram_untyped: u64, next_free_slot: u64, cnode_radix: u8) -> Self {
         Self {
             vspace_slot,
             root_cnode,
             ram_untyped,
             next_free_slot,
+            cnode_radix,
+            l1_regions: [u64::MAX; 4],
+            l1_count: 0,
+            l2_regions: [u64::MAX; 8],
+            l2_count: 0,
+            l3_regions: [u64::MAX; 32],
+            l3_count: 0,
         }
+    }
+
+    /// Check if an L1 table exists for the given 512GB-aligned address
+    fn has_l1(&self, addr: u64) -> bool {
+        self.l1_regions[..self.l1_count].contains(&addr)
+    }
+
+    /// Check if an L2 table exists for the given 1GB-aligned address
+    fn has_l2(&self, addr: u64) -> bool {
+        self.l2_regions[..self.l2_count].contains(&addr)
+    }
+
+    /// Check if an L3 table exists for the given 2MB-aligned address
+    fn has_l3(&self, addr: u64) -> bool {
+        self.l3_regions[..self.l3_count].contains(&addr)
+    }
+
+    /// Record that an L1 table was installed
+    fn add_l1(&mut self, addr: u64) {
+        if self.l1_count < self.l1_regions.len() {
+            self.l1_regions[self.l1_count] = addr;
+            self.l1_count += 1;
+        }
+    }
+
+    /// Record that an L2 table was installed
+    fn add_l2(&mut self, addr: u64) {
+        if self.l2_count < self.l2_regions.len() {
+            self.l2_regions[self.l2_count] = addr;
+            self.l2_count += 1;
+        }
+    }
+
+    /// Record that an L3 table was installed
+    fn add_l3(&mut self, addr: u64) {
+        if self.l3_count < self.l3_regions.len() {
+            self.l3_regions[self.l3_count] = addr;
+            self.l3_count += 1;
+        }
+    }
+
+    /// Convert a slot index to a CPtr
+    #[inline]
+    fn cptr(&self, slot: u64) -> u64 {
+        slot_to_cptr(slot, self.cnode_radix)
+    }
+
+    /// Allocate and retype a page table
+    fn alloc_page_table(&mut self, level: u64) -> Result<u64, SpawnError> {
+        if self.next_free_slot >= 4096 {
+            return Err(SpawnError::NoSlots);
+        }
+
+        let pt_slot = self.next_free_slot;
+        self.next_free_slot += 1;
+
+        // ObjectType for page tables: L1=5, L2=6, L3=7
+        let obj_type = 4 + level; // L1=5, L2=6, L3=7
+
+        retype(
+            self.cptr(self.ram_untyped),
+            obj_type,
+            0, // Page tables don't need size_bits
+            self.cptr(self.root_cnode),
+            pt_slot,
+            1,
+        )
+        .map_err(|e| SpawnError::RetypeFailed(e))?;
+
+        Ok(pt_slot)
     }
 
     /// Allocate a frame capability
@@ -157,10 +250,10 @@ impl VSpaceBuilder {
 
         // Retype: create one 4KB frame (12 bits)
         retype(
-            self.ram_untyped,
+            self.cptr(self.ram_untyped),
             ObjectType::Frame as u64,
             12, // 4KB
-            self.root_cnode,
+            self.cptr(self.root_cnode),
             frame_slot,
             1,
         )
@@ -171,21 +264,75 @@ impl VSpaceBuilder {
 
     /// Map a frame at a virtual address
     fn map_frame(&self, frame_slot: u64, vaddr: u64, rights: MapRights) -> Result<(), SpawnError> {
-        map_frame(self.vspace_slot, frame_slot, vaddr, rights.to_bits(), 0)
+        map_frame(self.cptr(self.vspace_slot), self.cptr(frame_slot), vaddr, rights.to_bits(), 0)
             .map_err(|e| SpawnError::FrameMapFailed(e))?;
         Ok(())
     }
 
     /// Ensure page tables exist for a virtual address range
-    ///
-    /// This is a simplified version - in a full implementation, you would
-    /// walk the page table hierarchy and create tables as needed.
-    fn ensure_page_tables(&mut self, _vaddr_start: u64, _vaddr_end: u64) -> Result<(), SpawnError> {
-        // For now, we rely on the kernel having pre-mapped page tables
-        // or we get page faults. A full implementation would:
-        // 1. Calculate which L1/L2/L3 tables are needed
-        // 2. Retype page table objects
-        // 3. Map them into the VSpace hierarchy
+    fn ensure_page_tables(&mut self, vaddr_start: u64, vaddr_end: u64) -> Result<(), SpawnError> {
+        // Process each page in the range
+        let mut vaddr = vaddr_start & !(PAGE_SIZE as u64 - 1);
+        while vaddr < vaddr_end {
+            self.ensure_page_tables_for_addr(vaddr)?;
+            vaddr += PAGE_SIZE as u64;
+        }
+        Ok(())
+    }
+
+    /// Ensure page tables exist for a single virtual address
+    fn ensure_page_tables_for_addr(&mut self, vaddr: u64) -> Result<(), SpawnError> {
+        // Calculate aligned base addresses for each level
+        // L1: 512GB aligned (bits 47:39)
+        // L2: 1GB aligned (bits 38:30)
+        // L3: 2MB aligned (bits 29:21)
+        const L1_SIZE: u64 = 512 * 1024 * 1024 * 1024; // 512GB
+        const L2_SIZE: u64 = 1024 * 1024 * 1024;       // 1GB
+        const L3_SIZE: u64 = 2 * 1024 * 1024;          // 2MB
+
+        let l1_base = vaddr & !(L1_SIZE - 1);
+        let l2_base = vaddr & !(L2_SIZE - 1);
+        let l3_base = vaddr & !(L3_SIZE - 1);
+
+        // Ensure L1 table exists (covers 512GB region)
+        if !self.has_l1(l1_base) {
+            let l1_slot = self.alloc_page_table(1)?;
+            map_page_table(
+                self.cptr(self.vspace_slot),
+                self.cptr(l1_slot),
+                l1_base,
+                1, // Level 1
+            )
+            .map_err(|e| SpawnError::PageTableMapFailed(e))?;
+            self.add_l1(l1_base);
+        }
+
+        // Ensure L2 table exists (covers 1GB region)
+        if !self.has_l2(l2_base) {
+            let l2_slot = self.alloc_page_table(2)?;
+            map_page_table(
+                self.cptr(self.vspace_slot),
+                self.cptr(l2_slot),
+                l2_base,
+                2, // Level 2
+            )
+            .map_err(|e| SpawnError::PageTableMapFailed(e))?;
+            self.add_l2(l2_base);
+        }
+
+        // Ensure L3 table exists (covers 2MB region)
+        if !self.has_l3(l3_base) {
+            let l3_slot = self.alloc_page_table(3)?;
+            map_page_table(
+                self.cptr(self.vspace_slot),
+                self.cptr(l3_slot),
+                l3_base,
+                3, // Level 3
+            )
+            .map_err(|e| SpawnError::PageTableMapFailed(e))?;
+            self.add_l3(l3_base);
+        }
+
         Ok(())
     }
 
@@ -199,10 +346,6 @@ impl VSpaceBuilder {
         // Ensure page tables exist
         self.ensure_page_tables(vaddr_start, vaddr_end)?;
 
-        // Temporary address for mapping frames into our VSpace for copying data
-        // We use a high address that's unlikely to conflict with normal mappings
-        const TEMP_MAP_BASE: u64 = 0x1_0000_0000;
-
         // Calculate offset from segment start (for data that doesn't start at page boundary)
         let data_offset_in_first_page = (vaddr - vaddr_start) as usize;
 
@@ -210,22 +353,10 @@ impl VSpaceBuilder {
             let page_vaddr = vaddr_start + (i * PAGE_SIZE) as u64;
             let frame_slot = self.alloc_frame()?;
 
-            // Map frame into our VSpace temporarily for data copying
-            map_frame(
-                slots::ROOT_VSPACE,
-                frame_slot,
-                TEMP_MAP_BASE,
-                MapRights::RW.to_bits(),
-                0,
-            )
-            .map_err(|e| SpawnError::FrameMapFailed(e))?;
-
             // Calculate how much data to copy for this page
             let page_data_start = if i == 0 {
-                // First page: data starts at offset within page
                 0
             } else {
-                // Subsequent pages: account for offset in first page
                 i * PAGE_SIZE - data_offset_in_first_page
             };
 
@@ -234,47 +365,73 @@ impl VSpaceBuilder {
                 data.len(),
             );
 
-            // Copy data from ELF into the mapped frame
+            // Use frame_write syscall to copy data directly into the frame
+            // without needing to map it into our address space
             if page_data_start < data.len() {
-                // SAFETY: We just mapped this frame at TEMP_MAP_BASE with RW rights
-                unsafe {
-                    let dest = core::slice::from_raw_parts_mut(
-                        TEMP_MAP_BASE as *mut u8,
-                        PAGE_SIZE,
+                if i == 0 {
+                    // First page: copy starting at the offset within the page
+                    let copy_len = core::cmp::min(
+                        PAGE_SIZE - data_offset_in_first_page,
+                        data.len(),
                     );
-
-                    // Zero the entire page first
-                    dest.fill(0);
-
-                    // Copy the relevant portion of data
-                    if i == 0 {
-                        // First page: copy starting at the offset
-                        let copy_len = core::cmp::min(
-                            PAGE_SIZE - data_offset_in_first_page,
-                            data.len(),
-                        );
-                        dest[data_offset_in_first_page..data_offset_in_first_page + copy_len]
-                            .copy_from_slice(&data[0..copy_len]);
-                    } else if page_data_start < page_data_end {
-                        // Subsequent pages: copy from calculated offset
-                        let copy_len = page_data_end - page_data_start;
-                        dest[..copy_len].copy_from_slice(&data[page_data_start..page_data_end]);
+                    // Zero the page first (before the data)
+                    if data_offset_in_first_page > 0 {
+                        static ZEROS: [u8; PAGE_SIZE] = [0u8; PAGE_SIZE];
+                        frame_write(
+                            self.cptr(frame_slot),
+                            0,
+                            ZEROS.as_ptr(),
+                            data_offset_in_first_page,
+                        ).map_err(|e| SpawnError::FrameMapFailed(e))?;
+                    }
+                    // Write the actual data
+                    frame_write(
+                        self.cptr(frame_slot),
+                        data_offset_in_first_page as u64,
+                        data.as_ptr(),
+                        copy_len,
+                    ).map_err(|e| SpawnError::FrameMapFailed(e))?;
+                    // Zero remainder if needed
+                    let remainder_start = data_offset_in_first_page + copy_len;
+                    if remainder_start < PAGE_SIZE {
+                        static ZEROS: [u8; PAGE_SIZE] = [0u8; PAGE_SIZE];
+                        frame_write(
+                            self.cptr(frame_slot),
+                            remainder_start as u64,
+                            ZEROS.as_ptr(),
+                            PAGE_SIZE - remainder_start,
+                        ).map_err(|e| SpawnError::FrameMapFailed(e))?;
+                    }
+                } else if page_data_start < page_data_end {
+                    // Subsequent pages: copy from calculated offset
+                    let copy_len = page_data_end - page_data_start;
+                    frame_write(
+                        self.cptr(frame_slot),
+                        0,
+                        data[page_data_start..].as_ptr(),
+                        copy_len,
+                    ).map_err(|e| SpawnError::FrameMapFailed(e))?;
+                    // Zero remainder if this is a partial page
+                    if copy_len < PAGE_SIZE {
+                        static ZEROS: [u8; PAGE_SIZE] = [0u8; PAGE_SIZE];
+                        frame_write(
+                            self.cptr(frame_slot),
+                            copy_len as u64,
+                            ZEROS.as_ptr(),
+                            PAGE_SIZE - copy_len,
+                        ).map_err(|e| SpawnError::FrameMapFailed(e))?;
                     }
                 }
             } else {
                 // No data for this page - just zero it
-                // SAFETY: We just mapped this frame at TEMP_MAP_BASE with RW rights
-                unsafe {
-                    let dest = core::slice::from_raw_parts_mut(
-                        TEMP_MAP_BASE as *mut u8,
-                        PAGE_SIZE,
-                    );
-                    dest.fill(0);
-                }
+                static ZEROS: [u8; PAGE_SIZE] = [0u8; PAGE_SIZE];
+                frame_write(
+                    self.cptr(frame_slot),
+                    0,
+                    ZEROS.as_ptr(),
+                    PAGE_SIZE,
+                ).map_err(|e| SpawnError::FrameMapFailed(e))?;
             }
-
-            // Unmap from our VSpace
-            unmap_frame(frame_slot).map_err(|e| SpawnError::FrameMapFailed(e))?;
 
             // Map frame into child's VSpace with the correct permissions
             self.map_frame(frame_slot, page_vaddr, rights)?;
@@ -302,6 +459,133 @@ impl VSpaceBuilder {
     }
 }
 
+/// Map data into a child's VSpace.
+///
+/// This function allocates frames, copies data to them, and maps them into
+/// the child's VSpace. Used for mapping DTB, initrd, boot info, etc.
+///
+/// Returns the virtual address where the data was mapped.
+pub fn map_data_to_child(
+    root_cnode: u64,
+    cnode_radix: u8,
+    vspace_slot: u64,
+    ram_untyped: u64,
+    next_free_slot: &mut u64,
+    vaddr: u64,
+    data: &[u8],
+    rights: MapRights,
+) -> Result<(), SpawnError> {
+    let cptr = |slot: u64| slot_to_cptr(slot, cnode_radix);
+
+    // Calculate number of pages needed
+    let num_pages = (data.len() + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    for i in 0..num_pages {
+        let page_vaddr = vaddr + (i * PAGE_SIZE) as u64;
+        let frame_slot = *next_free_slot;
+        *next_free_slot += 1;
+
+        // Allocate frame
+        retype(
+            cptr(ram_untyped),
+            ObjectType::Frame as u64,
+            12, // 4KB
+            cptr(root_cnode),
+            frame_slot,
+            1,
+        )
+        .map_err(SpawnError::RetypeFailed)?;
+
+        // Calculate data range for this page
+        let data_start = i * PAGE_SIZE;
+        let data_end = core::cmp::min(data_start + PAGE_SIZE, data.len());
+        let copy_len = data_end - data_start;
+
+        // Copy data to frame
+        if copy_len > 0 {
+            frame_write(
+                cptr(frame_slot),
+                0,
+                data[data_start..].as_ptr(),
+                copy_len,
+            ).map_err(SpawnError::FrameMapFailed)?;
+
+            // Zero remainder if partial page
+            if copy_len < PAGE_SIZE {
+                static ZEROS: [u8; PAGE_SIZE] = [0u8; PAGE_SIZE];
+                frame_write(
+                    cptr(frame_slot),
+                    copy_len as u64,
+                    ZEROS.as_ptr(),
+                    PAGE_SIZE - copy_len,
+                ).map_err(SpawnError::FrameMapFailed)?;
+            }
+        }
+
+        // Map frame into child's VSpace
+        map_frame(cptr(vspace_slot), cptr(frame_slot), page_vaddr, rights.to_bits(), 0)
+            .map_err(SpawnError::FrameMapFailed)?;
+    }
+
+    Ok(())
+}
+
+/// Ensure page tables exist for an address range in a child's VSpace.
+pub fn ensure_child_page_tables(
+    root_cnode: u64,
+    cnode_radix: u8,
+    vspace_slot: u64,
+    ram_untyped: u64,
+    next_free_slot: &mut u64,
+    vaddr_start: u64,
+    vaddr_end: u64,
+) -> Result<(), SpawnError> {
+    // This is a simplified version - we create page tables for each level
+    // In a real implementation, we'd track which tables already exist
+    let cptr = |slot: u64| slot_to_cptr(slot, cnode_radix);
+
+    const L1_SIZE: u64 = 512 * 1024 * 1024 * 1024; // 512GB
+    const L2_SIZE: u64 = 1024 * 1024 * 1024;       // 1GB
+    const L3_SIZE: u64 = 2 * 1024 * 1024;          // 2MB
+
+    let l1_base = vaddr_start & !(L1_SIZE - 1);
+    let l2_base = vaddr_start & !(L2_SIZE - 1);
+    let l3_base = vaddr_start & !(L3_SIZE - 1);
+
+    // Create L1 table
+    let l1_slot = *next_free_slot;
+    *next_free_slot += 1;
+    retype(cptr(ram_untyped), 5, 0, cptr(root_cnode), l1_slot, 1)
+        .map_err(SpawnError::RetypeFailed)?;
+    let _ = map_page_table(cptr(vspace_slot), cptr(l1_slot), l1_base, 1);
+
+    // Create L2 table
+    let l2_slot = *next_free_slot;
+    *next_free_slot += 1;
+    retype(cptr(ram_untyped), 6, 0, cptr(root_cnode), l2_slot, 1)
+        .map_err(SpawnError::RetypeFailed)?;
+    let _ = map_page_table(cptr(vspace_slot), cptr(l2_slot), l2_base, 2);
+
+    // Create L3 table
+    let l3_slot = *next_free_slot;
+    *next_free_slot += 1;
+    retype(cptr(ram_untyped), 7, 0, cptr(root_cnode), l3_slot, 1)
+        .map_err(SpawnError::RetypeFailed)?;
+    let _ = map_page_table(cptr(vspace_slot), cptr(l3_slot), l3_base, 3);
+
+    // Handle case where end address is in a different L3 region
+    let l3_end_base = (vaddr_end - 1) & !(L3_SIZE - 1);
+    if l3_end_base != l3_base {
+        let l3_slot2 = *next_free_slot;
+        *next_free_slot += 1;
+        retype(cptr(ram_untyped), 7, 0, cptr(root_cnode), l3_slot2, 1)
+            .map_err(SpawnError::RetypeFailed)?;
+        let _ = map_page_table(cptr(vspace_slot), cptr(l3_slot2), l3_end_base, 3);
+    }
+
+    Ok(())
+}
+
 /// Spawn a new process from an ELF binary
 ///
 /// This function:
@@ -323,6 +607,10 @@ impl VSpaceBuilder {
 /// `SpawnResult` on success with slots of created objects
 pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
     let mut next_slot = config.next_free_slot;
+    let radix = config.cnode_radix;
+
+    // Helper to convert slot to CPtr
+    let cptr = |slot: u64| slot_to_cptr(slot, radix);
 
     // Parse ELF
     let elf = Elf64::parse(config.elf_data)?;
@@ -339,25 +627,25 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
 
     // Create VSpace (L0 page table root)
     retype(
-        config.ram_untyped,
+        cptr(config.ram_untyped),
         ObjectType::VSpace as u64,
         0,
-        config.root_cnode,
+        cptr(config.root_cnode),
         vspace_slot,
         1,
     )
     .map_err(|e| SpawnError::RetypeFailed(e))?;
 
     // Assign ASID to VSpace
-    let asid = asid_pool_assign(config.asid_pool, vspace_slot)
+    let asid = asid_pool_assign(cptr(config.asid_pool), cptr(vspace_slot))
         .map_err(|e| SpawnError::AsidAssignFailed(e))? as u64;
 
     // Create CSpace for child (radix 12 = 4096 slots)
     retype(
-        config.ram_untyped,
+        cptr(config.ram_untyped),
         ObjectType::CNode as u64,
         12, // radix
-        config.root_cnode,
+        cptr(config.root_cnode),
         cspace_slot,
         1,
     )
@@ -365,10 +653,10 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
 
     // Create TCB
     retype(
-        config.ram_untyped,
+        cptr(config.ram_untyped),
         ObjectType::TCB as u64,
         0,
-        config.root_cnode,
+        cptr(config.root_cnode),
         tcb_slot,
         1,
     )
@@ -376,10 +664,10 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
 
     // Create IPC buffer frame
     retype(
-        config.ram_untyped,
+        cptr(config.ram_untyped),
         ObjectType::Frame as u64,
         12, // 4KB
-        config.root_cnode,
+        cptr(config.root_cnode),
         ipc_buf_frame_slot,
         1,
     )
@@ -391,6 +679,7 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
         config.root_cnode,
         config.ram_untyped,
         next_slot,
+        radix,
     );
 
     // Map ELF segments
@@ -409,50 +698,67 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
         }
     }
 
-    // Create stack (16 pages = 64KB)
-    let stack_top = vspace_builder.create_stack(16)?;
+    // Create stack (32 pages = 128KB)
+    // Rust programs need significant stack space for startup/runtime
+    let stack_top = vspace_builder.create_stack(32)?;
 
-    // Map IPC buffer
-    const IPC_BUFFER_ADDR: u64 = 0x0000_7FFF_F000_0000;
-    map_frame(vspace_slot, ipc_buf_frame_slot, IPC_BUFFER_ADDR, MapRights::RW.to_bits(), 0)
+    // Map IPC buffer just below the stack
+    // Stack: 32 pages from 0x7FFD_F000 to 0x7FFF_E000, so IPC buffer at 0x7FFD_E000
+    const IPC_BUFFER_ADDR: u64 = 0x0000_7FFD_E000;
+    map_frame(cptr(vspace_slot), cptr(ipc_buf_frame_slot), IPC_BUFFER_ADDR, MapRights::RW.to_bits(), 0)
         .map_err(|e| SpawnError::FrameMapFailed(e))?;
+
+    crate::io::puts("[spawn] IPC buffer mapped\n");
 
     // Update next free slot
     next_slot = vspace_builder.next_free_slot;
 
     // Grant initial capabilities to child's CSpace
+    crate::io::puts("[spawn] Copying initial caps...\n");
     for cap in config.initial_caps {
         cap_copy(
-            cspace_slot,    // dest cnode
-            cap.dst_slot,   // dest index
-            0,              // dest depth (auto)
-            config.root_cnode, // src cnode
-            cap.src_slot,   // src index
-            0,              // src depth (auto)
+            cptr(cspace_slot),    // dest cnode
+            cap.dst_slot,         // dest index
+            0,                    // dest depth (auto)
+            cptr(config.root_cnode), // src cnode
+            cap.src_slot,         // src index
+            0,                    // src depth (auto)
         )
         .map_err(|e| SpawnError::CapCopyFailed(e))?;
     }
 
+    crate::io::puts("[spawn] Configuring TCB...\n");
     // Configure TCB
     tcb_configure(
-        tcb_slot,
-        0,                  // fault_ep (none for now)
-        cspace_slot,
-        vspace_slot,
+        cptr(tcb_slot),
+        0,                      // fault_ep (none for now)
+        cptr(cspace_slot),
+        cptr(vspace_slot),
         IPC_BUFFER_ADDR,
-        ipc_buf_frame_slot,
+        cptr(ipc_buf_frame_slot),
     )
     .map_err(|e| SpawnError::TcbConfigureFailed(e))?;
 
+    crate::io::puts("[spawn] Writing registers: PC=0x");
     // Set up initial registers
     let entry = elf.entry();
     let sp = stack_top;
-    tcb_write_registers(tcb_slot, entry, sp, config.x0)
+    crate::io::put_hex(entry);
+    crate::io::puts(" SP=0x");
+    crate::io::put_hex(sp);
+    crate::io::newline();
+    tcb_write_registers(cptr(tcb_slot), entry, sp, config.x0)
         .map_err(|e| SpawnError::TcbWriteRegistersFailed(e))?;
 
-    // Resume the task
-    tcb_resume(tcb_slot)
-        .map_err(|e| SpawnError::TcbResumeFailed(e))?;
+    if config.resume {
+        crate::io::puts("[spawn] Resuming TCB...\n");
+        // Resume the task
+        tcb_resume(cptr(tcb_slot))
+            .map_err(|e| SpawnError::TcbResumeFailed(e))?;
+        crate::io::puts("[spawn] TCB resumed\n");
+    } else {
+        crate::io::puts("[spawn] TCB configured (not resumed)\n");
+    }
 
     Ok(SpawnResult {
         tcb_slot,
