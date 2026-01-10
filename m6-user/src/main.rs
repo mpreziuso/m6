@@ -123,9 +123,12 @@ pub unsafe extern "C" fn _start() -> ! {
         io::puts("[init] Cannot spawn device-mgr: missing initrd or untyped memory\n");
     }
 
-    io::puts("[init] Initialisation complete, entering idle loop\n");
+    io::puts("[init] Initialisation complete\n");
+    io::puts("[init] Init has no more work - system idle with device-mgr waiting for requests\n");
 
-    // Enter idle loop
+    // Init has nothing more to do
+    // In a real system, init would block on a notification waiting for shutdown/reboot signals
+    // For now, we just yield forever to let the idle task run
     loop {
         sched_yield();
     }
@@ -195,7 +198,8 @@ const DEVMGR_INITRD_ADDR: u64 = 0x0000_2000_0000;    // 512MB mark
 struct DevMgrBootInfoLayout {
     magic: u64,
     version: u32,
-    _reserved: u32,
+    cnode_radix: u8,
+    _reserved: [u8; 3],
     dtb_vaddr: u64,
     dtb_size: u64,
     initrd_vaddr: u64,
@@ -218,6 +222,31 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     io::put_u64(elf_data.len() as u64);
     io::puts(" bytes\n");
 
+    // Create registry endpoint for device-mgr
+    let registry_ep_slot = FIRST_FREE_SLOT;
+    let radix = boot_info.cnode_radix as u8;
+    let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
+
+    io::puts("[init] Creating registry endpoint at slot ");
+    io::put_u64(registry_ep_slot);
+    io::newline();
+
+    if let Err(e) = m6_syscall::invoke::retype(
+        cptr(slots::FIRST_UNTYPED),
+        11, // ObjectType::Endpoint
+        0,  // size_bits (not used for endpoints)
+        cptr(slots::ROOT_CNODE),
+        registry_ep_slot,
+        1,  // count - create one endpoint
+    ) {
+        io::puts("[init] ERROR: Failed to create registry endpoint: ");
+        io::put_hex(e as u64);
+        io::newline();
+        return;
+    }
+
+    io::puts("[init] Registry endpoint created successfully\n");
+
     // Configure spawn - don't resume yet, we need to map additional data
     let config = SpawnConfig {
         elf_data,
@@ -225,10 +254,12 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         cnode_radix: boot_info.cnode_radix as u8,
         ram_untyped: slots::FIRST_UNTYPED,
         asid_pool: slots::ASID_POOL,
-        next_free_slot: FIRST_FREE_SLOT,
+        next_free_slot: FIRST_FREE_SLOT + 1, // +1 for the endpoint we just created
         initial_caps: &[
             // Give device-mgr its own CNode reference
             InitialCap { src_slot: slots::ROOT_CNODE, dst_slot: 0 },
+            // Give device-mgr the registry endpoint
+            InitialCap { src_slot: registry_ep_slot, dst_slot: 12 }, // slot 12 = REGISTRY_EP
         ],
         x0: DEVMGR_BOOT_INFO_ADDR, // Will point to boot info
         resume: false, // Don't resume yet
@@ -283,7 +314,8 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     let dev_boot_info = DevMgrBootInfoLayout {
         magic: DEV_MGR_BOOT_INFO_MAGIC,
         version: DEV_MGR_BOOT_INFO_VERSION,
-        _reserved: 0,
+        cnode_radix: 12, // Device-mgr's CNode has radix 12 (set in spawn_process)
+        _reserved: [0; 3],
         dtb_vaddr: if boot_info.has_dtb() { DEVMGR_DTB_ADDR } else { 0 },
         dtb_size: boot_info.dtb_size,
         initrd_vaddr: if boot_info.has_initrd() { DEVMGR_INITRD_ADDR } else { 0 },

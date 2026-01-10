@@ -133,11 +133,25 @@ fn get_initrd() -> Option<&'static [u8]> {
 
 /// Main service loop - handles client requests.
 fn service_loop(registry: &mut Registry) -> ! {
+    // Get CNode radix from boot info
+    // SAFETY: We validated boot info at startup
+    let boot_info = unsafe { &*BOOT_INFO };
+    let radix = boot_info.cnode_radix;
+
+    // Helper to convert slot to CPtr
+    let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
+
+    let registry_cptr = cptr(slots::REGISTRY_EP);
+
     loop {
         // Wait for request on registry endpoint
-        match recv(slots::REGISTRY_EP) {
+        match recv(registry_cptr) {
             Ok(result) => {
                 let sender_badge = result as u64;
+
+                io::puts("[device-mgr] Received message, badge=");
+                io::put_hex(sender_badge);
+                io::newline();
 
                 // Read message label from registers (simplified)
                 // In a real implementation, this would come from the IPC message
@@ -147,9 +161,12 @@ fn service_loop(registry: &mut Registry) -> ! {
                 let response = handle_request(registry, sender_badge, label);
 
                 // Reply to the sender
-                let _ = send(slots::REGISTRY_EP, response, 0, 0, 0);
+                let _ = send(registry_cptr, response, 0, 0, 0);
             }
-            Err(_) => {
+            Err(err) => {
+                io::puts("[device-mgr] recv() returned error ");
+                io::put_u64(err as u64);
+                io::puts(" - yielding\n");
                 // Error receiving - yield and try again
                 sched_yield();
             }

@@ -18,8 +18,10 @@ pub struct DevMgrBootInfo {
     pub magic: u64,
     /// Version of this structure.
     pub version: u32,
+    /// CNode radix (for converting slots to CPtrs).
+    pub cnode_radix: u8,
     /// Reserved for alignment.
-    _reserved: u32,
+    _reserved: [u8; 3],
     /// Virtual address where DTB is mapped (0 if not available).
     pub dtb_vaddr: u64,
     /// Size of the DTB in bytes.

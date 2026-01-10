@@ -212,7 +212,16 @@ pub fn remove_task(tcb_ref: ObjectRef) {
     let sched_state = get_sched_state();
     let mut sched = sched_state[cpu_id].lock();
 
+    // Check if we're removing the current task
+    let is_current = sched.current_thread == Some(tcb_ref);
+
     eevdf::remove_from_run_queue(&mut sched, tcb_ref);
+
+    // If we removed the current task, we need to reschedule
+    if is_current {
+        drop(sched);
+        request_reschedule();
+    }
 }
 
 /// Yield the current task's remaining time slice.
@@ -258,8 +267,8 @@ pub fn schedule() {
     }
 
     // Find next task (or use idle task)
-    let next = eevdf::find_next_runnable(&sched)
-        .unwrap_or(sched.idle_thread);
+    let next_option = eevdf::find_next_runnable(&sched);
+    let next = next_option.unwrap_or(sched.idle_thread);
 
     if !next.is_valid() {
         log::error!("No runnable task and no idle task!");

@@ -68,8 +68,11 @@ pub fn dispatch_task(ctx: &mut UserCtx) {
                     }
                 };
 
-                // Check if this is the idle task
-                let is_idle = is_idle_task(tcb_ref);
+                // Check if this is the idle task (priority 0)
+                let is_idle = super::run_queue::with_tcb(tcb_ref, |tcb| {
+                    tcb.tcb.priority == 0
+                }).unwrap_or(false);
+
                 if is_idle {
                     // Idle task doesn't have async work
                     state = State::ReturnToUserspace;
@@ -251,15 +254,6 @@ fn is_finished(tcb_ref: ObjectRef) -> bool {
 
     super::run_queue::with_tcb(tcb_ref, |tcb| {
         tcb.tcb.state == ThreadState::Inactive
-    }).unwrap_or(false)
-}
-
-/// Check if a task is the idle task.
-fn is_idle_task(tcb_ref: ObjectRef) -> bool {
-    // Check if this is the idle task by comparing with the current CPU's idle task
-    // For now, we check if the TCB has the idle priority (lowest)
-    super::run_queue::with_tcb(tcb_ref, |tcb| {
-        tcb.tcb.priority == 0
     }).unwrap_or(false)
 }
 

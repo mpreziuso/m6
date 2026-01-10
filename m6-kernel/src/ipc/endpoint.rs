@@ -107,10 +107,17 @@ pub fn do_recv(
     blocking: bool,
     has_grant: bool,
 ) -> Result<Option<(u64, IpcMessage)>, SyscallError> {
-    object_table::with_endpoint_mut(ep_ref, |endpoint| {
+    // Check endpoint state WITHOUT holding the lock for long
+    enum Action {
+        ReceiveFrom(ObjectRef),
+        Block,
+        WouldBlock,
+    }
+
+    let action = object_table::with_endpoint_mut(ep_ref, |endpoint| {
         match endpoint.state {
             EndpointState::SendQueue => {
-                // Sender waiting - receive message immediately
+                // Sender waiting - dequeue it
                 let sender_ref = ipc_dequeue(&mut endpoint.queue_head, &mut endpoint.queue_tail)
                     .expect("SendQueue but empty queue");
 
@@ -119,43 +126,80 @@ pub fn do_recv(
                     endpoint.state = EndpointState::Idle;
                 }
 
-                // Transfer capabilities if Grant right present
-                if let Err(e) = super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant) {
-                    // If capability transfer fails, we still deliver the message
-                    log::debug!("Capability transfer failed during recv: {:?}", e);
-                }
-
-                // Get pending message from sender
-                let (msg, badge) = get_pending_message(sender_ref);
-
-                // Wake sender
-                wake_thread(sender_ref);
-
-                Ok(Some((badge, msg)))
+                Action::ReceiveFrom(sender_ref)
             }
 
             EndpointState::Idle | EndpointState::RecvQueue => {
                 // No sender waiting
                 if !blocking {
-                    return Err(SyscallError::WouldBlock);
+                    Action::WouldBlock
+                } else {
+                    Action::Block
                 }
-
-                // Block receiver
-                block_thread(receiver_ref, ep_ref, ThreadState::BlockedOnRecv);
-
-                // Add to recv queue
-                endpoint.state = EndpointState::RecvQueue;
-                ipc_enqueue(
-                    &mut endpoint.queue_head,
-                    &mut endpoint.queue_tail,
-                    receiver_ref,
-                );
-
-                Ok(None)
             }
         }
     })
-    .ok_or(SyscallError::InvalidCap)?
+    .ok_or(SyscallError::InvalidCap)?;
+
+    // Now execute the action WITHOUT holding any locks
+    match action {
+        Action::ReceiveFrom(sender_ref) => {
+            // Transfer capabilities if Grant right present
+            if let Err(e) = super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant) {
+                // If capability transfer fails, we still deliver the message
+                log::debug!("Capability transfer failed during recv: {:?}", e);
+            }
+
+            // Get pending message from sender
+            let (msg, badge) = get_pending_message(sender_ref);
+
+            // Wake sender
+            wake_thread(sender_ref);
+
+            Ok(Some((badge, msg)))
+        }
+
+        Action::Block => {
+            // Block the receiver first
+            block_thread(receiver_ref, ep_ref, ThreadState::BlockedOnRecv);
+
+            // Get current queue state
+            let (_old_head, old_tail) = object_table::with_endpoint_mut(ep_ref, |endpoint| {
+                (endpoint.queue_head, endpoint.queue_tail)
+            })
+            .ok_or(SyscallError::InvalidCap)?;
+
+            // Update TCB queue links (this locks TCBs, not endpoint)
+            let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
+                tcb.ipc_prev = old_tail;
+                tcb.ipc_next = ObjectRef::NULL;
+            });
+
+            if old_tail.is_valid() {
+                // Link old tail to new entry
+                let _: () = object_table::with_tcb_mut(old_tail, |old_tail_tcb| {
+                    old_tail_tcb.ipc_next = receiver_ref;
+                });
+            }
+
+            // Now update endpoint with new queue state
+            object_table::with_endpoint_mut(ep_ref, |endpoint| {
+                endpoint.state = EndpointState::RecvQueue;
+                if old_tail.is_valid() {
+                    endpoint.queue_tail = receiver_ref;
+                } else {
+                    // Queue was empty - new entry is both head and tail
+                    endpoint.queue_head = receiver_ref;
+                    endpoint.queue_tail = receiver_ref;
+                }
+            })
+            .ok_or(SyscallError::InvalidCap)?;
+
+            Ok(None)
+        }
+
+        Action::WouldBlock => Err(SyscallError::WouldBlock),
+    }
 }
 
 /// Perform a call operation (send + wait for reply).
