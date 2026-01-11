@@ -18,7 +18,7 @@ use m6_pal::psci;
 /// # Arguments
 /// * `boot_info` - Boot information with CPU count and stack addresses
 pub fn start_secondary_cpus(boot_info: &'static BootInfo) {
-    let cpu_count = boot_info.cpu_count() as usize;
+    let cpu_count = boot_info.cpu_count();
 
     if cpu_count <= 1 {
         log::info!("Single CPU system, skipping secondary CPU startup");
@@ -49,7 +49,7 @@ pub fn start_secondary_cpus(boot_info: &'static BootInfo) {
     while smp::cpus_online() < cpu_count as u32 {
         core::hint::spin_loop();
         spin_count += 1;
-        if spin_count % 1_000_000 == 0 {
+        if spin_count.is_multiple_of(1_000_000) {
             log::debug!(
                 "Still waiting... {} of {} CPUs online",
                 smp::cpus_online(),

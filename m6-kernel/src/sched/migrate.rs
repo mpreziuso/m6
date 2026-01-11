@@ -14,7 +14,7 @@ use super::{MAX_CPUS, eevdf, get_sched_state, current_cpu_id, request_reschedule
 pub fn find_task_cpu(tcb_ref: ObjectRef) -> Option<usize> {
     let sched_state = get_sched_state();
 
-    for cpu in 0..MAX_CPUS {
+    for (cpu, _) in sched_state.iter().enumerate().take(MAX_CPUS) {
         let sched = sched_state[cpu].lock();
         if sched.current() == Some(tcb_ref) || sched.run_queue().contains(tcb_ref) {
             return Some(cpu);

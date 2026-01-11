@@ -287,7 +287,7 @@ pub fn remove_task(tcb_ref: ObjectRef) {
     }
 
     // Task not on current CPU - search other CPUs
-    for cpu in 0..MAX_CPUS {
+    for (cpu, _) in sched_state.iter().enumerate().take(MAX_CPUS) {
         if cpu == current {
             continue;
         }

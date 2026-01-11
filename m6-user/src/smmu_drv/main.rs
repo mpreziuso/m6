@@ -38,14 +38,11 @@ const fn cptr(slot: u64) -> u64 {
 
 /// Well-known capability slots for drivers (from device manager).
 mod slots {
-    pub const ROOT_CNODE: u64 = 0;
-    pub const ROOT_TCB: u64 = 1;
     pub const ROOT_VSPACE: u64 = 2;
     pub const DEVICE_FRAME: u64 = 10;
     pub const IRQ_HANDLER: u64 = 11;
     pub const SERVICE_EP: u64 = 12;
     pub const NOTIF: u64 = 14;
-    pub const CONSOLE_EP: u64 = 20;
 }
 
 /// SMMU MMIO virtual address (where DeviceFrame is mapped).
@@ -74,7 +71,6 @@ struct SmmuState {
 struct FaultInfo {
     fault_type: u8,
     stream_id: u32,
-    address: u64,
 }
 
 impl SmmuState {
@@ -157,7 +153,6 @@ impl SmmuState {
         self.last_fault = Some(FaultInfo {
             fault_type,
             stream_id,
-            address,
         });
 
         // Log the fault
@@ -174,6 +169,12 @@ impl SmmuState {
 }
 
 /// Driver entry point.
+///
+/// # Safety
+///
+/// This function must only be called once at program startup. It is the entry point
+/// for the SMMU driver and assumes the environment has been properly set up by the
+/// bootloader with valid capabilities and memory mappings.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start() -> ! {

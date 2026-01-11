@@ -41,7 +41,4 @@ pub mod response {
 
     /// No fault data available.
     pub const ERR_NO_FAULT: u64 = 2;
-
-    /// SMMU not initialized.
-    pub const ERR_NOT_READY: u64 = 3;
 }

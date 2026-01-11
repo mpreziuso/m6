@@ -134,7 +134,7 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
     }
 
     // Start secondary CPUs
-    let cpu_count = boot_info.cpu_count() as usize;
+    let cpu_count = boot_info.cpu_count();
     if cpu_count > 1 {
         log::info!("Starting {} secondary CPUs...", cpu_count - 1);
         m6_kernel::smp::start_secondary_cpus(boot_info);

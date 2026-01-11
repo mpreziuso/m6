@@ -79,7 +79,7 @@ pub fn periodic_balance(cpu_count: usize) {
     let ticks = BALANCE_TICK_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
 
     // Only balance every BALANCE_INTERVAL_TICKS
-    if ticks % BALANCE_INTERVAL_TICKS != 0 {
+    if !ticks.is_multiple_of(BALANCE_INTERVAL_TICKS) {
         return;
     }
 
@@ -106,17 +106,17 @@ pub fn periodic_balance(cpu_count: usize) {
     }
 
     // Try to migrate a task from busiest to idlest
-    if let Some(task) = find_migratable_task(busiest) {
-        if migrate::migrate_task(task, idlest) {
-            log::debug!(
-                "Load balance: migrated task {:?} from CPU {} ({} tasks) to CPU {} ({} tasks)",
-                task,
-                busiest,
-                busiest_load,
-                idlest,
-                idlest_load
-            );
-        }
+    if let Some(task) = find_migratable_task(busiest)
+        && migrate::migrate_task(task, idlest)
+    {
+        log::debug!(
+            "Load balance: migrated task {:?} from CPU {} ({} tasks) to CPU {} ({} tasks)",
+            task,
+            busiest,
+            busiest_load,
+            idlest,
+            idlest_load
+        );
     }
 }
 
@@ -164,7 +164,7 @@ pub fn try_steal_work(idle_cpu: usize, cpu_count: usize) -> Option<ObjectRef> {
     let loads = collect_load();
 
     // Find a CPU with excess work
-    for cpu in 0..cpu_count {
+    for (cpu, _) in loads.iter().enumerate().take(cpu_count) {
         if cpu == idle_cpu {
             continue;
         }
@@ -175,16 +175,16 @@ pub fn try_steal_work(idle_cpu: usize, cpu_count: usize) -> Option<ObjectRef> {
         }
 
         // Try to find and migrate a task
-        if let Some(task) = find_migratable_task(cpu) {
-            if migrate::migrate_task(task, idle_cpu) {
-                log::trace!(
-                    "Work steal: CPU {} stole task {:?} from CPU {}",
-                    idle_cpu,
-                    task,
-                    cpu
-                );
-                return Some(task);
-            }
+        if let Some(task) = find_migratable_task(cpu)
+            && migrate::migrate_task(task, idle_cpu)
+        {
+            log::trace!(
+                "Work steal: CPU {} stole task {:?} from CPU {}",
+                idle_cpu,
+                task,
+                cpu
+            );
+            return Some(task);
         }
     }
 
