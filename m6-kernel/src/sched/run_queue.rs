@@ -310,6 +310,42 @@ impl RunQueue {
         self.count = self.count.saturating_sub(1);
     }
 
+    /// Check if a task is in this run queue.
+    pub fn contains(&self, tcb_ref: ObjectRef) -> bool {
+        if !tcb_ref.is_valid() {
+            return false;
+        }
+
+        object_table::with_object(tcb_ref, |obj| {
+            if obj.obj_type == KernelObjectType::Tcb {
+                // SAFETY: We verified the type.
+                let tcb = unsafe { &*obj.data.tcb_ptr };
+                // Check if task is in a scheduler queue by examining its links
+                // A task is in this queue if it has sched links set OR if it's the head/tail
+                if tcb.is_in_sched_queue() {
+                    // Walk the list to confirm it's in THIS queue
+                    let mut current = self.head;
+                    while current.is_valid() {
+                        if current == tcb_ref {
+                            return true;
+                        }
+                        current = object_table::with_object(current, |o| {
+                            if o.obj_type == KernelObjectType::Tcb {
+                                // SAFETY: We verified the type.
+                                unsafe { (*o.data.tcb_ptr).sched_next }
+                            } else {
+                                ObjectRef::NULL
+                            }
+                        }).unwrap_or(ObjectRef::NULL);
+                    }
+                }
+                false
+            } else {
+                false
+            }
+        }).unwrap_or(false)
+    }
+
     /// Get the first (earliest deadline) task without removing it.
     #[inline]
     pub fn peek(&self) -> Option<ObjectRef> {

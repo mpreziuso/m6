@@ -4,8 +4,14 @@
 /// Using -2GB (0xFFFF_FFFF_8000_0000) for kernel base
 pub const KERNEL_VIRT_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
-/// Size of the kernel stack
-pub const KERNEL_STACK_SIZE: usize = 64 * 1024; // 64 KB
+/// Maximum number of CPUs supported (must match m6-common::boot::MAX_CPUS)
+pub const MAX_CPUS: usize = 8;
+
+/// Size of each per-CPU kernel stack
+pub const PER_CPU_STACK_SIZE: usize = 64 * 1024; // 64 KB per CPU
+
+/// Size of the kernel stack (legacy, for single CPU - use PER_CPU_STACK_SIZE instead)
+pub const KERNEL_STACK_SIZE: usize = PER_CPU_STACK_SIZE;
 
 /// Maximum kernel image size
 pub const MAX_KERNEL_SIZE: usize = 16 * 1024 * 1024; // 16 MB

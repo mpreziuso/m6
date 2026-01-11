@@ -77,6 +77,8 @@ pub struct DtbPlatform {
     pub(crate) ram_size: u64,
     /// SMMU configuration (None if no SMMU detected).
     pub(crate) smmu_config: Option<SmmuConfig>,
+    /// Number of CPUs detected.
+    pub(crate) cpu_count: u32,
 }
 
 impl Platform for DtbPlatform {
@@ -139,5 +141,13 @@ impl Platform for DtbPlatform {
 
     fn has_iommu(&self) -> bool {
         self.smmu_config.as_ref().is_some_and(|c| c.is_valid())
+    }
+
+    fn cpu_count(&self) -> Option<u32> {
+        if self.cpu_count > 0 {
+            Some(self.cpu_count)
+        } else {
+            None
+        }
     }
 }

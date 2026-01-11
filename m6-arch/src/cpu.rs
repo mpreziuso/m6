@@ -70,6 +70,25 @@ pub fn isb() {
     }
 }
 
+/// Enable FP/SIMD access at EL0 and EL1
+///
+/// Sets CPACR_EL1.FPEN = 0b11 to allow FP/SIMD instructions.
+/// This must be called on each CPU before any FP/SIMD code runs.
+#[inline]
+pub fn enable_fp_simd() {
+    // SAFETY: Enabling FP/SIMD access is safe in kernel mode
+    unsafe {
+        asm!(
+            "mrs {tmp}, cpacr_el1",
+            "orr {tmp}, {tmp}, #(3 << 20)", // FPEN bits [21:20] = 0b11
+            "msr cpacr_el1, {tmp}",
+            "isb",
+            tmp = out(reg) _,
+            options(nomem, nostack)
+        );
+    }
+}
+
 /// Data memory barrier
 #[inline]
 pub fn dmb_sy() {

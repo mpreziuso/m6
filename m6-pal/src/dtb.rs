@@ -74,6 +74,7 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
     let timer_irq = parse_timer(&fdt)?;
     let name = parse_platform_name(&fdt)?;
     let smmu_config = parse_smmu(&fdt);
+    let cpu_count = parse_cpu_count(&fdt);
 
     Ok(DtbPlatform {
         name,
@@ -87,6 +88,7 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
         ram_base,
         ram_size,
         smmu_config,
+        cpu_count,
     })
 }
 
@@ -267,6 +269,40 @@ fn parse_platform_name(fdt: &Fdt) -> Result<&'static str, DtbError> {
     }
 
     Ok("Unknown Platform")
+}
+
+/// Parse CPU count from DTB /cpus node
+///
+/// Counts the number of CPU nodes under /cpus with device_type = "cpu".
+/// Returns 1 if no CPUs are found (single-CPU fallback).
+pub fn parse_cpu_count(fdt: &Fdt) -> u32 {
+    let mut count = 0u32;
+
+    for node in fdt.all_nodes() {
+        // CPU nodes are typically named "cpu@N" under /cpus
+        if node.name.starts_with("cpu@") || node.name == "cpu" {
+            // Verify it's actually a CPU by checking device_type
+            if let Some(device_type) = node.property("device_type") {
+                if device_type.as_str() == Some("cpu") {
+                    count += 1;
+                }
+            } else {
+                // Some DTBs don't have device_type, assume it's a CPU if under /cpus
+                count += 1;
+            }
+        }
+    }
+
+    // Ensure at least 1 CPU
+    if count == 0 { 1 } else { count }
+}
+
+/// Parse CPU count from raw DTB slice
+///
+/// Convenience function for the bootloader.
+pub fn parse_cpu_count_from_slice(dtb_slice: &[u8]) -> Result<u32, DtbError> {
+    let fdt = Fdt::new(dtb_slice).map_err(|_| DtbError::InvalidDtb)?;
+    Ok(parse_cpu_count(&fdt))
 }
 
 /// Parse SMMU (System Memory Management Unit) configuration

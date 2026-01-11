@@ -11,7 +11,8 @@ extern crate alloc;
 mod mmu_jump;
 use mmu_jump::enable_mmu_and_jump;
 use m6_boot::config::{
-    KERNEL_GIC_VIRT, KERNEL_STACK_SIZE, KERNEL_UART_VIRT, KERNEL_VIRT_BASE, PAGE_TABLE_ALLOC_SIZE,
+    KERNEL_GIC_VIRT, KERNEL_UART_VIRT, KERNEL_VIRT_BASE, MAX_CPUS, PAGE_TABLE_ALLOC_SIZE,
+    PER_CPU_STACK_SIZE,
 };
 use m6_boot::initrd_loader::load_initrd;
 use m6_boot::kernel_loader::load_kernel;
@@ -19,7 +20,7 @@ use m6_boot::memory::{mark_region, translate_memory_map};
 use m6_boot::page_table::{
     setup_initial_page_tables, BootPageAllocator, MmioConfig,
 };
-use m6_common::boot::{BootInfo, FramebufferInfo, BOOT_INFO_MAGIC, BOOT_INFO_VERSION};
+use m6_common::boot::{BootInfo, FramebufferInfo, PerCpuStackInfo, BOOT_INFO_MAGIC, BOOT_INFO_VERSION};
 use m6_common::{PhysAddr, VirtAddr};
 use m6_common::memory::MemoryType as M6MemoryType;
 use uefi::boot::{self, AllocateType, MemoryType};
@@ -55,8 +56,20 @@ fn efi_main() -> Status {
         system::firmware_revision()
     );
 
-    // Load the kernel
-    let kernel = match load_kernel() {
+    // Find device tree blob (DTB) from UEFI config table (needed early for CPU count)
+    let dtb_address = find_dtb();
+    if dtb_address == 0 {
+        log::error!("Device tree blob not found - cannot determine platform configuration");
+        return Status::NOT_FOUND;
+    }
+    log::info!("Device tree blob found at {:#x}", dtb_address);
+
+    // Parse CPU count from DTB before loading kernel (to allocate per-CPU stacks)
+    let cpu_count = parse_cpu_count_from_dtb(dtb_address);
+    log::info!("Detected {} CPUs from device tree", cpu_count);
+
+    // Load the kernel with per-CPU stacks
+    let kernel = match load_kernel(cpu_count) {
         Ok(k) => k,
         Err(e) => {
             log::error!("Failed to load kernel: {:?}", e);
@@ -121,21 +134,15 @@ fn efi_main() -> Status {
         log::info!("ACPI RSDP found at {:#x}", acpi_rsdp);
     }
 
-    // Find device tree blob (DTB) from UEFI config table
-    let dtb_address = find_dtb();
-    if dtb_address == 0 {
-        log::error!("Device tree blob not found - cannot determine platform configuration");
-        return Status::NOT_FOUND;
-    }
-    log::info!("Device tree blob found at {:#x}", dtb_address);
-
     // Set up initial page tables
     // SAFETY: We just allocated this memory
     let mut pt_allocator =
         unsafe { BootPageAllocator::new(pt_phys as *mut u8, PAGE_TABLE_ALLOC_SIZE) };
 
-    // Calculate stack base from stack top (stack_phys is top, we need base)
-    let stack_base_phys = kernel.stack_phys - KERNEL_STACK_SIZE as u64;
+    // Calculate stack base from stack top (stack_phys is top of CPU 0's stack)
+    let stack_base_phys = kernel.stack_phys - PER_CPU_STACK_SIZE as u64;
+    // Total size of all per-CPU stacks
+    let total_stack_size = (kernel.cpu_count as usize) * PER_CPU_STACK_SIZE;
 
     // Parse platform-specific MMIO physical addresses from DTB
     let mmio = parse_mmio_from_dtb(dtb_address);
@@ -205,7 +212,7 @@ fn efi_main() -> Status {
         &mut pt_allocator,
         &kernel,
         stack_base_phys,
-        KERNEL_STACK_SIZE as u64,
+        total_stack_size as u64,
         &mmio,
         max_phys_addr,
     ) {
@@ -295,6 +302,21 @@ fn efi_main() -> Status {
         (*ptr).frame_bitmap_phys = PhysAddr::new(bitmap_phys);
         (*ptr).frame_bitmap_size = bitmap_size as u64;
         (*ptr).max_phys_addr = max_phys_addr;
+        // SMP: CPU count and per-CPU stacks
+        (*ptr).cpu_count = kernel.cpu_count;
+        (*ptr)._cpu_count_pad = 0;
+        for cpu in 0..MAX_CPUS {
+            if cpu < kernel.cpu_count as usize {
+                (*ptr).per_cpu_stacks[cpu] = PerCpuStackInfo {
+                    phys_base: PhysAddr::new(kernel.per_cpu_stacks[cpu].phys_base),
+                    virt_top: VirtAddr::new(kernel.per_cpu_stacks[cpu].virt_top),
+                };
+            } else {
+                (*ptr).per_cpu_stacks[cpu] = PerCpuStackInfo::empty();
+            }
+        }
+        // TTBR0 value for secondary CPU MMU setup (identity mapping)
+        (*ptr).ttbr0_el1 = page_tables.ttbr0;
     }
 
     // Enable MMU and jump to kernel
@@ -310,15 +332,31 @@ fn efi_main() -> Status {
     }
 }
 
+/// Maximum DTB size for parsing
+const DTB_MAX_SIZE: usize = 2 * 1024 * 1024; // 2MB max
+
+/// Create DTB slice from physical address
+///
+/// # Safety
+/// DTB address must come from UEFI config table and be valid
+unsafe fn dtb_slice_from_phys(dtb_phys: u64) -> &'static [u8] {
+    // SAFETY: DTB address comes from UEFI config table and is valid.
+    // UEFI identity maps all physical memory.
+    unsafe { core::slice::from_raw_parts(dtb_phys as *const u8, DTB_MAX_SIZE) }
+}
+
+/// Parse CPU count from Device Tree Blob
+fn parse_cpu_count_from_dtb(dtb_phys: u64) -> u32 {
+    // SAFETY: DTB address comes from UEFI config table
+    let dtb_slice = unsafe { dtb_slice_from_phys(dtb_phys) };
+
+    m6_pal::dtb::parse_cpu_count_from_slice(dtb_slice).unwrap_or(1)
+}
+
 /// Parse MMIO addresses from Device Tree Blob
 fn parse_mmio_from_dtb(dtb_phys: u64) -> MmioConfig {
-    const DTB_MAX_SIZE: usize = 2 * 1024 * 1024; // 2MB max
-
-    // Create slice from DTB physical address (UEFI identity maps everything)
-    // SAFETY: DTB address comes from UEFI config table and is valid
-    let dtb_slice = unsafe {
-        core::slice::from_raw_parts(dtb_phys as *const u8, DTB_MAX_SIZE)
-    };
+    // SAFETY: DTB address comes from UEFI config table
+    let dtb_slice = unsafe { dtb_slice_from_phys(dtb_phys) };
 
     let (gic, uart) = m6_pal::dtb::parse_mmio_from_slice(dtb_slice)
         .expect("Failed to parse DTB or extract MMIO addresses");

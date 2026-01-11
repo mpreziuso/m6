@@ -25,9 +25,11 @@ use crate::cap::object_table::{self, KernelObjectType};
 use crate::cap::tcb_storage::TcbFull;
 use crate::task::TaskId;
 
+pub mod balance;
 pub mod dispatch;
 pub mod eevdf;
 pub mod idle;
+pub mod migrate;
 pub mod run_queue;
 pub mod sleep;
 pub mod timer_queue;
@@ -53,27 +55,50 @@ pub const VT_ONE: u128 = 1u128 << VT_FIXED_SHIFT;
 /// constant are considered equal.
 pub const VCLOCK_EPSILON: u128 = VT_ONE;
 
-// -- Reschedule Flag
+// -- Reschedule Flags (per-CPU)
 
-/// Flag indicating a reschedule is needed (set by timer interrupt).
-static NEEDS_RESCHEDULE: AtomicBool = AtomicBool::new(false);
+/// Per-CPU flags indicating a reschedule is needed.
+/// Each CPU has its own flag to avoid cross-CPU contention.
+static NEEDS_RESCHEDULE: [AtomicBool; MAX_CPUS] = [
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+    AtomicBool::new(false),
+];
 
-/// Request a reschedule on next opportunity (called from timer interrupt).
+/// Request a reschedule on the current CPU (called from timer interrupt).
 #[inline]
 pub fn request_reschedule() {
-    NEEDS_RESCHEDULE.store(true, AtomicOrdering::Release);
+    let cpu = current_cpu_id();
+    NEEDS_RESCHEDULE[cpu].store(true, AtomicOrdering::Release);
 }
 
-/// Check and clear the reschedule flag (called from IRQ handler).
+/// Request a reschedule on a specific CPU (for IPI use).
+///
+/// This is called when inserting a task on a remote CPU to wake it.
+#[inline]
+pub fn request_reschedule_on(cpu: usize) {
+    if cpu < MAX_CPUS {
+        NEEDS_RESCHEDULE[cpu].store(true, AtomicOrdering::Release);
+    }
+}
+
+/// Check and clear the reschedule flag for the current CPU (called from IRQ handler).
 #[inline]
 pub fn should_reschedule() -> bool {
-    NEEDS_RESCHEDULE.swap(false, AtomicOrdering::AcqRel)
+    let cpu = current_cpu_id();
+    NEEDS_RESCHEDULE[cpu].swap(false, AtomicOrdering::AcqRel)
 }
 
-/// Check if a reschedule is pending without clearing.
+/// Check if a reschedule is pending on the current CPU without clearing.
 #[inline]
 pub fn reschedule_pending() -> bool {
-    NEEDS_RESCHEDULE.load(AtomicOrdering::Acquire)
+    let cpu = current_cpu_id();
+    NEEDS_RESCHEDULE[cpu].load(AtomicOrdering::Acquire)
 }
 
 // -- Per-CPU Scheduler State
@@ -197,31 +222,86 @@ pub fn current_task() -> Option<ObjectRef> {
     sched_state[cpu_id].lock().current()
 }
 
-/// Insert a task into the run queue.
+/// Insert a task into the run queue, respecting CPU affinity.
+///
+/// If the task has a CPU affinity set (affinity >= 0), it will be inserted
+/// into that CPU's run queue. Otherwise, it goes to the current CPU.
 pub fn insert_task(tcb_ref: ObjectRef) {
-    let cpu_id = current_cpu_id();
+    // Get task's CPU affinity
+    let affinity = run_queue::with_tcb(tcb_ref, |tcb| tcb.tcb.affinity).unwrap_or(-1);
+
+    let target_cpu = if affinity < 0 {
+        // No affinity - use current CPU
+        current_cpu_id()
+    } else {
+        // Pinned to specific CPU
+        (affinity as usize).min(MAX_CPUS - 1)
+    };
+
+    insert_task_on_cpu(target_cpu, tcb_ref);
+}
+
+/// Insert a task into a specific CPU's run queue.
+///
+/// If the target CPU is not the current CPU, sends an IPI to wake it.
+pub fn insert_task_on_cpu(cpu: usize, tcb_ref: ObjectRef) {
+    if cpu >= MAX_CPUS {
+        log::error!("Invalid CPU {} for task insertion", cpu);
+        return;
+    }
+
     let sched_state = get_sched_state();
-    let mut sched = sched_state[cpu_id].lock();
+    let mut sched = sched_state[cpu].lock();
 
     // Add to run queue using EEVDF algorithm
     eevdf::add_to_run_queue(&mut sched, tcb_ref);
+
+    // If inserting to a different CPU, send IPI to wake it
+    let current = current_cpu_id();
+    if cpu != current {
+        drop(sched); // Release lock before IPI
+        request_reschedule_on(cpu);
+        m6_pal::gic::send_ipi(cpu, m6_pal::gic::IpiType::Reschedule);
+    }
 }
 
 /// Remove a task from the run queue.
+///
+/// Searches all CPU run queues to find and remove the task.
 pub fn remove_task(tcb_ref: ObjectRef) {
-    let cpu_id = current_cpu_id();
     let sched_state = get_sched_state();
-    let mut sched = sched_state[cpu_id].lock();
 
-    // Check if we're removing the current task
-    let is_current = sched.current_thread == Some(tcb_ref);
+    // First try current CPU (most common case)
+    let current = current_cpu_id();
+    {
+        let mut sched = sched_state[current].lock();
+        if sched.run_queue().contains(tcb_ref) || sched.current_thread == Some(tcb_ref) {
+            let is_current = sched.current_thread == Some(tcb_ref);
+            eevdf::remove_from_run_queue(&mut sched, tcb_ref);
+            if is_current {
+                drop(sched);
+                request_reschedule();
+            }
+            return;
+        }
+    }
 
-    eevdf::remove_from_run_queue(&mut sched, tcb_ref);
-
-    // If we removed the current task, we need to reschedule
-    if is_current {
-        drop(sched);
-        request_reschedule();
+    // Task not on current CPU - search other CPUs
+    for cpu in 0..MAX_CPUS {
+        if cpu == current {
+            continue;
+        }
+        let mut sched = sched_state[cpu].lock();
+        if sched.run_queue().contains(tcb_ref) || sched.current_thread == Some(tcb_ref) {
+            let is_current = sched.current_thread == Some(tcb_ref);
+            eevdf::remove_from_run_queue(&mut sched, tcb_ref);
+            if is_current {
+                drop(sched);
+                request_reschedule_on(cpu);
+                m6_pal::gic::send_ipi(cpu, m6_pal::gic::IpiType::Reschedule);
+            }
+            return;
+        }
     }
 }
 

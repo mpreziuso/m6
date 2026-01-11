@@ -16,6 +16,7 @@ pub mod console;
 pub mod boot_uart;
 pub mod timer;
 pub mod gic;
+pub mod psci;
 
 pub use platform::{Platform, PlatformInfo, current_platform};
 pub use dtb::get_parsed_dtb;

@@ -58,6 +58,11 @@ pub trait Platform: Send + Sync {
     fn has_iommu(&self) -> bool {
         false
     }
+
+    /// Get the number of CPUs detected (None if unknown).
+    fn cpu_count(&self) -> Option<u32> {
+        None
+    }
 }
 
 pub struct PlatformInfo {

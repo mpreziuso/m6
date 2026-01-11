@@ -105,6 +105,9 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
     }
     log::info!("GIC initialised");
 
+    // Register IPI handler for SMP
+    gic::register_ipi_handler(ipi_handler);
+
     // Initialise SMMU if present
     if let Some(smmu_config) = platform::platform().smmu_config() {
         log::info!(
@@ -128,6 +131,15 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
         }
     } else {
         log::info!("No SMMU detected");
+    }
+
+    // Start secondary CPUs
+    let cpu_count = boot_info.cpu_count() as usize;
+    if cpu_count > 1 {
+        log::info!("Starting {} secondary CPUs...", cpu_count - 1);
+        m6_kernel::smp::start_secondary_cpus(boot_info);
+    } else {
+        log::info!("Single CPU system");
     }
 
     // Set up timer IRQ
@@ -246,8 +258,23 @@ fn timer_irq_handler(_intid: u32) {
     // Charge CPU time to current thread
     m6_kernel::sched::charge_current_thread();
 
+    // Periodic load balancing (only on CPU 0)
+    if m6_arch::cpu::cpu_id() == 0 {
+        // Get CPU count from platform (cached after init)
+        let cpu_count = platform::platform().cpu_count().unwrap_or(1) as usize;
+        m6_kernel::sched::balance::periodic_balance(cpu_count);
+    }
+
     // Check if preemption is needed and request reschedule
     if m6_kernel::sched::should_preempt() {
         m6_kernel::sched::request_reschedule();
     }
+}
+
+/// IPI (Inter-Processor Interrupt) handler
+fn ipi_handler(_intid: u32) {
+    // IPIs are used to request rescheduling on remote CPUs
+    // The reschedule flag has already been set by the sender via request_reschedule_on()
+    // The actual rescheduling happens in irq_handler after all interrupts are processed
+    log::trace!("IPI received on CPU {}", m6_arch::cpu::cpu_id());
 }

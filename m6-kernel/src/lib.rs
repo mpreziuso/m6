@@ -35,6 +35,7 @@ pub mod irq;
 pub mod logging;
 pub mod memory;
 pub mod sched;
+pub mod smp;
 pub mod smmu;
 pub mod syscall;
 pub mod task;

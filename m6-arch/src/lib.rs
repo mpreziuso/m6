@@ -34,6 +34,7 @@ pub mod exceptions;
 pub mod mmu;
 pub mod registers;
 pub mod smmu;
+pub mod smp;
 pub mod sync;
 
 pub use cpu::{halt, wait_for_interrupt};
