@@ -183,6 +183,11 @@ pub fn spawn_driver(
     } else {
         None
     };
+    let smmu_control_slot = if config.manifest.needs_iommu {
+        Some(registry.alloc_slot())
+    } else {
+        None
+    };
 
     // Create VSpace (page table root)
     retype(
@@ -302,6 +307,7 @@ pub fn spawn_driver(
         irq_handler_slot,             // optional irq handler slot
         irq_notif_slot,               // optional notification for IRQ delivery
         iospace_slot,                 // optional iospace slot
+        smmu_control_slot,            // optional smmu control slot
         config.console_ep_slot,       // optional console endpoint slot
     )?;
 
@@ -608,6 +614,7 @@ fn install_driver_caps(
     irq_handler_slot: Option<u64>,
     irq_notif_slot: Option<u64>,
     iospace_slot: Option<u64>,
+    smmu_control_slot: Option<u64>,
     console_ep_slot: Option<u64>,
 ) -> Result<(), SpawnError> {
     // Slot 0: CSpace self-reference
@@ -645,6 +652,13 @@ fn install_driver_caps(
     // Slot 13: IOSpace (if present)
     if let Some(io_slot) = iospace_slot {
         cap_copy(child_cspace_cptr, slots::driver::IOSPACE, 0, src_cnode_cptr, io_slot, 0)
+            .map_err(SpawnError::CapCopyFailed)?;
+    }
+
+    // Slot 15: SmmuControl (if present, for DMA-capable drivers)
+    if smmu_control_slot.is_some() {
+        // Copy from device manager's SMMU_CONTROL slot
+        cap_copy(child_cspace_cptr, slots::driver::SMMU_CONTROL, 0, src_cnode_cptr, slots::SMMU_CONTROL, 0)
             .map_err(SpawnError::CapCopyFailed)?;
     }
 

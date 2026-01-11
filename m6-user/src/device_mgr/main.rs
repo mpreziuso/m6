@@ -115,9 +115,54 @@ pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
         }
     }
 
+    // Spawn platform drivers proactively
+    spawn_platform_drivers(&mut registry);
+
     // Enter main service loop
     io::puts("[device-mgr] Entering service loop\n");
     service_loop(&mut registry);
+}
+
+/// Spawn platform drivers proactively during boot.
+///
+/// Platform drivers (UART, SMMU, etc.) should be spawned immediately during
+/// enumeration rather than waiting for ENSURE requests. This ensures critical
+/// system services are available early.
+fn spawn_platform_drivers(registry: &mut Registry) {
+    let initrd = match get_initrd() {
+        Some(data) => data,
+        None => return,
+    };
+
+    let archive = match tar_no_std::TarArchiveRef::new(initrd) {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+
+    // Iterate through devices and spawn platform drivers
+    for i in 0..registry.device_count {
+        if registry.devices[i].state != DeviceState::Unbound {
+            continue;
+        }
+
+        let compat = registry.devices[i].compatible_str();
+
+        // Check if this device has a platform driver
+        if let Some(manifest) = manifest::find_driver(compat) {
+            if !manifest.is_platform {
+                continue; // Skip non-platform drivers
+            }
+
+            // Check if binary exists in initrd
+            let has_binary = archive.entries()
+                .any(|e| e.filename().as_str() == Ok(manifest.binary_name));
+
+            if has_binary {
+                // Spawn the platform driver
+                let _ = spawn_driver_for_device(registry, i);
+            }
+        }
+    }
 }
 
 /// Initialise DTB parsing and enumerate devices.
@@ -209,12 +254,18 @@ fn handle_ensure(registry: &mut Registry, _badge: u64) -> u64 {
     // In a real implementation:
     // 1. Read device path from IPC buffer / shared memory
     // 2. Look up device in registry
-    // For now, we use a placeholder device path
+    // For now, we use a placeholder: first try unbound devices, then running UART
 
-    // Placeholder: try to find first unbound device
+    // Try to find first unbound device
     let device_idx = match find_first_unbound_device(registry) {
         Some(idx) => idx,
-        None => return ipc::response::ERR_DEVICE_NOT_FOUND,
+        None => {
+            // No unbound devices - try to find running UART driver
+            match find_running_uart(registry) {
+                Some(idx) => idx,
+                None => return ipc::response::ERR_DEVICE_NOT_FOUND,
+            }
+        }
     };
 
     let device = &registry.devices[device_idx];
@@ -268,6 +319,20 @@ fn find_first_unbound_device(registry: &Registry) -> Option<usize> {
                 if has_binary {
                     return Some(i);
                 }
+            }
+        }
+    }
+    None
+}
+
+/// Find running UART driver (for init's console request).
+fn find_running_uart(registry: &Registry) -> Option<usize> {
+    for i in 0..registry.device_count {
+        if registry.devices[i].state == DeviceState::Running {
+            let compat = registry.devices[i].compatible_str();
+            // Check if this is a UART device
+            if compat.contains("pl011") || compat.contains("uart") {
+                return Some(i);
             }
         }
     }

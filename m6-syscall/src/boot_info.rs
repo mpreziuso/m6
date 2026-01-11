@@ -13,7 +13,8 @@ pub const USER_BOOT_INFO_MAGIC: u64 = 0x00_54_4F_4F_42_55_36_4D;
 
 /// Version of the UserBootInfo structure.
 /// Version 2: Added DTB and initrd virtual addresses
-pub const USER_BOOT_INFO_VERSION: u32 = 2;
+/// Version 3: Added has_smmu field and SmmuControl capability slot
+pub const USER_BOOT_INFO_VERSION: u32 = 3;
 
 /// Virtual address where UserBootInfo is mapped.
 pub const USER_BOOT_INFO_ADDR: u64 = 0x0000_7FFF_E000_0000;
@@ -41,8 +42,10 @@ pub enum CapSlot {
     SchedControl = 5,
     /// ASID pool for spawning child processes.
     AsidPool = 6,
+    /// SMMU control capability (optional, only if SMMU present).
+    SmmuControl = 7,
     /// First untyped memory slot.
-    FirstUntyped = 7,
+    FirstUntyped = 8,
 }
 
 impl CapSlot {
@@ -110,6 +113,10 @@ pub struct UserBootInfo {
     pub platform_id: u32,
     /// Number of CPUs.
     pub cpu_count: u32,
+    /// Whether an SMMU is available (1) or not (0).
+    pub has_smmu: u8,
+    /// Padding for alignment.
+    _pad1: [u8; 3],
     /// Size of each untyped region in bits (log2), indexed by slot - FirstUntyped.
     pub untyped_size_bits: [u8; MAX_UNTYPED_REGIONS],
     /// Whether each untyped is device memory (1) or normal RAM (0).
@@ -187,6 +194,12 @@ impl UserBootInfo {
     #[inline]
     pub const fn has_initrd(&self) -> bool {
         self.initrd_vaddr != 0 && self.initrd_size != 0
+    }
+
+    /// Check if SMMU is available.
+    #[inline]
+    pub const fn smmu_available(&self) -> bool {
+        self.has_smmu != 0
     }
 
     /// Get DTB as a byte slice (requires valid pointer).

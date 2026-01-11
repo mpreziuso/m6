@@ -54,8 +54,10 @@ pub mod slots {
     pub const SCHED_CONTROL: usize = 5;
     /// ASID pool for spawning child processes.
     pub const ASID_POOL: usize = 6;
+    /// SMMU control capability (optional, only if SMMU present).
+    pub const SMMU_CONTROL: usize = 7;
     /// First untyped memory slot.
-    pub const FIRST_UNTYPED: usize = 7;
+    pub const FIRST_UNTYPED: usize = 8;
 }
 
 /// Bootstrap error type.
@@ -277,6 +279,39 @@ fn create_asid_pool() -> BootstrapResult<ObjectRef> {
     Ok(obj_ref)
 }
 
+/// Create the SMMU control object (if SMMU is available).
+fn create_smmu_control() -> BootstrapResult<Option<ObjectRef>> {
+    use alloc::boxed::Box;
+    use m6_cap::objects::SmmuControlObject;
+
+    // Check if SMMU is available
+    let smmu_info = match crate::smmu::get_smmu_info() {
+        Some(info) => info,
+        None => return Ok(None), // No SMMU, return None
+    };
+
+    // Allocate object table entry
+    let obj_ref = object_table::alloc(KernelObjectType::SmmuControl)
+        .ok_or(BootstrapError::NoObjectSlots)?;
+
+    // Create SMMU control object
+    let mut ctrl = Box::new(SmmuControlObject::new(
+        smmu_info.base_phys,
+        smmu_info.base_virt,
+        smmu_info.index,
+        smmu_info.max_streams,
+    ));
+    ctrl.set_ready(); // Mark as ready since init() already succeeded
+    let ctrl_ptr = Box::into_raw(ctrl);
+
+    // Store pointer in object table
+    object_table::with_object_mut(obj_ref, |obj| {
+        obj.data.smmu_control_ptr = ctrl_ptr;
+    });
+
+    Ok(Some(obj_ref))
+}
+
 /// Install a capability in a CNode slot.
 fn install_cap(
     cnode: &mut CNodeStorage,
@@ -347,11 +382,16 @@ fn get_device_regions() -> &'static [DeviceRegion] {
 
     if platform_name.contains("virt") || platform_name.contains("QEMU") {
         // QEMU virt machine device regions
-        static QEMU_VIRT_DEVICES: [DeviceRegion; 1] = [
+        static QEMU_VIRT_DEVICES: [DeviceRegion; 2] = [
             DeviceRegion {
                 phys_base: 0x0900_0000,
                 size_bits: 12, // 4KB - PL011 UART
                 name: "pl011-uart",
+            },
+            DeviceRegion {
+                phys_base: 0x0905_0000,
+                size_bits: 16, // 64KB - ARM SMMUv3
+                name: "smmu-v3",
             },
         ];
         &QEMU_VIRT_DEVICES
@@ -419,6 +459,12 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
     let sched_control_ref = create_sched_control()?;
     let asid_pool_ref = create_asid_pool()?;
     log::debug!("Created ASID pool for init: {:?}", asid_pool_ref);
+
+    // Create SMMU control if SMMU is available
+    let smmu_control_ref = create_smmu_control()?;
+    if let Some(ref_val) = smmu_control_ref {
+        log::debug!("Created SMMU control: {:?}", ref_val);
+    }
 
     // 5. Set up user VSpace with ELF, stack, DTB, and initrd
     let vspace_result = vspace_setup::setup_root_vspace(
@@ -490,6 +536,14 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
 
         install_cap(cnode, slots::ASID_POOL, asid_pool_ref, ObjectType::ASIDPool, CapRights::ALL);
         cap_count += 1;
+
+        // Install SMMU control if available
+        if let Some(smmu_ref) = smmu_control_ref {
+            install_cap(cnode, slots::SMMU_CONTROL, smmu_ref, ObjectType::SmmuControl, CapRights::ALL);
+            cap_count += 1;
+            log::debug!("Installed SMMU control capability");
+        }
+
         log::debug!("Installed {} control capabilities", cap_count);
 
         // Create untyped capability (using table-aware version to avoid deadlock)
@@ -596,6 +650,9 @@ fn create_user_boot_info(_boot_info: &BootInfo) -> BootstrapResult<PhysAddr> {
         0 // Unknown
     };
     info.cpu_count = 1; // Single CPU for now
+
+    // SMMU availability
+    info.has_smmu = if crate::smmu::is_available() { 1 } else { 0 };
 
     // Untyped regions - zeroed by default, TODO: populate with actual regions
 

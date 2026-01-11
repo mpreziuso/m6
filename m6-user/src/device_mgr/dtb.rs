@@ -24,6 +24,8 @@ const INTERESTING_COMPATIBLES: &[&str] = &[
     // RK3588 specific
     "rockchip,rk3588-dwc3", // RK3588 USB
     "rockchip,rk3588-pcie", // RK3588 PCIe
+    // IOMMU
+    "arm,smmu-v3",     // ARM SMMUv3
 ];
 
 /// Enumerate devices from the FDT and populate the registry.

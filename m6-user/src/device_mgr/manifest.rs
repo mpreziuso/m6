@@ -23,6 +23,14 @@ pub struct DriverManifest {
 /// Order matters - first match wins. More specific compatible strings
 /// should come before generic ones.
 pub static DRIVER_MANIFEST: &[DriverManifest] = &[
+    // -- IOMMU drivers (high priority - must be running before DMA devices)
+    DriverManifest {
+        compatible: "arm,smmu-v3",
+        binary_name: "drv-smmu",
+        needs_irq: true,  // Event queue interrupt
+        needs_iommu: false, // SMMU doesn't use itself
+        is_platform: true,
+    },
     // -- Serial drivers
     DriverManifest {
         compatible: "arm,pl011",

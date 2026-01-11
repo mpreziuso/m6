@@ -72,6 +72,8 @@ struct QueueState {
 pub struct SmmuInstance {
     /// Base virtual address of SMMU registers.
     base: NonNull<u8>,
+    /// Physical base address of SMMU registers.
+    base_phys: u64,
     /// Physical address of stream table.
     #[expect(dead_code)]
     strtab_phys: u64,
@@ -265,8 +267,6 @@ impl SmmuInstance {
                 stream_id, address
             );
         }
-
-        // TODO: Deliver fault to registered notification via driver manager
     }
 }
 
@@ -294,7 +294,7 @@ pub enum SmmuError {
 /// - Must be called once during kernel init
 /// - `smmu_phys` must be the physical base address of the SMMU
 /// - `smmu_virt` must be a valid kernel-mapped address for the SMMU registers
-pub unsafe fn init(_smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
+pub unsafe fn init(smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
     let base = NonNull::new(smmu_virt as *mut u8).ok_or(SmmuError::NotAvailable)?;
 
     // Read identification registers
@@ -339,6 +339,7 @@ pub unsafe fn init(_smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
 
     let mut instance = SmmuInstance {
         base,
+        base_phys: smmu_phys,
         strtab_phys,
         strtab_virt,
         strtab_log2size,
@@ -443,6 +444,37 @@ pub unsafe fn init(_smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
 #[inline]
 pub fn is_available() -> bool {
     SMMU_AVAILABLE.load(Ordering::Acquire)
+}
+
+/// Information about an initialized SMMU for capability creation.
+pub struct SmmuInfo {
+    /// Physical base address of SMMU registers.
+    pub base_phys: u64,
+    /// Virtual base address of SMMU registers (kernel-mapped).
+    pub base_virt: u64,
+    /// Maximum number of stream IDs supported.
+    pub max_streams: u32,
+    /// SMMU instance index (0 for first SMMU).
+    pub index: u8,
+}
+
+/// Get information about the first SMMU instance.
+///
+/// Returns None if no SMMU is initialized.
+pub fn get_smmu_info() -> Option<SmmuInfo> {
+    if !is_available() {
+        return None;
+    }
+
+    SMMU_INSTANCES.get().and_then(|instances_lock| {
+        let instances = instances_lock.lock();
+        instances.instances[0].as_ref().map(|inst| SmmuInfo {
+            base_phys: inst.base_phys,
+            base_virt: inst.base.as_ptr() as u64,
+            max_streams: 1 << inst.strtab_log2size,
+            index: inst.index,
+        })
+    })
 }
 
 /// Access SMMU with a closure.

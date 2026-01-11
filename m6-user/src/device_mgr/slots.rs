@@ -31,6 +31,8 @@ pub const RAM_UNTYPED: u64 = 15;
 pub const ASID_POOL: u64 = 16;
 /// Notification bound to this TCB for driver fault delivery
 pub const FAULT_NOTIF: u64 = 17;
+/// SMMU control capability (optional, only if SMMU present)
+pub const SMMU_CONTROL: u64 = 18;
 
 /// First device untyped slot
 /// Device untyped capabilities are placed starting here
@@ -64,6 +66,8 @@ pub mod driver {
     pub const IOSPACE: u64 = 13;
     /// Notification for signalling from device-mgr
     pub const NOTIF: u64 = 14;
+    /// SMMU control capability (if needed, for DMA-capable drivers)
+    pub const SMMU_CONTROL: u64 = 15;
 
     /// Console endpoint for IPC-based output (optional)
     /// If present, drivers can use io::init_console() with this slot

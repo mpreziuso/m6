@@ -169,6 +169,7 @@ name = "m6-user"
 version = "0.1.0"
 dependencies = [
  "fdt",
+ "m6-arch",
  "m6-cap",
  "m6-common",
  "m6-syscall",

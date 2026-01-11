@@ -14,7 +14,7 @@ user:
 initrd: user
 	@mkdir -p target/initrd
 	cd target/aarch64-unknown-none/release && \
-		tar --format=ustar -cf ../../../target/initrd/INITRD init device-mgr drv-uart-pl011
+		tar --format=ustar -cf ../../../target/initrd/INITRD init device-mgr drv-uart-pl011 drv-smmu
 	@echo "Created initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
 	@echo "Contents:"
 	@tar -tvf target/initrd/INITRD

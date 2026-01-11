@@ -52,7 +52,8 @@ pub mod slots {
     pub const ASID_CONTROL: u64 = 4;
     pub const SCHED_CONTROL: u64 = 5;
     pub const ASID_POOL: u64 = 6;
-    pub const FIRST_UNTYPED: u64 = 7;
+    pub const SMMU_CONTROL: u64 = 7;
+    pub const FIRST_UNTYPED: u64 = 8;
 }
 
 /// Page size constant (4KB)

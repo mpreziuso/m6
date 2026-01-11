@@ -2,6 +2,9 @@
 //!
 //! Based on ARM System Memory Management Unit Architecture Specification
 //! SMMU v3.0 to v3.3 (ARM IHI 0070).
+//!
+//! Note: Event queue structures are re-exported from m6-arch for sharing
+//! with the userspace SMMU monitoring driver.
 
 // -- Register Offsets
 
@@ -25,12 +28,8 @@ pub const SMMU_CMDQ_BASE: usize = 0x090;
 pub const SMMU_CMDQ_PROD: usize = 0x098;
 /// Command Queue Consumer Index
 pub const SMMU_CMDQ_CONS: usize = 0x09C;
-/// Event Queue Base
-pub const SMMU_EVENTQ_BASE: usize = 0x0A0;
-/// Event Queue Producer Index
-pub const SMMU_EVENTQ_PROD: usize = 0x100A8;
-/// Event Queue Consumer Index
-pub const SMMU_EVENTQ_CONS: usize = 0x100AC;
+// Re-export event queue register offsets from m6-arch (shared with userspace)
+pub use m6_arch::smmu::{SMMU_EVENTQ_BASE, SMMU_EVENTQ_CONS, SMMU_EVENTQ_PROD};
 
 // -- CR0 Register Bits
 
@@ -211,46 +210,6 @@ impl CommandEntry {
     }
 }
 
-// -- Event Queue Entry
+// -- Event Queue Entry (re-exported from m6-arch for sharing with userspace)
 
-/// Event Queue Entry - 32 bytes
-#[repr(C, align(32))]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct EventEntry {
-    pub dwords: [u64; 4],
-}
-
-impl EventEntry {
-    /// Size of an event entry in bytes.
-    pub const SIZE: usize = 32;
-
-    /// Get the event type/fault code.
-    #[inline]
-    pub fn event_type(&self) -> u8 {
-        (self.dwords[0] & 0xFF) as u8
-    }
-
-    /// Get the stream ID that caused the event.
-    #[inline]
-    pub fn stream_id(&self) -> u32 {
-        ((self.dwords[0] >> 32) & 0xFFFF_FFFF) as u32
-    }
-
-    /// Get the faulting address (if applicable).
-    #[inline]
-    pub fn address(&self) -> u64 {
-        self.dwords[2]
-    }
-
-    /// Check if this is a translation fault (page not present).
-    #[inline]
-    pub fn is_translation_fault(&self) -> bool {
-        matches!(self.event_type(), 0x10..=0x1F)
-    }
-
-    /// Check if this is a permission fault (access denied).
-    #[inline]
-    pub fn is_permission_fault(&self) -> bool {
-        matches!(self.event_type(), 0x08..=0x0F)
-    }
-}
+pub use m6_arch::smmu::EventEntry;
