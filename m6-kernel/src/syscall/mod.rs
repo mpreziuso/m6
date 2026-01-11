@@ -23,6 +23,7 @@ pub mod irq_ops;
 pub mod mem_ops;
 pub mod numbers;
 pub mod tcb_ops;
+pub mod timer_ops;
 
 use m6_arch::cpu::cpu_id;
 use m6_arch::exceptions::ExceptionContext;
@@ -181,6 +182,13 @@ fn dispatch_syscall(
         Syscall::IrqSetHandler => irq_ops::handle_irq_set_handler(args),
         Syscall::IrqClearHandler => irq_ops::handle_irq_clear_handler(args),
         Syscall::IrqControlGet => irq_ops::handle_irq_control_get(args),
+
+        // Timer operations
+        Syscall::TimerControlGet => timer_ops::handle_timer_control_get(args),
+        Syscall::TimerBind => timer_ops::handle_timer_bind(args),
+        Syscall::TimerArm => timer_ops::handle_timer_arm(args),
+        Syscall::TimerCancel => timer_ops::handle_timer_cancel(args),
+        Syscall::TimerClear => timer_ops::handle_timer_clear(args),
 
         // IOMMU operations
         Syscall::IOSpaceCreate => iommu_ops::handle_iospace_create(args),

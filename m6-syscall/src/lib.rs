@@ -26,11 +26,12 @@ pub mod numbers;
 
 // Re-export commonly used items
 pub use boot_info::{
-    CapSlot, UserBootInfo, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION,
+    UserBootInfo, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION,
 };
 pub use cptr::{slot_to_cptr, cptr_to_slot, CptrContext};
 pub use error::SyscallError;
 pub use ipc_buffer::{IpcBuffer, MintArgs, IPC_BUFFER_ADDR, IPC_BUFFER_SIZE};
+pub use m6_cap::root_slots;
 pub use numbers::Syscall;
 #[cfg(feature = "userspace")]
 pub use invoke::IpcRecvResult;

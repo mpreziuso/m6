@@ -8,6 +8,8 @@
 //! - Platform information
 //! - Memory statistics
 
+use m6_cap::root_slots;
+
 /// Magic number for validation: "M6UBOOT\0" as little-endian u64.
 pub const USER_BOOT_INFO_MAGIC: u64 = 0x00_54_4F_4F_42_55_36_4D;
 
@@ -21,40 +23,6 @@ pub const USER_BOOT_INFO_ADDR: u64 = 0x0000_7FFF_E000_0000;
 
 /// Maximum number of untyped memory regions.
 pub const MAX_UNTYPED_REGIONS: usize = 64;
-
-/// Well-known capability slot indices in root task's CSpace.
-///
-/// These match the slots defined in `m6-kernel/src/cap/bootstrap.rs::slots`.
-#[repr(usize)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CapSlot {
-    /// Root CNode (self-reference).
-    RootCNode = 0,
-    /// Root TCB.
-    RootTcb = 1,
-    /// Root VSpace.
-    RootVSpace = 2,
-    /// IRQ control capability.
-    IrqControl = 3,
-    /// ASID control capability.
-    AsidControl = 4,
-    /// Scheduling control capability.
-    SchedControl = 5,
-    /// ASID pool for spawning child processes.
-    AsidPool = 6,
-    /// SMMU control capability (optional, only if SMMU present).
-    SmmuControl = 7,
-    /// First untyped memory slot.
-    FirstUntyped = 8,
-}
-
-impl CapSlot {
-    /// Get the slot index for a given untyped region index.
-    #[inline]
-    pub const fn untyped(idx: usize) -> usize {
-        Self::FirstUntyped as usize + idx
-    }
-}
 
 /// Platform identifiers.
 #[repr(u32)]
@@ -155,7 +123,7 @@ impl UserBootInfo {
     /// Get the slot index for a given untyped index.
     #[inline]
     pub const fn untyped_slot(&self, idx: usize) -> usize {
-        CapSlot::untyped(idx)
+        root_slots::Slot::untyped(idx)
     }
 
     /// Get the size in bytes of an untyped region.

@@ -43,19 +43,6 @@ impl From<ElfError> for SpawnError {
     }
 }
 
-/// Well-known capability slot indices
-pub mod slots {
-    pub const ROOT_CNODE: u64 = 0;
-    pub const ROOT_TCB: u64 = 1;
-    pub const ROOT_VSPACE: u64 = 2;
-    pub const IRQ_CONTROL: u64 = 3;
-    pub const ASID_CONTROL: u64 = 4;
-    pub const SCHED_CONTROL: u64 = 5;
-    pub const ASID_POOL: u64 = 6;
-    pub const SMMU_CONTROL: u64 = 7;
-    pub const FIRST_UNTYPED: u64 = 8;
-}
-
 /// Page size constant (4KB)
 pub const PAGE_SIZE: usize = 4096;
 

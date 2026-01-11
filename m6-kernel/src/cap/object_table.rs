@@ -22,7 +22,7 @@ use m6_cap::{
     objects::{
         AsidPoolObject, DmaPoolObject, EndpointObject, FrameObject, IOSpaceObject,
         IrqControlObject, IrqHandlerObject, NotificationObject, PageTableObject, ReplyObject,
-        SmmuControlObject, UntypedObject, VSpaceObject,
+        SmmuControlObject, TimerControlObject, TimerObject, UntypedObject, VSpaceObject,
     },
 };
 use spin::Once;
@@ -78,6 +78,10 @@ pub enum KernelObjectType {
     DmaPool = 18,
     /// SMMU control (singleton per SMMU).
     SmmuControl = 19,
+    /// Timer object.
+    Timer = 20,
+    /// Timer control (singleton).
+    TimerControl = 21,
 }
 
 /// Union of all kernel object data.
@@ -120,6 +124,10 @@ pub union KernelObjectData {
     pub page_table: ManuallyDrop<PageTableObject>,
     /// ASID pool pointer (heap-allocated due to large arrays).
     pub asid_pool_ptr: *mut AsidPoolObject,
+    /// Timer metadata.
+    pub timer: ManuallyDrop<TimerObject>,
+    /// Timer control metadata.
+    pub timer_control: ManuallyDrop<TimerControlObject>,
 }
 
 // SAFETY: Pointers are only accessed with object table lock held.
@@ -249,6 +257,16 @@ impl ObjectTable {
         let obj = &mut self.objects[index as usize];
         if obj.is_free() {
             return; // Already free
+        }
+
+        // Cleanup timer from timer queue if armed
+        if obj.obj_type == KernelObjectType::Timer {
+            // SAFETY: We verified the object type, so timer is the active variant.
+            let timer = unsafe { &obj.data.timer };
+            if timer.is_armed() {
+                // Unregister from timer queue
+                crate::sched::timer_queue::unregister_timer(obj_ref);
+            }
         }
 
         // Add to free list
@@ -633,6 +651,42 @@ where
             "with_irq_control_mut: table.get returned None for {:?}",
             control_ref
         );
+    }
+    None
+}
+
+/// Access a timer with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the timer.
+/// Does nothing if the object is not a valid timer.
+pub fn with_timer_mut<F, R>(timer_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut TimerObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(timer_ref)
+        && obj.obj_type == KernelObjectType::Timer
+    {
+        // SAFETY: We verified the object type, so timer is the active variant.
+        return Some(f(unsafe { &mut obj.data.timer }));
+    }
+    None
+}
+
+/// Access a timer control with a closure (mutable).
+///
+/// Executes the closure with a mutable reference to the timer control.
+/// Does nothing if the object is not a valid timer control.
+pub fn with_timer_control_mut<F, R>(control_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut TimerControlObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(control_ref)
+        && obj.obj_type == KernelObjectType::TimerControl
+    {
+        // SAFETY: We verified the object type, so timer_control is the active variant.
+        return Some(f(unsafe { &mut obj.data.timer_control }));
     }
     None
 }

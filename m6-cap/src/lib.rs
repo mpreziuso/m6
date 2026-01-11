@@ -105,6 +105,7 @@ mod error;
 pub mod objects;
 pub mod ops;
 mod rights;
+pub mod root_slots;
 mod slot;
 
 // Re-exports for convenient access

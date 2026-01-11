@@ -22,7 +22,8 @@ use core::mem::ManuallyDrop;
 
 use m6_cap::{
     Badge, CapRights, CapSlot, CNodeGuard, CNodeOps, ObjectRef, ObjectType, SlotFlags,
-    objects::{Asid, AsidPoolObject, IrqControlObject, UntypedObject, VSpaceObject},
+    objects::{Asid, AsidPoolObject, IrqControlObject, TimerControlObject, UntypedObject, VSpaceObject},
+    root_slots::Slot as BootSlot,
 };
 use m6_common::PhysAddr;
 use m6_common::boot::BootInfo;
@@ -37,28 +38,6 @@ use crate::memory::frame::{alloc_frame_zeroed, alloc_frames_zeroed};
 use crate::memory::translate::phys_to_virt;
 use crate::user::layout::USER_BOOT_INFO_ADDR;
 use crate::user::vspace_setup;
-
-/// Well-known slot indices in root task's CSpace.
-pub mod slots {
-    /// Root CNode (self-reference).
-    pub const ROOT_CNODE: usize = 0;
-    /// Root TCB.
-    pub const ROOT_TCB: usize = 1;
-    /// Root VSpace.
-    pub const ROOT_VSPACE: usize = 2;
-    /// IRQ control capability.
-    pub const IRQ_CONTROL: usize = 3;
-    /// ASID control capability.
-    pub const ASID_CONTROL: usize = 4;
-    /// Scheduling control capability.
-    pub const SCHED_CONTROL: usize = 5;
-    /// ASID pool for spawning child processes.
-    pub const ASID_POOL: usize = 6;
-    /// SMMU control capability (optional, only if SMMU present).
-    pub const SMMU_CONTROL: usize = 7;
-    /// First untyped memory slot.
-    pub const FIRST_UNTYPED: usize = 8;
-}
 
 /// Bootstrap error type.
 #[derive(Debug)]
@@ -119,6 +98,7 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
     let irq_control_ref = create_irq_control()?;
     let asid_control_ref = create_asid_control()?;
     let sched_control_ref = create_sched_control()?;
+    let timer_control_ref = create_timer_control()?;
 
     // 5. Populate root CNode with initial capabilities
     let mut cap_count = 0;
@@ -128,25 +108,28 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
         let cnode = unsafe { &mut *cnode_obj.data.cnode_ptr };
 
         // Self-reference to root CNode
-        install_cap(cnode, slots::ROOT_CNODE, cnode_ref, ObjectType::CNode, CapRights::ALL);
+        install_cap(cnode, BootSlot::RootCNode as usize, cnode_ref, ObjectType::CNode, CapRights::ALL);
         cap_count += 1;
 
         // Root TCB
-        install_cap(cnode, slots::ROOT_TCB, tcb_ref, ObjectType::TCB, CapRights::ALL);
+        install_cap(cnode, BootSlot::RootTcb as usize, tcb_ref, ObjectType::TCB, CapRights::ALL);
         cap_count += 1;
 
         // Root VSpace
-        install_cap(cnode, slots::ROOT_VSPACE, vspace_ref, ObjectType::VSpace, CapRights::ALL);
+        install_cap(cnode, BootSlot::RootVSpace as usize, vspace_ref, ObjectType::VSpace, CapRights::ALL);
         cap_count += 1;
 
         // Control capabilities
-        install_cap(cnode, slots::IRQ_CONTROL, irq_control_ref, ObjectType::IRQControl, CapRights::ALL);
+        install_cap(cnode, BootSlot::IrqControl as usize, irq_control_ref, ObjectType::IRQControl, CapRights::ALL);
         cap_count += 1;
 
-        install_cap(cnode, slots::ASID_CONTROL, asid_control_ref, ObjectType::ASIDControl, CapRights::ALL);
+        install_cap(cnode, BootSlot::AsidControl as usize, asid_control_ref, ObjectType::ASIDControl, CapRights::ALL);
         cap_count += 1;
 
-        install_cap(cnode, slots::SCHED_CONTROL, sched_control_ref, ObjectType::SchedControl, CapRights::ALL);
+        install_cap(cnode, BootSlot::SchedControl as usize, sched_control_ref, ObjectType::SchedControl, CapRights::ALL);
+        cap_count += 1;
+
+        install_cap(cnode, BootSlot::TimerControl as usize, timer_control_ref, ObjectType::TimerControl, CapRights::ALL);
         cap_count += 1;
 
         Ok(())
@@ -257,6 +240,20 @@ fn create_asid_control() -> BootstrapResult<ObjectRef> {
 fn create_sched_control() -> BootstrapResult<ObjectRef> {
     object_table::alloc(KernelObjectType::SchedControl)
         .ok_or(BootstrapError::NoObjectSlots)
+}
+
+/// Create the timer control object (singleton).
+fn create_timer_control() -> BootstrapResult<ObjectRef> {
+    // Allocate object table entry
+    let obj_ref = object_table::alloc(KernelObjectType::TimerControl)
+        .ok_or(BootstrapError::NoObjectSlots)?;
+
+    // Initialise TimerControlObject (stored inline)
+    object_table::with_object_mut(obj_ref, |obj| {
+        obj.data.timer_control = ManuallyDrop::new(TimerControlObject::new());
+    });
+
+    Ok(obj_ref)
 }
 
 /// Create an ASID pool for init to spawn child processes.
@@ -516,30 +513,30 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         // SAFETY: We just created this CNode.
         let cnode = unsafe { &mut *cnode_obj.data.cnode_ptr };
 
-        install_cap(cnode, slots::ROOT_CNODE, cnode_ref, ObjectType::CNode, CapRights::ALL);
+        install_cap(cnode, BootSlot::RootCNode as usize, cnode_ref, ObjectType::CNode, CapRights::ALL);
         cap_count += 1;
 
-        install_cap(cnode, slots::ROOT_TCB, tcb_ref, ObjectType::TCB, CapRights::ALL);
+        install_cap(cnode, BootSlot::RootTcb as usize, tcb_ref, ObjectType::TCB, CapRights::ALL);
         cap_count += 1;
 
-        install_cap(cnode, slots::ROOT_VSPACE, vspace_ref, ObjectType::VSpace, CapRights::ALL);
+        install_cap(cnode, BootSlot::RootVSpace as usize, vspace_ref, ObjectType::VSpace, CapRights::ALL);
         cap_count += 1;
 
-        install_cap(cnode, slots::IRQ_CONTROL, irq_control_ref, ObjectType::IRQControl, CapRights::ALL);
+        install_cap(cnode, BootSlot::IrqControl as usize, irq_control_ref, ObjectType::IRQControl, CapRights::ALL);
         cap_count += 1;
 
-        install_cap(cnode, slots::ASID_CONTROL, asid_control_ref, ObjectType::ASIDControl, CapRights::ALL);
+        install_cap(cnode, BootSlot::AsidControl as usize, asid_control_ref, ObjectType::ASIDControl, CapRights::ALL);
         cap_count += 1;
 
-        install_cap(cnode, slots::SCHED_CONTROL, sched_control_ref, ObjectType::SchedControl, CapRights::ALL);
+        install_cap(cnode, BootSlot::SchedControl as usize, sched_control_ref, ObjectType::SchedControl, CapRights::ALL);
         cap_count += 1;
 
-        install_cap(cnode, slots::ASID_POOL, asid_pool_ref, ObjectType::ASIDPool, CapRights::ALL);
+        install_cap(cnode, BootSlot::AsidPool as usize, asid_pool_ref, ObjectType::ASIDPool, CapRights::ALL);
         cap_count += 1;
 
         // Install SMMU control if available
         if let Some(smmu_ref) = smmu_control_ref {
-            install_cap(cnode, slots::SMMU_CONTROL, smmu_ref, ObjectType::SmmuControl, CapRights::ALL);
+            install_cap(cnode, BootSlot::SmmuControl as usize, smmu_ref, ObjectType::SmmuControl, CapRights::ALL);
             cap_count += 1;
             log::debug!("Installed SMMU control capability");
         }
@@ -547,11 +544,11 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         log::debug!("Installed {} control capabilities", cap_count);
 
         // Create untyped capability (using table-aware version to avoid deadlock)
-        log::debug!("Creating untyped capability at slot {}...", slots::FIRST_UNTYPED);
+        log::debug!("Creating untyped capability at slot {}...", BootSlot::FirstUntyped as usize);
         let untyped_ref = create_untyped_cap_with_table(
             table,
             cnode,
-            slots::FIRST_UNTYPED,
+            BootSlot::FirstUntyped as usize,
             PhysAddr::new(untyped_phys),
             UNTYPED_SIZE_BITS,
             false, // not device memory
@@ -564,7 +561,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         // For QEMU virt: PL011 UART at 0x0900_0000
         let device_regions = get_device_regions();
         for (i, region) in device_regions.iter().enumerate() {
-            let slot = slots::FIRST_UNTYPED + untyped_count as usize;
+            let slot = BootSlot::FirstUntyped as usize + untyped_count as usize;
             log::debug!(
                 "Creating device untyped at slot {} for {:#x} ({} bytes)",
                 slot,

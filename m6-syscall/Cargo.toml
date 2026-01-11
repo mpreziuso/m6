@@ -17,4 +17,4 @@ default = []
 userspace = []
 
 [dependencies]
-# No dependencies - must work in both kernel and userspace
+m6-cap = { path = "../m6-cap", default-features = false }

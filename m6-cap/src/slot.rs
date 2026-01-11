@@ -157,6 +157,12 @@ pub enum ObjectType {
     DmaPool = 21,
     /// SMMU control (singleton).
     SmmuControl = 22,
+
+    // Timer objects
+    /// Timer.
+    Timer = 23,
+    /// Timer control (singleton).
+    TimerControl = 24,
 }
 
 impl ObjectType {
@@ -187,6 +193,8 @@ impl ObjectType {
             Self::IOSpace => "IOSpace",
             Self::DmaPool => "DmaPool",
             Self::SmmuControl => "SmmuControl",
+            Self::Timer => "Timer",
+            Self::TimerControl => "TimerControl",
         }
     }
 

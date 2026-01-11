@@ -12,11 +12,12 @@ mod io;
 pub mod process;
 
 use core::panic::PanicInfo;
+use m6_cap::root_slots::Slot;
 use m6_syscall::{
     invoke::{sched_yield, ipc_set_recv_slots, ipc_get_recv_caps},
     IpcBuffer, UserBootInfo, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION,
 };
-use process::{slots, SpawnConfig, InitialCap};
+use process::{SpawnConfig, InitialCap};
 
 /// First free slot for dynamic allocation
 const FIRST_FREE_SLOT: u64 = 64;
@@ -238,7 +239,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
 
     for i in 0..boot_info.untyped_count as usize {
         if boot_info.untyped_is_device(i) && device_untyped_count < MAX_DEVICE_UNTYPED {
-            let slot = slots::FIRST_UNTYPED + i as u64;
+            let slot = Slot::FirstUntyped as u64 + i as u64;
             device_untyped_slots[device_untyped_count] = slot;
             device_untyped_phys[device_untyped_count] = boot_info.untyped_phys_base[i];
             device_untyped_size_bits[device_untyped_count] = boot_info.untyped_size_bits[i];
@@ -271,10 +272,10 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     io::newline();
 
     if let Err(e) = m6_syscall::invoke::retype(
-        cptr(slots::FIRST_UNTYPED),
+        cptr(Slot::FirstUntyped as u64),
         11, // ObjectType::Endpoint
         0,  // size_bits (not used for endpoints)
-        cptr(slots::ROOT_CNODE),
+        cptr(Slot::RootCNode as u64),
         registry_ep_slot,
         1,  // count - create one endpoint
     ) {
@@ -294,11 +295,11 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     // Standard caps
     initial_caps_storage[cap_idx] = InitialCap { src_slot: registry_ep_slot, dst_slot: 12 };
     cap_idx += 1;
-    initial_caps_storage[cap_idx] = InitialCap { src_slot: slots::IRQ_CONTROL, dst_slot: 14 };
+    initial_caps_storage[cap_idx] = InitialCap { src_slot: Slot::IrqControl as u64, dst_slot: 14 };
     cap_idx += 1;
-    initial_caps_storage[cap_idx] = InitialCap { src_slot: slots::FIRST_UNTYPED, dst_slot: 15 };
+    initial_caps_storage[cap_idx] = InitialCap { src_slot: Slot::FirstUntyped as u64, dst_slot: 15 };
     cap_idx += 1;
-    initial_caps_storage[cap_idx] = InitialCap { src_slot: slots::ASID_POOL, dst_slot: 16 };
+    initial_caps_storage[cap_idx] = InitialCap { src_slot: Slot::AsidPool as u64, dst_slot: 16 };
     cap_idx += 1;
 
     // Device untypeds at slots 20+
@@ -315,10 +316,10 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     // Configure spawn - don't resume yet, we need to map additional data
     let config = SpawnConfig {
         elf_data,
-        root_cnode: slots::ROOT_CNODE,
+        root_cnode: Slot::RootCNode as u64,
         cnode_radix: boot_info.cnode_radix as u8,
-        ram_untyped: slots::FIRST_UNTYPED,
-        asid_pool: slots::ASID_POOL,
+        ram_untyped: Slot::FirstUntyped as u64,
+        asid_pool: Slot::AsidPool as u64,
         next_free_slot: FIRST_FREE_SLOT + 1, // +1 for the endpoint we just created
         initial_caps,
         x0: DEVMGR_BOOT_INFO_ADDR, // Will point to boot info
@@ -342,10 +343,10 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     // Ensure page tables exist for our mapping regions
     // Boot info region (at 256MB)
     if process::ensure_child_page_tables(
-        slots::ROOT_CNODE,
+        Slot::RootCNode as u64,
         radix,
         result.vspace_slot,
-        slots::FIRST_UNTYPED,
+        Slot::FirstUntyped as u64,
         &mut next_slot,
         DEVMGR_BOOT_INFO_ADDR,
         DEVMGR_DTB_ADDR + boot_info.dtb_size,
@@ -357,10 +358,10 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     // Initrd region (at 512MB) - may need separate page tables
     if boot_info.has_initrd()
         && process::ensure_child_page_tables(
-            slots::ROOT_CNODE,
+            Slot::RootCNode as u64,
             radix,
             result.vspace_slot,
-            slots::FIRST_UNTYPED,
+            Slot::FirstUntyped as u64,
             &mut next_slot,
             DEVMGR_INITRD_ADDR,
             DEVMGR_INITRD_ADDR + boot_info.initrd_size,
@@ -393,10 +394,10 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         )
     };
     if process::map_data_to_child(
-        slots::ROOT_CNODE,
+        Slot::RootCNode as u64,
         radix,
         result.vspace_slot,
-        slots::FIRST_UNTYPED,
+        Slot::FirstUntyped as u64,
         &mut next_slot,
         DEVMGR_BOOT_INFO_ADDR,
         boot_info_bytes,
@@ -414,10 +415,10 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             )
         };
         if process::map_data_to_child(
-            slots::ROOT_CNODE,
+            Slot::RootCNode as u64,
             radix,
             result.vspace_slot,
-            slots::FIRST_UNTYPED,
+            Slot::FirstUntyped as u64,
             &mut next_slot,
             DEVMGR_DTB_ADDR,
             dtb_data,
@@ -436,10 +437,10 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             )
         };
         if process::map_data_to_child(
-            slots::ROOT_CNODE,
+            Slot::RootCNode as u64,
             radix,
             result.vspace_slot,
-            slots::FIRST_UNTYPED,
+            Slot::FirstUntyped as u64,
             &mut next_slot,
             DEVMGR_INITRD_ADDR,
             initrd_data,

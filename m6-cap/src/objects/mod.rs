@@ -50,6 +50,7 @@ pub mod page_table;
 pub mod sched;
 pub mod smmu;
 pub mod tcb;
+pub mod timer;
 pub mod untyped;
 pub mod vspace;
 
@@ -65,6 +66,7 @@ pub use page_table::{PageTableLevel, PageTableObject};
 pub use sched::{Microseconds, SchedContextObject, SchedControlObject};
 pub use smmu::{SmmuControlObject, StreamBinding, StreamId, MAX_INLINE_STREAMS, MAX_STREAM_ID};
 pub use tcb::{DEFAULT_PRIORITY, MAX_PRIORITY, Priority, TcbObject, ThreadState};
+pub use timer::{TimerControlObject, TimerObject, TimerState};
 pub use untyped::{RetypeParams, UntypedObject};
 pub use vspace::{Asid, VSpaceObject};
 
@@ -336,6 +338,32 @@ pub struct IRQControl;
 impl private::Sealed for IRQControl {}
 impl CapObjectType for IRQControl {
     const NAME: &'static str = "IRQControl";
+    const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
+}
+
+/// Timer capability.
+///
+/// Binds a time expiry to a notification object. When the timer expires,
+/// the notification is signalled with the configured badge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Timer;
+
+impl private::Sealed for Timer {}
+impl CapObjectType for Timer {
+    const NAME: &'static str = "Timer";
+    const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
+}
+
+/// Timer control capability.
+///
+/// Root authority to create timers. There is exactly one TimerControl
+/// capability in the system, given to the initial task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TimerControl;
+
+impl private::Sealed for TimerControl {}
+impl CapObjectType for TimerControl {
+    const NAME: &'static str = "TimerControl";
     const DEFAULT_RIGHTS: CapRights = CapRights::ALL;
 }
 

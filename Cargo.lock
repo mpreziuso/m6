@@ -163,6 +163,9 @@ dependencies = [
 [[package]]
 name = "m6-syscall"
 version = "0.1.0"
+dependencies = [
+ "m6-cap",
+]
 
 [[package]]
 name = "m6-user"

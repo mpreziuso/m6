@@ -95,6 +95,18 @@ pub enum Syscall {
     /// Get IRQ handler from IRQ control.
     IrqControlGet = 83,
 
+    // === Timer Operations ===
+    /// Get timer from timer control.
+    TimerControlGet = 84,
+    /// Bind timer to notification.
+    TimerBind = 85,
+    /// Arm timer (one-shot or periodic).
+    TimerArm = 86,
+    /// Cancel armed timer.
+    TimerCancel = 87,
+    /// Clear timer (unbind from notification).
+    TimerClear = 88,
+
     // === IOMMU Operations ===
     /// Create IOSpace from untyped memory.
     IOSpaceCreate = 96,
@@ -157,6 +169,11 @@ impl Syscall {
             81 => Some(Self::IrqSetHandler),
             82 => Some(Self::IrqClearHandler),
             83 => Some(Self::IrqControlGet),
+            84 => Some(Self::TimerControlGet),
+            85 => Some(Self::TimerBind),
+            86 => Some(Self::TimerArm),
+            87 => Some(Self::TimerCancel),
+            88 => Some(Self::TimerClear),
             96 => Some(Self::IOSpaceCreate),
             97 => Some(Self::IOSpaceMapFrame),
             98 => Some(Self::IOSpaceUnmapFrame),
@@ -208,6 +225,11 @@ impl Syscall {
             Self::IrqSetHandler => "IrqSetHandler",
             Self::IrqClearHandler => "IrqClearHandler",
             Self::IrqControlGet => "IrqControlGet",
+            Self::TimerControlGet => "TimerControlGet",
+            Self::TimerBind => "TimerBind",
+            Self::TimerArm => "TimerArm",
+            Self::TimerCancel => "TimerCancel",
+            Self::TimerClear => "TimerClear",
             Self::IOSpaceCreate => "IOSpaceCreate",
             Self::IOSpaceMapFrame => "IOSpaceMapFrame",
             Self::IOSpaceUnmapFrame => "IOSpaceUnmapFrame",

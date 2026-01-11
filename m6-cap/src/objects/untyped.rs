@@ -234,6 +234,10 @@ pub const fn object_size(obj_type: ObjectType, size_bits: u8) -> Result<usize, C
         ObjectType::IOSpace => Ok(4096),    // I/O page table root
         ObjectType::DmaPool => Ok(64),      // Pool metadata
         ObjectType::SmmuControl => Ok(128), // SMMU control state
+
+        // Timer objects
+        ObjectType::Timer => Ok(128),        // Timer object metadata
+        ObjectType::TimerControl => Ok(64),  // Timer control singleton
     }
 }
 

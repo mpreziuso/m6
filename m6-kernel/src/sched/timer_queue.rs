@@ -15,7 +15,7 @@ use m6_cap::ObjectRef;
 use m6_pal::timer;
 use spin::Once;
 
-use crate::cap::object_table::{self, KernelObjectType};
+use crate::cap::object_table;
 
 /// Entry in the timer queue.
 struct TimerEntry {
@@ -139,22 +139,48 @@ pub fn process_expirations() {
 /// Process a single timer expiry.
 ///
 /// Returns a new entry if the timer is periodic and should be re-armed.
-fn process_timer_expiry(timer_ref: ObjectRef, _now_ticks: u64) -> Option<TimerEntry> {
-    // Look up the timer object and process it
-    // For now, this is a placeholder - Timer objects need to be implemented
-    // in the object table
+fn process_timer_expiry(timer_ref: ObjectRef, now_ticks: u64) -> Option<TimerEntry> {
+    use m6_cap::objects::TimerState;
+    use crate::ipc::notification::do_signal;
 
-    object_table::with_object(timer_ref, |obj| {
-        // Timer objects would need to be added to the object table
-        // For now, just check if the object exists
-        if obj.obj_type == KernelObjectType::Notification {
-            // This would be a timer-notification binding
-            // Signal the notification
-            // TODO: Implement when Timer objects are added
+    // Access timer under lock, get signal info
+    let rearm_info = object_table::with_timer_mut(timer_ref, |timer| {
+        if timer.state != TimerState::Armed {
+            return None;
         }
+
+        let notif = timer.notification;
+        let badge = timer.badge.value();
+        let periodic = timer.is_periodic;
+        let period = timer.period_ns;
+
+        // Disarm one-shot timers
+        if !periodic {
+            timer.disarm();
+        }
+
+        Some((notif, badge, periodic, period))
     });
 
-    // TODO: Return new entry for periodic timers
+    // Signal notification (outside lock)
+    if let Some((notif, badge, periodic, period)) = rearm_info.flatten() {
+        if let Err(e) = do_signal(notif, badge) {
+            log::warn!("Timer expiry failed to signal {:?}: {:?}", notif, e);
+        }
+
+        // Re-arm periodic timer
+        if periodic && period > 0 {
+            let freq = timer::frequency();
+            if freq > 0 {
+                let period_ticks = (period.saturating_mul(freq)) / 1_000_000_000;
+                return Some(TimerEntry {
+                    expiry_ticks: now_ticks.saturating_add(period_ticks),
+                    timer_ref,
+                });
+            }
+        }
+    }
+
     None
 }
 
