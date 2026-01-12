@@ -68,10 +68,18 @@ pub mod driver {
     pub const NOTIF: u64 = 14;
     /// SMMU control capability (if needed, for DMA-capable drivers)
     pub const SMMU_CONTROL: u64 = 15;
+    /// DMA pool for IOVA allocation (if needs_iommu)
+    pub const DMA_POOL: u64 = 16;
 
     /// Console endpoint for IPC-based output (optional)
     /// If present, drivers can use io::init_console() with this slot
     pub const CONSOLE_EP: u64 = 20;
+
+    /// First DMA buffer frame slot (for DMA-capable drivers)
+    /// Slots 21-28 contain pre-allocated frames for virtqueue and DMA buffers
+    pub const DMA_BUFFER_START: u64 = 21;
+    /// Number of DMA buffer frames provided to DMA-capable drivers
+    pub const DMA_BUFFER_COUNT: usize = 8;
 
     /// First free slot for driver's own allocations
     pub const FIRST_FREE_SLOT: u64 = 32;

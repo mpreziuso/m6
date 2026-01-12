@@ -927,6 +927,227 @@ pub fn irq_clear_handler(irq_handler: u64) -> SyscallResult {
     check_result(syscall1(Syscall::IrqClearHandler, irq_handler))
 }
 
+// -- IOSpace and DMA Operations
+
+/// Create an IOSpace from untyped memory.
+///
+/// An IOSpace represents an IOMMU translation domain with its own page tables.
+/// Requires an SMMU Control capability to allocate a unique IOASID.
+///
+/// # Arguments
+///
+/// * `smmu_control` - CPtr to the SmmuControl capability
+/// * `untyped` - CPtr to untyped memory for page tables (requires 4KB)
+/// * `dest_cnode` - CPtr to the destination CNode
+/// * `dest_index` - Slot index for the new IOSpace capability
+/// * `dest_depth` - Bits to consume resolving dest CNode (0 = auto)
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn iospace_create(
+    smmu_control: u64,
+    untyped: u64,
+    dest_cnode: u64,
+    dest_index: u64,
+    dest_depth: u64,
+) -> SyscallResult {
+    check_result(syscall5(
+        Syscall::IOSpaceCreate,
+        smmu_control,
+        untyped,
+        dest_cnode,
+        dest_index,
+        dest_depth,
+    ))
+}
+
+/// Map a frame into an IOSpace at a given IOVA.
+///
+/// Creates an I/O page table mapping for DMA. The frame's physical address
+/// will be mapped at the specified IOVA within the IOSpace's translation tables.
+///
+/// # Arguments
+///
+/// * `iospace` - CPtr to the IOSpace capability
+/// * `frame` - CPtr to the Frame capability to map
+/// * `iova` - I/O virtual address (must be page-aligned)
+/// * `rights` - Access rights (R=1, W=2, RW=3)
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn iospace_map_frame(
+    iospace: u64,
+    frame: u64,
+    iova: u64,
+    rights: u64,
+) -> SyscallResult {
+    check_result(syscall4(
+        Syscall::IOSpaceMapFrame,
+        iospace,
+        frame,
+        iova,
+        rights,
+    ))
+}
+
+/// Unmap a frame from an IOSpace.
+///
+/// Removes the I/O page table mapping at the given IOVA.
+///
+/// # Arguments
+///
+/// * `iospace` - CPtr to the IOSpace capability
+/// * `iova` - I/O virtual address to unmap (must be page-aligned)
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn iospace_unmap_frame(iospace: u64, iova: u64) -> SyscallResult {
+    check_result(syscall2(Syscall::IOSpaceUnmapFrame, iospace, iova))
+}
+
+/// Bind a PCIe stream ID to an IOSpace.
+///
+/// Configures the SMMU to translate DMA from the specified stream ID
+/// using this IOSpace's page tables. The stream ID typically comes from
+/// the PCIe Requester ID (bus:device:function).
+///
+/// # Arguments
+///
+/// * `iospace` - CPtr to the IOSpace capability
+/// * `smmu_control` - CPtr to the SmmuControl capability
+/// * `stream_id` - PCIe stream ID to bind
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn iospace_bind_stream(
+    iospace: u64,
+    smmu_control: u64,
+    stream_id: u32,
+) -> SyscallResult {
+    check_result(syscall3(
+        Syscall::IOSpaceBindStream,
+        iospace,
+        smmu_control,
+        stream_id as u64,
+    ))
+}
+
+/// Unbind a PCIe stream ID from an IOSpace.
+///
+/// Removes the stream binding and sets the stream to bypass mode.
+///
+/// # Arguments
+///
+/// * `iospace` - CPtr to the IOSpace capability
+/// * `smmu_control` - CPtr to the SmmuControl capability
+/// * `stream_id` - PCIe stream ID to unbind
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn iospace_unbind_stream(
+    iospace: u64,
+    smmu_control: u64,
+    stream_id: u32,
+) -> SyscallResult {
+    check_result(syscall3(
+        Syscall::IOSpaceUnbindStream,
+        iospace,
+        smmu_control,
+        stream_id as u64,
+    ))
+}
+
+/// Create a DmaPool for IOVA allocation.
+///
+/// A DmaPool manages a range of IOVAs within an IOSpace, providing
+/// bump/watermark allocation for DMA buffers.
+///
+/// # Arguments
+///
+/// * `iospace` - CPtr to the parent IOSpace capability
+/// * `iova_base` - Base IOVA of the pool range
+/// * `iova_size` - Size of the pool range in bytes
+/// * `dest_cnode` - CPtr to the destination CNode
+/// * `dest_index` - Slot index for the new DmaPool capability
+/// * `dest_depth` - Bits to consume resolving dest CNode (0 = auto)
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn dma_pool_create(
+    iospace: u64,
+    iova_base: u64,
+    iova_size: u64,
+    dest_cnode: u64,
+    dest_index: u64,
+    dest_depth: u64,
+) -> SyscallResult {
+    check_result(syscall6(
+        Syscall::DmaPoolCreate,
+        iospace,
+        iova_base,
+        iova_size,
+        dest_cnode,
+        dest_index,
+        dest_depth,
+    ))
+}
+
+/// Allocate an IOVA range from a DmaPool.
+///
+/// Uses bump/watermark allocation to return an aligned IOVA address.
+/// The caller is responsible for mapping actual frames at this IOVA
+/// using `iospace_map_frame`.
+///
+/// # Arguments
+///
+/// * `dma_pool` - CPtr to the DmaPool capability
+/// * `size` - Size to allocate in bytes
+/// * `alignment` - Required alignment (must be power of 2)
+///
+/// # Returns
+///
+/// IOVA address on success, negative error code on failure.
+#[inline]
+pub fn dma_pool_alloc(dma_pool: u64, size: u64, alignment: u64) -> Result<u64, crate::error::SyscallError> {
+    let result = syscall3(Syscall::DmaPoolAlloc, dma_pool, size, alignment);
+    if result < 0 {
+        Err(crate::error::SyscallError::from_i64(result).unwrap_or(crate::error::SyscallError::InvalidSyscall))
+    } else {
+        Ok(result as u64)
+    }
+}
+
+/// Free an IOVA range back to a DmaPool.
+///
+/// Note: Current implementation uses bump allocation, so individual
+/// frees are not supported. This syscall is reserved for future use.
+///
+/// # Arguments
+///
+/// * `dma_pool` - CPtr to the DmaPool capability
+/// * `iova` - Base IOVA to free
+/// * `size` - Size to free in bytes
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn dma_pool_free(dma_pool: u64, iova: u64, size: u64) -> SyscallResult {
+    check_result(syscall3(Syscall::DmaPoolFree, dma_pool, iova, size))
+}
+
 // -- IPC Buffer Helpers
 
 /// Prepare IPC buffer for sending capabilities.

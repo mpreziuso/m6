@@ -4,6 +4,35 @@
 
 use crate::registry::{DeviceEntry, DeviceState, Registry};
 
+// -- VirtIO MMIO constants for device type probing
+
+/// VirtIO MMIO magic value ("virt" in little-endian)
+const VIRTIO_MMIO_MAGIC: u32 = 0x7472_6976;
+
+/// VirtIO MMIO register offsets
+mod virtio_regs {
+    /// Magic value register (must be 0x74726976)
+    pub const MAGIC: usize = 0x000;
+    /// Device ID register (1=net, 2=blk, 3=console, etc.)
+    pub const DEVICE_ID: usize = 0x008;
+}
+
+/// Known VirtIO device IDs
+pub mod virtio_device_ids {
+    /// Network device
+    pub const NET: u32 = 1;
+    /// Block device
+    pub const BLK: u32 = 2;
+    /// Console device
+    pub const CONSOLE: u32 = 3;
+    /// Entropy source
+    pub const RNG: u32 = 4;
+    /// GPU device
+    pub const GPU: u32 = 16;
+    /// Input device
+    pub const INPUT: u32 = 18;
+}
+
 /// Devices we care about enumerating.
 /// These compatible strings map to known drivers.
 const INTERESTING_COMPATIBLES: &[&str] = &[
@@ -139,4 +168,53 @@ pub fn get_memory_info(fdt_data: &[u8]) -> Option<(u64, u64)> {
         }
     }
     None
+}
+
+/// Check if a compatible string indicates a VirtIO MMIO device.
+pub fn is_virtio_mmio(compatible: &str) -> bool {
+    compatible.contains("virtio,mmio")
+}
+
+/// Probe a VirtIO MMIO device to determine its device type.
+///
+/// This reads the DeviceID register from a mapped VirtIO MMIO region.
+///
+/// # Arguments
+/// * `mmio_base` - Virtual address where the VirtIO MMIO region is mapped
+///
+/// # Returns
+/// The VirtIO device ID (1=net, 2=blk, 3=console, etc.) or 0 if invalid/not present.
+///
+/// # Safety
+/// The caller must ensure `mmio_base` points to a valid, mapped VirtIO MMIO region.
+pub unsafe fn probe_virtio_device_type(mmio_base: *const u8) -> u32 {
+    // SAFETY: Caller guarantees mmio_base is valid and mapped.
+    // All operations within this function are valid because of this precondition.
+    unsafe {
+        // Read magic value to verify this is a valid VirtIO device
+        let magic_ptr = mmio_base.add(virtio_regs::MAGIC) as *const u32;
+        let magic = core::ptr::read_volatile(magic_ptr);
+
+        if magic != VIRTIO_MMIO_MAGIC {
+            return 0; // Not a valid VirtIO device
+        }
+
+        // Read device ID
+        let device_id_ptr = mmio_base.add(virtio_regs::DEVICE_ID) as *const u32;
+        core::ptr::read_volatile(device_id_ptr)
+    }
+}
+
+/// Get a human-readable name for a VirtIO device ID.
+pub fn virtio_device_name(device_id: u32) -> &'static str {
+    match device_id {
+        0 => "reserved",
+        virtio_device_ids::NET => "network",
+        virtio_device_ids::BLK => "block",
+        virtio_device_ids::CONSOLE => "console",
+        virtio_device_ids::RNG => "entropy",
+        virtio_device_ids::GPU => "gpu",
+        virtio_device_ids::INPUT => "input",
+        _ => "unknown",
+    }
 }

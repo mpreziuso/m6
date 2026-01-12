@@ -22,6 +22,10 @@ path = "src/uart_pl011/main.rs"
 name = "drv-smmu"
 path = "src/smmu_drv/main.rs"
 
+[[bin]]
+name = "drv-virtio-blk"
+path = "src/virtio_blk/main.rs"
+
 [dependencies]
 m6-syscall = { path = "../m6-syscall", features = ["userspace"] }
 m6-cap = { path = "../m6-cap" }

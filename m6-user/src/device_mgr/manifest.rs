@@ -16,6 +16,9 @@ pub struct DriverManifest {
     pub needs_iommu: bool,
     /// Whether this is a platform device (vs PCIe)
     pub is_platform: bool,
+    /// VirtIO device ID filter (0 = match any/non-virtio device)
+    /// Only relevant for virtio,mmio compatible devices.
+    pub virtio_device_id: u32,
 }
 
 /// Static driver manifest.
@@ -30,6 +33,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,  // Event queue interrupt
         needs_iommu: false, // SMMU doesn't use itself
         is_platform: true,
+        virtio_device_id: 0,
     },
     // -- Serial drivers
     DriverManifest {
@@ -38,6 +42,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,
         needs_iommu: false,
         is_platform: true,
+        virtio_device_id: 0,
     },
     DriverManifest {
         compatible: "ns16550a",
@@ -45,6 +50,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,
         needs_iommu: false,
         is_platform: true,
+        virtio_device_id: 0,
     },
     DriverManifest {
         compatible: "snps,dw-apb-uart",
@@ -52,14 +58,25 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,
         needs_iommu: false,
         is_platform: true,
+        virtio_device_id: 0,
     },
-    // -- VirtIO drivers
+    // -- VirtIO drivers (type-specific entries first, then generic fallback)
+    DriverManifest {
+        compatible: "virtio,mmio",
+        binary_name: "drv-virtio-blk",
+        needs_irq: true,
+        needs_iommu: true,  // Block devices perform DMA
+        is_platform: true,
+        virtio_device_id: 2, // VirtIO block device
+    },
+    // Generic VirtIO fallback for unhandled device types
     DriverManifest {
         compatible: "virtio,mmio",
         binary_name: "drv-virtio-mmio",
         needs_irq: true,
         needs_iommu: false,
         is_platform: true,
+        virtio_device_id: 0, // Match any (fallback)
     },
     // -- Storage drivers
     DriverManifest {
@@ -68,6 +85,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,
         needs_iommu: true,
         is_platform: false,
+        virtio_device_id: 0,
     },
     // -- USB drivers
     DriverManifest {
@@ -76,6 +94,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,
         needs_iommu: true,
         is_platform: false,
+        virtio_device_id: 0,
     },
     DriverManifest {
         compatible: "snps,dwc3",
@@ -83,6 +102,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,
         needs_iommu: true,
         is_platform: true,
+        virtio_device_id: 0,
     },
     DriverManifest {
         compatible: "rockchip,rk3588-dwc3",
@@ -90,6 +110,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,
         needs_iommu: true,
         is_platform: true,
+        virtio_device_id: 0,
     },
     // -- PCIe drivers
     DriverManifest {
@@ -98,6 +119,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,
         needs_iommu: false,
         is_platform: true,
+        virtio_device_id: 0,
     },
     DriverManifest {
         compatible: "pci-host-ecam-generic",
@@ -105,6 +127,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,
         needs_iommu: false,
         is_platform: true,
+        virtio_device_id: 0,
     },
     DriverManifest {
         compatible: "rockchip,rk3588-pcie",
@@ -112,16 +135,27 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_irq: true,
         needs_iommu: false,
         is_platform: true,
+        virtio_device_id: 0,
     },
 ];
 
 /// Find driver manifest for a compatible string.
 ///
 /// Returns the first matching manifest entry, or None if no driver is registered.
-pub fn find_driver(compatible: &str) -> Option<&'static DriverManifest> {
-    DRIVER_MANIFEST
-        .iter()
-        .find(|m| compatible.contains(m.compatible))
+/// For non-virtio devices, pass `virtio_device_id = 0`.
+pub fn find_driver(compatible: &str, virtio_device_id: u32) -> Option<&'static DriverManifest> {
+    DRIVER_MANIFEST.iter().find(|m| {
+        if !compatible.contains(m.compatible) {
+            return false;
+        }
+        // For virtio devices, match specific device ID or fallback (0)
+        if m.virtio_device_id != 0 {
+            m.virtio_device_id == virtio_device_id
+        } else {
+            // virtio_device_id == 0 means "match any" (fallback)
+            true
+        }
+    })
 }
 
 /// Find all drivers matching a compatible string.

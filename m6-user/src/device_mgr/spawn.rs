@@ -67,6 +67,8 @@ pub struct DeviceInfo {
     pub size: u64,
     /// IRQ number
     pub irq: u32,
+    /// Stream ID for IOMMU/SMMU (None if device doesn't have one, e.g. VirtIO MMIO)
+    pub stream_id: Option<u32>,
 }
 
 impl DeviceInfo {
@@ -76,6 +78,9 @@ impl DeviceInfo {
             phys_base: entry.phys_base,
             size: entry.size,
             irq: entry.irq,
+            // VirtIO MMIO devices typically don't have stream IDs
+            // PCIe devices would extract this from device tree "iommu-map" property
+            stream_id: None,
         }
     }
 }
@@ -183,8 +188,16 @@ pub fn spawn_driver(
     } else {
         None
     };
-    let smmu_control_slot = if config.manifest.needs_iommu {
-        Some(registry.alloc_slot())
+    // Note: SmmuControl is at device-mgr's slot 18, we don't allocate a new slot for it
+    let has_smmu_control = config.manifest.needs_iommu;
+
+    // Allocate DMA buffer frames for DMA-capable drivers (virtio, etc.)
+    let dma_buffer_slots: Option<[u64; slots::driver::DMA_BUFFER_COUNT]> = if config.manifest.needs_iommu {
+        let mut dma_slots = [0u64; slots::driver::DMA_BUFFER_COUNT];
+        for slot in &mut dma_slots {
+            *slot = registry.alloc_slot();
+        }
+        Some(dma_slots)
     } else {
         None
     };
@@ -253,10 +266,9 @@ pub fn spawn_driver(
     ).map_err(SpawnError::RetypeFailed)?;
 
     // Create DeviceFrame for MMIO region
-    // Note: In a full implementation, this would retype from device untyped
-    // or use a kernel-provided device frame capability
-    // For now, we create a placeholder
-    create_device_frame(device_frame_slot, &config.device_info, &cptr)?;
+    // Note: For VirtIO devices, this reuses the probe frame created during enumeration.
+    // For other devices, this retypes from the device untyped.
+    create_device_frame(device_frame_slot, &config.device_info, registry, &cptr)?;
 
     // Claim IRQ handler if needed
     if let Some(irq_slot) = irq_handler_slot {
@@ -275,10 +287,67 @@ pub fn spawn_driver(
         ).map_err(SpawnError::RetypeFailed)?;
     }
 
-    // Create IOSpace if needed
-    if let Some(io_slot) = iospace_slot {
-        create_iospace(io_slot)?;
+    // Create IOSpace if needed (track whether it was actually created)
+    let iospace_created = if let Some(io_slot) = iospace_slot {
+        let smmu_slot = if has_smmu_control {
+            Some(slots::SMMU_CONTROL)
+        } else {
+            None
+        };
+        create_iospace(io_slot, smmu_slot, config.device_info.stream_id, &cptr)?
+    } else {
+        false
+    };
+    // Only pass iospace_slot to install_driver_caps if it was actually created
+    let effective_iospace_slot = if iospace_created { iospace_slot } else { None };
+
+    // Create DMA buffer frames for DMA-capable drivers
+    if let Some(ref dma_slots) = dma_buffer_slots {
+        for &slot in dma_slots {
+            retype(
+                cptr(slots::RAM_UNTYPED),
+                ObjectType::Frame as u64,
+                12, // 4KB
+                cptr(slots::ROOT_CNODE),
+                slot,
+                1,
+            ).map_err(SpawnError::RetypeFailed)?;
+        }
     }
+
+    // Create DmaPool and map DMA buffers into IOSpace if IOSpace was created
+    let dma_pool_slot = if iospace_created && dma_buffer_slots.is_some() {
+        let pool_slot = registry.alloc_slot();
+
+        // Create DmaPool with IOVA range starting at 256MB
+        const IOVA_BASE: u64 = 0x1000_0000;  // 256MB
+        const IOVA_SIZE: u64 = 0x0100_0000;  // 16MB pool
+
+        dma_pool_create(
+            cptr(iospace_slot.unwrap()),
+            IOVA_BASE,
+            IOVA_SIZE,
+            cptr(slots::ROOT_CNODE),
+            pool_slot,
+            0,  // depth = 0 (auto)
+        ).map_err(SpawnError::RetypeFailed)?;
+
+        // Map DMA buffer frames into IOSpace at sequential IOVAs
+        let mut iova = IOVA_BASE;
+        for &slot in dma_buffer_slots.as_ref().unwrap() {
+            iospace_map_frame(
+                cptr(iospace_slot.unwrap()),
+                cptr(slot),
+                iova,
+                3,  // RW access
+            ).map_err(SpawnError::CapCopyFailed)?;
+            iova += PAGE_SIZE as u64;
+        }
+
+        Some(pool_slot)
+    } else {
+        None
+    };
 
     // Load ELF and create stack
     let entry = elf.entry();
@@ -295,7 +364,28 @@ pub fn spawn_driver(
     const MMIO_VADDR: u64 = 0x0000_8000_0000;
     ensure_page_tables(vspace_slot, MMIO_VADDR, MMIO_VADDR + PAGE_SIZE as u64, registry, &cptr)?;
 
+    // Ensure page tables exist for DMA buffer region (0x8001_0000 onwards)
+    // and map DMA buffer frames for DMA-capable drivers
+    if let Some(ref dma_slots) = dma_buffer_slots {
+        const DMA_BUFFER_VADDR: u64 = 0x0000_8001_0000;
+        let dma_region_size = (slots::driver::DMA_BUFFER_COUNT * PAGE_SIZE) as u64;
+        ensure_page_tables(vspace_slot, DMA_BUFFER_VADDR, DMA_BUFFER_VADDR + dma_region_size, registry, &cptr)?;
+
+        // Map each DMA buffer frame into driver's VSpace
+        for (i, &slot) in dma_slots.iter().enumerate() {
+            let vaddr = DMA_BUFFER_VADDR + (i * PAGE_SIZE) as u64;
+            map_frame(cptr(vspace_slot), cptr(slot), vaddr, MapRights::RW.to_bits(), 0)
+                .map_err(SpawnError::FrameMapFailed)?;
+        }
+    }
+
     // Install initial capabilities in driver's CSpace
+    let smmu_to_copy = if has_smmu_control {
+        Some(slots::SMMU_CONTROL)
+    } else {
+        None
+    };
+
     install_driver_caps(
         cptr(cspace_slot),           // dest cspace CPtr
         cptr(slots::ROOT_CNODE),     // src cnode CPtr
@@ -306,9 +396,11 @@ pub fn spawn_driver(
         device_frame_slot,            // device frame slot number
         irq_handler_slot,             // optional irq handler slot
         irq_notif_slot,               // optional notification for IRQ delivery
-        iospace_slot,                 // optional iospace slot
-        smmu_control_slot,            // optional smmu control slot
+        effective_iospace_slot,       // optional iospace slot (only if actually created)
+        smmu_to_copy,                 // optional smmu control slot
+        dma_pool_slot,                // optional DMA pool slot
         config.console_ep_slot,       // optional console endpoint slot
+        dma_buffer_slots.as_ref(),    // optional DMA buffer frame slots
     )?;
 
     // Calculate fault badge for this driver
@@ -326,7 +418,10 @@ pub fn spawn_driver(
     ).map_err(SpawnError::TcbConfigureFailed)?;
 
     // Set initial registers
-    tcb_write_registers(cptr(tcb_slot), entry, stack_top, 0)
+    // Pass device offset within page as arg0 (x0 register)
+    // This allows drivers to find their MMIO registers when devices aren't page-aligned
+    let device_offset = config.device_info.phys_base & 0xFFF;
+    tcb_write_registers(cptr(tcb_slot), entry, stack_top, device_offset)
         .map_err(SpawnError::TcbWriteRegistersFailed)?;
 
     // Resume the driver
@@ -361,7 +456,27 @@ pub fn spawn_driver(
 }
 
 /// Create a DeviceFrame for the device's MMIO region.
-fn create_device_frame(slot: u64, device_info: &DeviceInfo, cptr: &impl Fn(u64) -> u64) -> Result<(), SpawnError> {
+///
+/// First checks if we have an existing probe frame for this physical address
+/// (from VirtIO probing). If so, uses cap_copy to reuse it. Otherwise falls
+/// back to retyping from the device untyped.
+fn create_device_frame(
+    slot: u64,
+    device_info: &DeviceInfo,
+    registry: &Registry,
+    cptr: &impl Fn(u64) -> u64,
+) -> Result<(), SpawnError> {
+    // Check if we have an existing probe frame for this physical address.
+    // This is the case for VirtIO devices that were probed during enumeration.
+    if let Some(probe_slot) = registry.find_virtio_probe_frame(device_info.phys_base) {
+        // Reuse the probe frame via cap_copy
+        let cnode_cptr = cptr(slots::ROOT_CNODE);
+        cap_copy(cnode_cptr, slot, 0, cnode_cptr, probe_slot, 0)
+            .map_err(SpawnError::CapCopyFailed)?;
+        return Ok(());
+    }
+
+    // No existing probe frame - retype from device untyped
     // SAFETY: Called after _start has initialised BOOT_INFO
     let boot_info = unsafe { crate::get_boot_info() };
 
@@ -400,16 +515,45 @@ fn claim_irq(slot: u64, irq: u32, cptr: &impl Fn(u64) -> u64) -> Result<(), Spaw
 }
 
 /// Create an IOSpace for DMA.
-fn create_iospace(slot: u64) -> Result<(), SpawnError> {
-    // Create IOSpace from SMMU control capability
-    // This would involve:
-    // 1. Allocating an IOASID
-    // 2. Creating IOSpace object
-    // 3. Binding stream IDs
+///
+/// Creates an IOSpace object using SmmuControl and untyped memory.
+/// The IOSpace provides IOMMU translation for device DMA.
+/// Optionally binds a stream ID if the device has one.
+///
+/// Returns `Ok(true)` if IOSpace was created successfully.
+fn create_iospace(
+    slot: u64,
+    smmu_control_slot: Option<u64>,
+    stream_id: Option<u32>,
+    cptr: &impl Fn(u64) -> u64,
+) -> Result<bool, SpawnError> {
+    // Check if we have SmmuControl capability
+    let smmu_slot = match smmu_control_slot {
+        Some(s) => s,
+        None => return Ok(false),  // No SMMU support
+    };
 
-    // Placeholder
-    let _ = slot;
-    Ok(())
+    // Create IOSpace from SmmuControl + untyped memory
+    iospace_create(
+        cptr(smmu_slot),
+        cptr(slots::RAM_UNTYPED),
+        cptr(slots::ROOT_CNODE),
+        slot,
+        0,  // depth = 0 (auto)
+    ).map_err(SpawnError::RetypeFailed)?;
+
+    // Bind stream ID if device has one
+    // VirtIO MMIO devices typically don't have stream IDs and operate in bypass mode
+    // PCIe devices with stream IDs will have IOMMU translation enabled
+    if let Some(sid) = stream_id {
+        iospace_bind_stream(
+            cptr(slot),
+            cptr(smmu_slot),
+            sid,
+        ).map_err(SpawnError::CapCopyFailed)?;
+    }
+
+    Ok(true)
 }
 
 /// Ensure page tables exist for an address range in a VSpace.
@@ -615,7 +759,9 @@ fn install_driver_caps(
     irq_notif_slot: Option<u64>,
     iospace_slot: Option<u64>,
     smmu_control_slot: Option<u64>,
+    dma_pool_slot: Option<u64>,
     console_ep_slot: Option<u64>,
+    dma_buffer_slots: Option<&[u64; slots::driver::DMA_BUFFER_COUNT]>,
 ) -> Result<(), SpawnError> {
     // Slot 0: CSpace self-reference
     cap_copy(child_cspace_cptr, slots::driver::ROOT_CNODE, 0, src_cnode_cptr, cspace_slot, 0)
@@ -656,9 +802,14 @@ fn install_driver_caps(
     }
 
     // Slot 15: SmmuControl (if present, for DMA-capable drivers)
-    if smmu_control_slot.is_some() {
-        // Copy from device manager's SMMU_CONTROL slot
+    if let Some(_smmu_slot) = smmu_control_slot {
         cap_copy(child_cspace_cptr, slots::driver::SMMU_CONTROL, 0, src_cnode_cptr, slots::SMMU_CONTROL, 0)
+            .map_err(SpawnError::CapCopyFailed)?;
+    }
+
+    // Slot 16: DmaPool (if present, for IOVA allocation)
+    if let Some(pool_slot) = dma_pool_slot {
+        cap_copy(child_cspace_cptr, slots::driver::DMA_POOL, 0, src_cnode_cptr, pool_slot, 0)
             .map_err(SpawnError::CapCopyFailed)?;
     }
 
@@ -666,6 +817,15 @@ fn install_driver_caps(
     if let Some(console_slot) = console_ep_slot {
         cap_copy(child_cspace_cptr, slots::driver::CONSOLE_EP, 0, src_cnode_cptr, console_slot, 0)
             .map_err(SpawnError::CapCopyFailed)?;
+    }
+
+    // Slots 21-28: DMA buffer frames (if present, for DMA-capable drivers)
+    if let Some(dma_slots) = dma_buffer_slots {
+        for (i, &slot) in dma_slots.iter().enumerate() {
+            let dest_slot = slots::driver::DMA_BUFFER_START + i as u64;
+            cap_copy(child_cspace_cptr, dest_slot, 0, src_cnode_cptr, slot, 0)
+                .map_err(SpawnError::CapCopyFailed)?;
+        }
     }
 
     Ok(())

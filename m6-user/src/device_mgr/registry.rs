@@ -46,6 +46,9 @@ pub struct DeviceEntry {
     pub size: u64,
     /// IRQ number (from interrupts property), 0 if none
     pub irq: u32,
+    /// VirtIO device ID (0 if not a virtio device or not yet probed)
+    /// Value read from MMIO offset 0x08: 1=net, 2=blk, 3=console, etc.
+    pub virtio_device_id: u32,
     /// Current state
     pub state: DeviceState,
     /// Index into drivers array if bound, or usize::MAX
@@ -63,6 +66,7 @@ impl DeviceEntry {
             phys_base: 0,
             size: 0,
             irq: 0,
+            virtio_device_id: 0,
             state: DeviceState::Unbound,
             driver_idx: usize::MAX,
         }
@@ -151,6 +155,26 @@ impl Subscription {
     }
 }
 
+/// Maximum VirtIO probe frames we keep
+pub const MAX_VIRTIO_PROBE_FRAMES: usize = 8;
+
+/// VirtIO probe frame entry - maps physical base address to capability slot
+#[derive(Clone, Copy)]
+pub struct VirtioProbeFrame {
+    /// Physical base address of this 4KB frame
+    pub phys_base: u64,
+    /// Capability slot in device-mgr's CSpace
+    pub slot: u64,
+    /// Whether this entry is valid
+    pub valid: bool,
+}
+
+impl VirtioProbeFrame {
+    pub const fn empty() -> Self {
+        Self { phys_base: 0, slot: 0, valid: false }
+    }
+}
+
 /// Device registry
 pub struct Registry {
     /// Enumerated devices
@@ -165,6 +189,8 @@ pub struct Registry {
     pub next_free_slot: u64,
     /// Console endpoint slot (UART driver), for passing to other drivers
     pub console_ep_slot: Option<u64>,
+    /// VirtIO probe frames - kept around for reuse when spawning drivers
+    pub virtio_probe_frames: [VirtioProbeFrame; MAX_VIRTIO_PROBE_FRAMES],
 }
 
 impl Registry {
@@ -178,7 +204,31 @@ impl Registry {
             subscriptions: [const { Subscription::empty() }; MAX_SUBSCRIPTIONS],
             next_free_slot: first_free_slot,
             console_ep_slot: None,
+            virtio_probe_frames: [const { VirtioProbeFrame::empty() }; MAX_VIRTIO_PROBE_FRAMES],
         }
+    }
+
+    /// Find a VirtIO probe frame that covers the given physical address.
+    /// Returns the slot number if found.
+    pub fn find_virtio_probe_frame(&self, phys_addr: u64) -> Option<u64> {
+        // A 4KB frame covers addresses from phys_base to phys_base + 0xFFF
+        for frame in &self.virtio_probe_frames {
+            if frame.valid && phys_addr >= frame.phys_base && phys_addr < frame.phys_base + 0x1000 {
+                return Some(frame.slot);
+            }
+        }
+        None
+    }
+
+    /// Add a VirtIO probe frame to the registry.
+    pub fn add_virtio_probe_frame(&mut self, phys_base: u64, slot: u64) -> bool {
+        for frame in &mut self.virtio_probe_frames {
+            if !frame.valid {
+                *frame = VirtioProbeFrame { phys_base, slot, valid: true };
+                return true;
+            }
+        }
+        false
     }
 
     /// Find device by exact path.

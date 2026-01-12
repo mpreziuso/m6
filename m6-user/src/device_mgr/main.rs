@@ -99,6 +99,10 @@ pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
                 io::puts(device.path_str());
                 io::puts(" [");
                 io::puts(device.compatible_str());
+                if device.virtio_device_id != 0 {
+                    io::puts(":");
+                    io::puts(dtb::virtio_device_name(device.virtio_device_id));
+                }
                 io::puts("] @ ");
                 io::put_hex(device.phys_base);
                 if device.irq != 0 {
@@ -148,7 +152,8 @@ fn spawn_platform_drivers(registry: &mut Registry) {
         let compat = registry.devices[i].compatible_str();
 
         // Check if this device has a platform driver
-        if let Some(manifest) = manifest::find_driver(compat) {
+        let virtio_id = registry.devices[i].virtio_device_id;
+        if let Some(manifest) = manifest::find_driver(compat, virtio_id) {
             if !manifest.is_platform {
                 continue; // Skip non-platform drivers
             }
@@ -174,7 +179,162 @@ fn init_dtb(registry: &mut Registry, boot_info: &DevMgrBootInfo) -> Result<usize
     // SAFETY: Init must have mapped the DTB frame before spawning us
     let dtb_data = unsafe { boot_info.dtb_slice() }.ok_or("DTB slice failed")?;
 
-    dtb::enumerate_devices(dtb_data, registry)
+    let count = dtb::enumerate_devices(dtb_data, registry)?;
+
+    // Probe VirtIO devices to determine their specific type
+    probe_virtio_devices(registry);
+
+    Ok(count)
+}
+
+/// Probe all VirtIO MMIO devices to determine their device type.
+///
+/// This maps the VirtIO MMIO region once and probes each device by reading
+/// the DeviceID register at its offset within the region.
+fn probe_virtio_devices(registry: &mut Registry) {
+    use m6_syscall::invoke::{map_frame, map_page_table, unmap_frame, retype};
+    use m6_cap::ObjectType;
+
+    // SAFETY: _start has initialised BOOT_INFO
+    let boot_info = unsafe { get_boot_info() };
+    let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, boot_info.cnode_radix);
+
+    // Virtual address for temporary MMIO mapping
+    const PROBE_VADDR: u64 = 0x0000_9000_0000;
+    // VirtIO MMIO base address on QEMU virt
+    const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
+    // Number of 4KB frames to map (16KB total = 4 frames)
+    const NUM_FRAMES: usize = 4;
+
+    // Find the device untyped that covers VirtIO MMIO space
+    let (device_untyped, _untyped_size) = match boot_info.find_device_untyped(VIRTIO_MMIO_BASE) {
+        Some((slot, size)) => (slot, size),
+        None => {
+            io::puts("[device-mgr] No device untyped for VirtIO MMIO region\n");
+            return;
+        }
+    };
+
+    // Allocate slots for probe page tables and frames
+    let l1_slot = registry.alloc_slot();
+    let l2_slot = registry.alloc_slot();
+    let l3_slot = registry.alloc_slot();
+    let mut frame_slots = [0u64; NUM_FRAMES];
+    for slot in &mut frame_slots {
+        *slot = registry.alloc_slot();
+    }
+
+    // Create page tables for probe address region
+    // L1 table (covers 512GB)
+    if retype(cptr(slots::RAM_UNTYPED), 5, 0, cptr(slots::ROOT_CNODE), l1_slot, 1).is_err() {
+        io::puts("[device-mgr] Failed to create L1 table for probe\n");
+        return;
+    }
+    let l1_base = PROBE_VADDR & !(512 * 1024 * 1024 * 1024 - 1);
+    let _ = map_page_table(cptr(slots::ROOT_VSPACE), cptr(l1_slot), l1_base, 1);
+
+    // L2 table (covers 1GB)
+    if retype(cptr(slots::RAM_UNTYPED), 6, 0, cptr(slots::ROOT_CNODE), l2_slot, 1).is_err() {
+        io::puts("[device-mgr] Failed to create L2 table for probe\n");
+        return;
+    }
+    let l2_base = PROBE_VADDR & !(1024 * 1024 * 1024 - 1);
+    let _ = map_page_table(cptr(slots::ROOT_VSPACE), cptr(l2_slot), l2_base, 2);
+
+    // L3 table (covers 2MB)
+    if retype(cptr(slots::RAM_UNTYPED), 7, 0, cptr(slots::ROOT_CNODE), l3_slot, 1).is_err() {
+        io::puts("[device-mgr] Failed to create L3 table for probe\n");
+        return;
+    }
+    let l3_base = PROBE_VADDR & !(2 * 1024 * 1024 - 1);
+    let _ = map_page_table(cptr(slots::ROOT_VSPACE), cptr(l3_slot), l3_base, 3);
+
+    // Retype device untyped to DeviceFrames
+    if retype(
+        cptr(device_untyped),
+        ObjectType::DeviceFrame as u64,
+        12, // 4KB per frame
+        cptr(slots::ROOT_CNODE),
+        frame_slots[0],
+        NUM_FRAMES as u64,
+    ).is_err() {
+        io::puts("[device-mgr] Failed to retype device untyped for VirtIO probe\n");
+        return;
+    }
+
+    // Map all frames contiguously
+    for (i, &slot) in frame_slots.iter().enumerate() {
+        let vaddr = PROBE_VADDR + (i * 4096) as u64;
+        if map_frame(cptr(slots::ROOT_VSPACE), cptr(slot), vaddr, 0b011, 0).is_err() {
+            io::puts("[device-mgr] Failed to map VirtIO frame ");
+            io::put_u64(i as u64);
+            io::puts(" for probing\n");
+            // Continue anyway, we may still probe some devices
+        }
+    }
+
+    // Now probe each VirtIO device by its offset from the base
+    for i in 0..registry.device_count {
+        let compat_str: [u8; 64] = {
+            let mut buf = [0u8; 64];
+            let len = registry.devices[i].compatible_len.min(64);
+            buf[..len].copy_from_slice(&registry.devices[i].compatible[..len]);
+            buf
+        };
+        let compat_len = registry.devices[i].compatible_len.min(64);
+        let compat = core::str::from_utf8(&compat_str[..compat_len]).unwrap_or("");
+        let phys_base = registry.devices[i].phys_base;
+
+        // Only probe VirtIO MMIO devices
+        if !dtb::is_virtio_mmio(compat) {
+            continue;
+        }
+
+        // Calculate offset from VirtIO base
+        if phys_base < VIRTIO_MMIO_BASE {
+            continue;
+        }
+        let offset = phys_base - VIRTIO_MMIO_BASE;
+
+        // Check if within our mapped region (16KB)
+        if offset >= (NUM_FRAMES * 4096) as u64 {
+            io::puts("[device-mgr] VirtIO device at ");
+            io::put_hex(phys_base);
+            io::puts(" is outside mapped probe region\n");
+            continue;
+        }
+
+        // Probe the device type at this offset
+        let probe_addr = PROBE_VADDR + offset;
+        // SAFETY: We mapped this region above
+        let device_id = unsafe { dtb::probe_virtio_device_type(probe_addr as *const u8) };
+
+        // Store the device ID in the registry
+        registry.devices[i].virtio_device_id = device_id;
+
+        if device_id != 0 {
+            io::puts("[device-mgr] VirtIO device at ");
+            io::put_hex(phys_base);
+            io::puts(" is type ");
+            io::put_u64(device_id as u64);
+            io::puts(" (");
+            io::puts(dtb::virtio_device_name(device_id));
+            io::puts(")\n");
+        }
+    }
+
+    // Unmap frames from device-mgr's address space (but keep capabilities for reuse)
+    for &slot in &frame_slots {
+        let _ = unmap_frame(cptr(slot));
+    }
+
+    // Store probe frame capabilities in registry for reuse when spawning drivers.
+    // This avoids the "NoMemory" error from trying to retype the device untyped
+    // again (seL4-style untyped watermark only moves forward, not reset on delete).
+    for (i, &slot) in frame_slots.iter().enumerate() {
+        let phys_base = VIRTIO_MMIO_BASE + (i * 4096) as u64;
+        registry.add_virtio_probe_frame(phys_base, slot);
+    }
 }
 
 /// Get the initrd data slice.
@@ -312,7 +472,8 @@ fn find_first_unbound_device(registry: &Registry) -> Option<usize> {
         if registry.devices[i].state == DeviceState::Unbound {
             // Check if driver exists for this device
             let compat = registry.devices[i].compatible_str();
-            if let Some(entry) = manifest::find_driver(compat) {
+            let virtio_id = registry.devices[i].virtio_device_id;
+            if let Some(entry) = manifest::find_driver(compat, virtio_id) {
                 // Check if binary exists in initrd
                 let has_binary = archive.entries()
                     .any(|e| e.filename().as_str() == Ok(entry.binary_name));
@@ -351,8 +512,11 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
     }
     let compat = core::str::from_utf8(&compat_buf[..compat_len]).unwrap_or("");
 
+    // Get virtio device ID (for type-specific driver matching)
+    let virtio_id = registry.devices[device_idx].virtio_device_id;
+
     // Find driver in manifest
-    let manifest_entry = match manifest::find_driver(compat) {
+    let manifest_entry = match manifest::find_driver(compat, virtio_id) {
         Some(m) => m,
         None => {
             io::puts("[device-mgr] No driver for: ");

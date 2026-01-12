@@ -301,6 +301,8 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     cap_idx += 1;
     initial_caps_storage[cap_idx] = InitialCap { src_slot: Slot::AsidPool as u64, dst_slot: 16 };
     cap_idx += 1;
+    initial_caps_storage[cap_idx] = InitialCap { src_slot: Slot::SmmuControl as u64, dst_slot: 18 };
+    cap_idx += 1;
 
     // Device untypeds at slots 20+
     for (i, &slot) in device_untyped_slots.iter().enumerate().take(device_untyped_count) {

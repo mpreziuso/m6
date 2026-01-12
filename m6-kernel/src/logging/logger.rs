@@ -112,7 +112,7 @@ pub fn init() {
     buffer::enable();
 
     log::set_logger(&LOGGER)
-        .map(|()| log::set_max_level(LevelFilter::Debug))
+        .map(|()| log::set_max_level(LevelFilter::Trace))
         .ok();
 }
 

@@ -85,6 +85,14 @@ echo ""
 echo "Press Ctrl+A, X to exit QEMU"
 echo ""
 
+# Create a test disk image if it doesn't exist
+DISK_IMG="$BUILD_DIR/disk.img"
+if [ ! -f "$DISK_IMG" ]; then
+    echo "Creating test disk image..."
+    dd if=/dev/zero of="$DISK_IMG" bs=1M count=64 2>/dev/null
+    echo "Created $DISK_IMG (64MB)"
+fi
+
 # Run QEMU
 exec $QEMU \
     -machine virt,gic-version=3,acpi=off,iommu=smmuv3 \
@@ -93,6 +101,8 @@ exec $QEMU \
     -m $MEMORY \
     -drive if=pflash,format=raw,readonly=on,file="$FIRMWARE" \
     -drive format=raw,file="$ESP_IMG" \
+    -drive file="$DISK_IMG",if=none,format=raw,id=hd0 \
+    -device virtio-blk-device,drive=hd0 \
     -device virtio-gpu-pci \
     -device virtio-keyboard-pci \
     -device virtio-mouse-pci \

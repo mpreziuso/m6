@@ -379,7 +379,7 @@ fn get_device_regions() -> &'static [DeviceRegion] {
 
     if platform_name.contains("virt") || platform_name.contains("QEMU") {
         // QEMU virt machine device regions
-        static QEMU_VIRT_DEVICES: [DeviceRegion; 2] = [
+        static QEMU_VIRT_DEVICES: [DeviceRegion; 3] = [
             DeviceRegion {
                 phys_base: 0x0900_0000,
                 size_bits: 12, // 4KB - PL011 UART
@@ -389,6 +389,11 @@ fn get_device_regions() -> &'static [DeviceRegion] {
                 phys_base: 0x0905_0000,
                 size_bits: 16, // 64KB - ARM SMMUv3
                 name: "smmu-v3",
+            },
+            DeviceRegion {
+                phys_base: 0x0a00_0000,
+                size_bits: 15, // 32KB - VirtIO MMIO region (extra space for probing + drivers)
+                name: "virtio-mmio",
             },
         ];
         &QEMU_VIRT_DEVICES
