@@ -14,7 +14,7 @@
 mod ipc;
 
 // Re-use io module from parent crate (for early debug output)
-#[path = "../io.rs"]
+#[path = "../../io.rs"]
 mod io;
 
 use core::ptr::{read_volatile, write_volatile};

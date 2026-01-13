@@ -17,7 +17,7 @@ mod ipc;
 mod pl011;
 
 // Re-use io module from parent crate (for early debug output)
-#[path = "../io.rs"]
+#[path = "../../io.rs"]
 mod io;
 
 use core::panic::PanicInfo;

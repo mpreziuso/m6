@@ -20,7 +20,7 @@ mod virtio;
 mod virtqueue;
 
 // Re-use io module from parent crate (for early debug output)
-#[path = "../io.rs"]
+#[path = "../../io.rs"]
 mod io;
 
 use core::panic::PanicInfo;
@@ -356,7 +356,7 @@ fn handle_read_sector(
 
     // Map client's frame into our VSpace
     let vaddr = 0x8002_0000;
-    if let Err(_) = map_frame(ROOT_VSPACE, cptr(client_frame_slot), vaddr, 3, 0) {
+    if map_frame(ROOT_VSPACE, cptr(client_frame_slot), vaddr, 3, 0).is_err() {
         return ipc::response::ERR_IO;
     }
 
@@ -368,7 +368,7 @@ fn handle_read_sector(
     };
 
     // Map frame into IOSpace at allocated IOVA
-    if let Err(_) = iospace_map_frame(IOSPACE, cptr(client_frame_slot), data_iova, 3) {
+    if iospace_map_frame(IOSPACE, cptr(client_frame_slot), data_iova, 3).is_err() {
         return ipc::response::ERR_IO;
     }
 
@@ -396,13 +396,11 @@ fn handle_read_sector(
     // In a real implementation, we'd wait on IRQ_NOTIF notification
     let mut attempts = 0;
     let bytes_written = loop {
-        if device.has_completion() {
-            if let Some((head, bytes)) = device.poll_completion() {
-                if head == desc_head {
-                    device.ack_interrupt();
-                    break bytes;
-                }
-            }
+        if let Some((head, bytes)) = device.poll_completion()
+            && head == desc_head
+        {
+            device.ack_interrupt();
+            break bytes;
         }
         sched_yield();
         attempts += 1;
@@ -460,7 +458,7 @@ fn handle_write_sector(
 
     // Map client's frame into our VSpace
     let vaddr = 0x8002_0000;
-    if let Err(_) = map_frame(ROOT_VSPACE, cptr(client_frame_slot), vaddr, 3, 0) {
+    if map_frame(ROOT_VSPACE, cptr(client_frame_slot), vaddr, 3, 0).is_err() {
         return ipc::response::ERR_IO;
     }
 
@@ -472,7 +470,7 @@ fn handle_write_sector(
     };
 
     // Map frame into IOSpace at allocated IOVA
-    if let Err(_) = iospace_map_frame(IOSPACE, cptr(client_frame_slot), data_iova, 3) {
+    if iospace_map_frame(IOSPACE, cptr(client_frame_slot), data_iova, 3).is_err() {
         return ipc::response::ERR_IO;
     }
 
@@ -499,13 +497,11 @@ fn handle_write_sector(
     // Wait for completion (synchronous for now)
     let mut attempts = 0;
     let bytes_written = loop {
-        if device.has_completion() {
-            if let Some((head, bytes)) = device.poll_completion() {
-                if head == desc_head {
-                    device.ack_interrupt();
-                    break bytes;
-                }
-            }
+        if let Some((head, bytes)) = device.poll_completion()
+            && head == desc_head
+        {
+            device.ack_interrupt();
+            break bytes;
         }
         sched_yield();
         attempts += 1;

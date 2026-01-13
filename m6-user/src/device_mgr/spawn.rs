@@ -316,7 +316,9 @@ pub fn spawn_driver(
     }
 
     // Create DmaPool and map DMA buffers into IOSpace if IOSpace was created
-    let dma_pool_slot = if iospace_created && dma_buffer_slots.is_some() {
+    let dma_pool_slot = if let (true, Some(iospace), Some(dma_slots)) =
+        (iospace_created, iospace_slot, dma_buffer_slots.as_ref())
+    {
         let pool_slot = registry.alloc_slot();
 
         // Create DmaPool with IOVA range starting at 256MB
@@ -324,7 +326,7 @@ pub fn spawn_driver(
         const IOVA_SIZE: u64 = 0x0100_0000;  // 16MB pool
 
         dma_pool_create(
-            cptr(iospace_slot.unwrap()),
+            cptr(iospace),
             IOVA_BASE,
             IOVA_SIZE,
             cptr(slots::ROOT_CNODE),
@@ -334,9 +336,9 @@ pub fn spawn_driver(
 
         // Map DMA buffer frames into IOSpace at sequential IOVAs
         let mut iova = IOVA_BASE;
-        for &slot in dma_buffer_slots.as_ref().unwrap() {
+        for &slot in dma_slots {
             iospace_map_frame(
-                cptr(iospace_slot.unwrap()),
+                cptr(iospace),
                 cptr(slot),
                 iova,
                 3,  // RW access
