@@ -304,7 +304,13 @@ where
                 .map_frame(page_vaddr, pages.frame_cptr, VmRights::RW)
                 .is_err()
             {
-                // TODO: Unmap already mapped pages and free
+                // Unmap already mapped pages
+                for j in 0..i {
+                    let unmap_vaddr = vaddr + (j * PAGE_SIZE);
+                    let _ = self.vm.unmap_frame(unmap_vaddr);
+                }
+                // Return pages to pool
+                let _ = self.pool.free_pages(pages);
                 return Err(AllocError::MapFailed);
             }
         }
@@ -482,7 +488,13 @@ where
                 .map_frame(page_vaddr, pages.frame_cptr, VmRights::RW)
                 .is_err()
             {
-                // TODO: Unmap and free
+                // Unmap already mapped pages
+                for j in 0..i {
+                    let unmap_vaddr = vaddr + (j * PAGE_SIZE);
+                    let _ = self.vm.unmap_frame(unmap_vaddr);
+                }
+                // Return pages to pool
+                let _ = self.pool.free_pages(pages);
                 return Err(AllocError::MapFailed);
             }
         }
