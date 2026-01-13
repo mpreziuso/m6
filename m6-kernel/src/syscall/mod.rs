@@ -21,6 +21,7 @@ pub mod error;
 pub mod iommu_ops;
 pub mod irq_ops;
 pub mod mem_ops;
+pub mod misc_ops;
 pub mod numbers;
 pub mod tcb_ops;
 pub mod timer_ops;
@@ -199,6 +200,9 @@ fn dispatch_syscall(
         Syscall::DmaPoolCreate => iommu_ops::handle_dma_pool_create(args),
         Syscall::DmaPoolAlloc => iommu_ops::handle_dma_pool_alloc(args),
         Syscall::DmaPoolFree => iommu_ops::handle_dma_pool_free(args),
+
+        // Miscellaneous operations
+        Syscall::GetRandom => misc_ops::handle_get_random(args),
 
         // Debug syscall
         Syscall::DebugPutChar => {

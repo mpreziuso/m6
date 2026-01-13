@@ -1,0 +1,27 @@
+[package]
+name = "m6-alloc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hardened userspace heap allocator for the M6 microkernel"
+
+[lib]
+name = "m6_alloc"
+
+[dependencies]
+spin = { workspace = true }
+
+[features]
+default = []
+# Bounded quarantine for delayed reuse (hardening)
+quarantine = []
+# Guard page after large allocations (hardening)
+guard-pages = []
+# Poison patterns on alloc/free (debug builds)
+debug-poison = []
+# Double-free bitmap checks in release builds
+release-double-free = []
+# Statistics collection
+stats = []

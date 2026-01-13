@@ -125,6 +125,11 @@ pub enum Syscall {
     /// Free DMA buffer.
     DmaPoolFree = 106,
 
+    // === Miscellaneous Operations ===
+    /// Get cryptographically random bytes.
+    /// Used for ASLR, stack canaries, heap allocator secrets, etc.
+    GetRandom = 112,
+
     // === Debug (development only) ===
     /// Debug print character.
     DebugPutChar = 255,
@@ -182,6 +187,7 @@ impl Syscall {
             104 => Some(Self::DmaPoolCreate),
             105 => Some(Self::DmaPoolAlloc),
             106 => Some(Self::DmaPoolFree),
+            112 => Some(Self::GetRandom),
             255 => Some(Self::DebugPutChar),
             _ => None,
         }
@@ -238,6 +244,7 @@ impl Syscall {
             Self::DmaPoolCreate => "DmaPoolCreate",
             Self::DmaPoolAlloc => "DmaPoolAlloc",
             Self::DmaPoolFree => "DmaPoolFree",
+            Self::GetRandom => "GetRandom",
             Self::DebugPutChar => "DebugPutChar",
         }
     }

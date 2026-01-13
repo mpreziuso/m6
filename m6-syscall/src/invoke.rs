@@ -1220,3 +1220,43 @@ pub unsafe fn ipc_get_recv_caps() -> [u64; 4] {
     caps[..count.min(4)].copy_from_slice(&ipc_buf.caps_or_badges[..count.min(4)]);
     caps
 }
+
+// -- Miscellaneous Operations
+
+/// Get cryptographically random bytes from the kernel.
+///
+/// This syscall provides random bytes suitable for security-sensitive
+/// operations like stack canaries, ASLR, and heap allocator secrets.
+///
+/// # Arguments
+///
+/// * `buf` - Buffer to fill with random bytes (max 256 bytes)
+///
+/// # Returns
+///
+/// Number of bytes written on success.
+///
+/// # Errors
+///
+/// * `InvalidArg` - Buffer length exceeds 256 bytes
+/// * `Range` - Buffer address is invalid
+///
+/// # Example
+///
+/// ```ignore
+/// let mut secret = [0u8; 8];
+/// let bytes = get_random(&mut secret)?;
+/// assert_eq!(bytes, 8);
+/// ```
+#[cfg(feature = "userspace")]
+#[inline]
+pub fn get_random(buf: &mut [u8]) -> SyscallResult {
+    if buf.len() > 256 {
+        return Err(crate::error::SyscallError::InvalidArg);
+    }
+    check_result(syscall2(
+        Syscall::GetRandom,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+    ))
+}
