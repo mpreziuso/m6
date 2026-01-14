@@ -177,6 +177,7 @@ fn dispatch_syscall(
         Syscall::TcbSuspend => tcb_ops::handle_tcb_suspend(args),
         Syscall::TcbSetPriority => tcb_ops::handle_tcb_set_priority(args),
         Syscall::TcbBindNotification => tcb_ops::handle_tcb_bind_notification(args),
+        Syscall::TcbExit => tcb_ops::handle_tcb_exit(args),
 
         // IRQ operations
         Syscall::IrqAck => irq_ops::handle_irq_ack(args),

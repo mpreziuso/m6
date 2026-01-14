@@ -7,11 +7,13 @@
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+// Use m6-std as our standard library
+extern crate m6_std as std;
+
 mod elf;
 mod io;
 pub mod process;
 
-use core::panic::PanicInfo;
 use m6_cap::root_slots::Slot;
 use m6_syscall::{
     invoke::{sched_yield, ipc_set_recv_slots, ipc_get_recv_caps},
@@ -542,23 +544,4 @@ fn print_spawn_error(e: process::SpawnError) {
     }
 }
 
-/// Panic handler - print message and loop forever.
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    io::puts("\n\x1b[31m*** INIT PANIC ***\x1b[0m\n");
-    if let Some(location) = info.location() {
-        io::puts("  at ");
-        io::puts(location.file());
-        io::puts(":");
-        io::put_u64(location.line() as u64);
-        io::newline();
-    }
-    if let Some(msg) = info.message().as_str() {
-        io::puts("  ");
-        io::puts(msg);
-        io::newline();
-    }
-    loop {
-        sched_yield();
-    }
-}
+// Panic handler is provided by m6-std

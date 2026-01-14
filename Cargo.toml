@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["m6-alloc","m6-arch", "m6-boot", "m6-cap", "m6-common", "m6-kernel", "m6-paging", "m6-pal", "m6-syscall", "m6-user"]
+members = ["m6-alloc", "m6-arch", "m6-boot", "m6-cap", "m6-common", "m6-kernel", "m6-paging", "m6-pal", "m6-std", "m6-syscall", "m6-user"]
 
 [workspace.package]
 version = "0.1.0"

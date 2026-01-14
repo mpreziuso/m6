@@ -13,6 +13,8 @@
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate m6_std as std;
+
 mod block;
 mod error;
 mod handles;
@@ -21,8 +23,6 @@ mod ipc;
 // I/O module for console output
 #[path = "../../io.rs"]
 mod io;
-
-use core::panic::PanicInfo;
 
 use embedded_sdmmc::{Mode, ShortFileName, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use m6_syscall::invoke::{map_frame, recv, reply_recv, sched_yield};
@@ -483,23 +483,4 @@ fn handle_stat_fs() -> u64 {
     response::OK
 }
 
-/// Panic handler.
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    io::puts("\n\x1b[31m*** SVC-FAT32 PANIC ***\x1b[0m\n");
-    if let Some(location) = info.location() {
-        io::puts("  at ");
-        io::puts(location.file());
-        io::puts(":");
-        io::put_u64(location.line() as u64);
-        io::newline();
-    }
-    if let Some(msg) = info.message().as_str() {
-        io::puts("  ");
-        io::puts(msg);
-        io::newline();
-    }
-    loop {
-        sched_yield();
-    }
-}
+// Panic handler is provided by m6-std

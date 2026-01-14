@@ -17,6 +17,8 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(dead_code)]
 
+extern crate m6_std as std;
+
 mod boot_info;
 mod dtb;
 mod ipc;
@@ -29,7 +31,6 @@ mod spawn;
 #[path = "../io.rs"]
 mod io;
 
-use core::panic::PanicInfo;
 use m6_syscall::invoke::{recv, reply_recv, sched_yield, signal, ipc_set_send_caps};
 use m6_syscall::slot_to_cptr;
 
@@ -734,23 +735,4 @@ fn handle_driver_death(registry: &mut Registry, fault_badge: u64) {
     }
 }
 
-/// Panic handler.
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    io::puts("\n\x1b[31m*** DEVICE-MGR PANIC ***\x1b[0m\n");
-    if let Some(location) = info.location() {
-        io::puts("  at ");
-        io::puts(location.file());
-        io::puts(":");
-        io::put_u64(location.line() as u64);
-        io::newline();
-    }
-    if let Some(msg) = info.message().as_str() {
-        io::puts("  ");
-        io::puts(msg);
-        io::newline();
-    }
-    loop {
-        sched_yield();
-    }
-}
+// Panic handler is provided by m6-std

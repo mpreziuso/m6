@@ -14,6 +14,8 @@
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate m6_std as std;
+
 mod blk;
 mod ipc;
 mod virtio;
@@ -23,7 +25,6 @@ mod virtqueue;
 #[path = "../../io.rs"]
 mod io;
 
-use core::panic::PanicInfo;
 use m6_syscall::invoke::{
     dma_pool_alloc, ipc_get_recv_caps, ipc_set_recv_slots, iospace_map_frame,
     iospace_unmap_frame, irq_set_handler, map_frame, recv, reply_recv,
@@ -532,23 +533,4 @@ fn handle_flush(device: &mut VirtioBlkDevice) -> u64 {
     ipc::response::OK
 }
 
-/// Panic handler.
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    io::puts("\n\x1b[31m*** DRV-VIRTIO-BLK PANIC ***\x1b[0m\n");
-    if let Some(location) = info.location() {
-        io::puts("  at ");
-        io::puts(location.file());
-        io::puts(":");
-        io::put_u64(location.line() as u64);
-        io::newline();
-    }
-    if let Some(msg) = info.message().as_str() {
-        io::puts("  ");
-        io::puts(msg);
-        io::newline();
-    }
-    loop {
-        sched_yield();
-    }
-}
+// Panic handler is provided by m6-std

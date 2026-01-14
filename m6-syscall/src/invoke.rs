@@ -832,6 +832,27 @@ pub fn tcb_suspend(tcb: u64) -> SyscallResult {
     check_result(syscall1(Syscall::TcbSuspend, tcb))
 }
 
+/// Exit the current thread with an exit code.
+///
+/// This syscall terminates the calling thread, setting it to Inactive state
+/// and storing the exit code. If the thread has a bound notification, it will
+/// be signalled with the exit code as the badge.
+///
+/// This syscall never returns.
+///
+/// # Arguments
+///
+/// * `code` - Exit code (conventionally 0 = success, non-zero = failure)
+#[inline]
+pub fn tcb_exit(code: i32) -> ! {
+    syscall1(Syscall::TcbExit, code as u64);
+    // The syscall should never return, but in case of an error,
+    // loop indefinitely (the kernel should have removed us from the scheduler)
+    loop {
+        sched_yield();
+    }
+}
+
 // -- IRQ Operations
 
 /// Claim an IRQ from IRQControl and create an IRQHandler capability.

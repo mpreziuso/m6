@@ -11,6 +11,8 @@
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate m6_std as std;
+
 mod ipc;
 
 // Re-use io module from parent crate (for early debug output)
@@ -304,14 +306,4 @@ fn handle_request(state: &SmmuState, ipc: &IpcRecvResult) -> u64 {
     }
 }
 
-#[panic_handler]
-fn panic(info: &core::panic::PanicInfo) -> ! {
-    puts("[SMMU] PANIC: ");
-    if let Some(msg) = info.message().as_str() {
-        puts(msg);
-    }
-    newline();
-    loop {
-        core::hint::spin_loop();
-    }
-}
+// Panic handler is provided by m6-std

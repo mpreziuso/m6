@@ -13,14 +13,14 @@
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+extern crate m6_std as std;
+
 mod ipc;
 mod pl011;
 
 // Re-use io module from parent crate (for early debug output)
 #[path = "../../io.rs"]
 mod io;
-
-use core::panic::PanicInfo;
 use m6_syscall::invoke::{irq_ack, irq_set_handler, map_frame, recv, reply_recv, sched_yield};
 
 use pl011::Pl011;
@@ -363,23 +363,4 @@ fn handle_get_status(uart: &Pl011, rx_buffer: &RxBuffer) -> u64 {
     ipc::response::OK
 }
 
-/// Panic handler.
-#[panic_handler]
-fn panic(info: &PanicInfo) -> ! {
-    io::puts("\n\x1b[31m*** DRV-UART PANIC ***\x1b[0m\n");
-    if let Some(location) = info.location() {
-        io::puts("  at ");
-        io::puts(location.file());
-        io::puts(":");
-        io::put_u64(location.line() as u64);
-        io::newline();
-    }
-    if let Some(msg) = info.message().as_str() {
-        io::puts("  ");
-        io::puts(msg);
-        io::newline();
-    }
-    loop {
-        sched_yield();
-    }
-}
+// Panic handler is provided by m6-std

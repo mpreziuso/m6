@@ -210,6 +210,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "m6-std"
+version = "0.1.0"
+dependencies = [
+ "m6-alloc",
+ "m6-cap",
+ "m6-common",
+ "m6-syscall",
+ "spin 0.10.0",
+]
+
+[[package]]
 name = "m6-syscall"
 version = "0.1.0"
 dependencies = [
@@ -225,6 +236,7 @@ dependencies = [
  "m6-arch",
  "m6-cap",
  "m6-common",
+ "m6-std",
  "m6-syscall",
  "tar-no-std",
 ]

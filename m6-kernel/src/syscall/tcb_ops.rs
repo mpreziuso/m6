@@ -439,6 +439,50 @@ pub fn handle_tcb_bind_notification(args: &SyscallArgs) -> SyscallResult {
     Ok(0)
 }
 
+/// Handle TcbExit syscall.
+///
+/// Terminates the current thread with an exit code. The thread is set to
+/// Inactive state and the exit code is stored in the TCB. If the thread
+/// has a bound notification, it will be signalled with the exit code as the badge.
+///
+/// This syscall never returns.
+///
+/// # ABI
+///
+/// - x0: Exit code (i32)
+///
+/// # Returns
+///
+/// Never returns (triggers reschedule).
+pub fn handle_tcb_exit(args: &SyscallArgs) -> SyscallResult {
+    let exit_code = args.arg0 as i32;
+
+    // Get current task
+    let tcb_ref = sched::current_task().ok_or(SyscallError::InvalidState)?;
+
+    // Store exit code and set state to Inactive
+    let bound_notification = object_table::with_tcb_mut(tcb_ref, |tcb_full| {
+        tcb_full.tcb.exit_code = exit_code;
+        tcb_full.tcb.state = ThreadState::Inactive;
+        tcb_full.tcb.bound_notification
+    });
+
+    // Remove from scheduler
+    sched::remove_task(tcb_ref);
+
+    // Signal bound notification with exit code as badge (if any)
+    if bound_notification.is_valid() {
+        let _ = ipc::do_signal(bound_notification, exit_code as u64);
+    }
+
+    // Request reschedule - the kernel will switch to another task
+    sched::request_reschedule();
+
+    // This syscall never returns in practice (we're removed from scheduler)
+    // but we need to return something for the type system
+    Ok(0)
+}
+
 // -- Helper functions
 
 /// Resume a TCB (internal helper).

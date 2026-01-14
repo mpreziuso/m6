@@ -84,6 +84,8 @@ pub enum Syscall {
     TcbSetPriority = 69,
     /// Bind notification to TCB.
     TcbBindNotification = 70,
+    /// Exit the current thread with an exit code.
+    TcbExit = 71,
 
     // === IRQ Operations ===
     /// Acknowledge IRQ.
@@ -170,6 +172,7 @@ impl Syscall {
             68 => Some(Self::TcbSuspend),
             69 => Some(Self::TcbSetPriority),
             70 => Some(Self::TcbBindNotification),
+            71 => Some(Self::TcbExit),
             80 => Some(Self::IrqAck),
             81 => Some(Self::IrqSetHandler),
             82 => Some(Self::IrqClearHandler),
@@ -227,6 +230,7 @@ impl Syscall {
             Self::TcbSuspend => "TcbSuspend",
             Self::TcbSetPriority => "TcbSetPriority",
             Self::TcbBindNotification => "TcbBindNotification",
+            Self::TcbExit => "TcbExit",
             Self::IrqAck => "IrqAck",
             Self::IrqSetHandler => "IrqSetHandler",
             Self::IrqClearHandler => "IrqClearHandler",

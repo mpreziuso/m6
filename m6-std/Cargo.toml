@@ -1,0 +1,29 @@
+[package]
+name = "m6-std"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Standard library for M6 microkernel userspace programs"
+
+[lib]
+name = "m6_std"
+
+[dependencies]
+m6-syscall = { workspace = true, features = ["userspace"] }
+m6-cap = { workspace = true }
+m6-alloc = { path = "../m6-alloc" }
+m6-common = { workspace = true }
+spin = { workspace = true }
+
+[features]
+default = ["full"]
+full = ["alloc", "thread", "sync", "io", "ipc", "cap", "process", "time"]
+alloc = []
+thread = ["alloc", "sync"]
+sync = []
+io = ["alloc"]
+ipc = []
+cap = []
+process = []
+time = []

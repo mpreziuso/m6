@@ -121,6 +121,8 @@ pub struct TcbObject {
     pub caller: ObjectRef,
     /// CPU affinity (which CPU this thread runs on, -1 for any).
     pub affinity: i8,
+    /// Exit code (set when thread exits via TcbExit).
+    pub exit_code: i32,
     /// Thread name (for debugging).
     pub name: [u8; 16],
 }
@@ -147,6 +149,7 @@ impl TcbObject {
             reply_slot: ObjectRef::NULL,
             caller: ObjectRef::NULL,
             affinity: -1,
+            exit_code: 0,
             name: [0; 16],
         }
     }
