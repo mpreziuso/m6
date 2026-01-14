@@ -17,7 +17,10 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![allow(dead_code)]
 
-extern crate m6_std as std;
+extern crate alloc;
+
+#[path = "../rt.rs"]
+mod rt;
 
 mod boot_info;
 mod dtb;

@@ -36,7 +36,7 @@ m6-syscall = { path = "../m6-syscall", features = ["userspace"] }
 m6-cap = { path = "../m6-cap" }
 m6-common = { path = "../m6-common" }
 m6-arch = { path = "../m6-arch" }
-m6-std = { path = "../m6-std", default-features = false, features = ["alloc"] }
+m6-alloc = { path = "../m6-alloc" }
 fdt = "0.1"
 tar-no-std = "0.4"
 embedded-sdmmc = { version = "0.8", default-features = false }

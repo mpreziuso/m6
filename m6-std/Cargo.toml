@@ -7,7 +7,7 @@ license.workspace = true
 description = "Standard library for M6 microkernel userspace programs"
 
 [lib]
-name = "m6_std"
+name = "std"
 
 [dependencies]
 m6-syscall = { workspace = true, features = ["userspace"] }

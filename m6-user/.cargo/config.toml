@@ -1,2 +1,2 @@
 [build]
-target = "aarch64-unknown-none"
+target = "../targets/aarch64-unknown-m6.json"

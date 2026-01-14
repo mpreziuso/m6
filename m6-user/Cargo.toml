@@ -36,5 +36,5 @@ name = "mkdir"
 path = "src/bin/mkdir.rs"
 
 [dependencies]
-m6-std = { path = "../m6-std", features = ["full"] }
+# std comes from the custom sysroot
 m6-cap = { path = "../m6-cap" }

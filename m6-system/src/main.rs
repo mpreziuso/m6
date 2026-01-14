@@ -7,9 +7,9 @@
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-// Use m6-std as our standard library
-extern crate m6_std as std;
+extern crate alloc;
 
+mod rt;
 mod elf;
 mod io;
 pub mod process;

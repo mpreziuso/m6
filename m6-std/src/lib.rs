@@ -129,12 +129,14 @@ pub use alloc::string::ToString;
 #[cfg(feature = "alloc")]
 pub use alloc::vec::Vec;
 
-// Print macros
+// Print macros - explicitly use fmt::Write to avoid trait ambiguity
 #[macro_export]
 macro_rules! print {
     ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let _ = write!($crate::io::stdout(), $($arg)*);
+        let _ = core::fmt::Write::write_fmt(
+            &mut $crate::io::stdout(),
+            core::format_args!($($arg)*)
+        );
     }};
 }
 
@@ -144,16 +146,21 @@ macro_rules! println {
         $crate::print!("\n")
     };
     ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let _ = writeln!($crate::io::stdout(), $($arg)*);
+        let _ = core::fmt::Write::write_fmt(
+            &mut $crate::io::stdout(),
+            core::format_args!($($arg)*)
+        );
+        let _ = core::fmt::Write::write_str(&mut $crate::io::stdout(), "\n");
     }};
 }
 
 #[macro_export]
 macro_rules! eprint {
     ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let _ = write!($crate::io::stderr(), $($arg)*);
+        let _ = core::fmt::Write::write_fmt(
+            &mut $crate::io::stderr(),
+            core::format_args!($($arg)*)
+        );
     }};
 }
 
@@ -163,8 +170,11 @@ macro_rules! eprintln {
         $crate::eprint!("\n")
     };
     ($($arg:tt)*) => {{
-        use core::fmt::Write;
-        let _ = writeln!($crate::io::stderr(), $($arg)*);
+        let _ = core::fmt::Write::write_fmt(
+            &mut $crate::io::stderr(),
+            core::format_args!($($arg)*)
+        );
+        let _ = core::fmt::Write::write_str(&mut $crate::io::stderr(), "\n");
     }};
 }
 

@@ -13,7 +13,10 @@
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-extern crate m6_std as std;
+extern crate alloc;
+
+#[path = "../../rt.rs"]
+mod rt;
 
 mod ipc;
 mod pl011;

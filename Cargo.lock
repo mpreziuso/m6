@@ -233,10 +233,10 @@ version = "0.1.0"
 dependencies = [
  "embedded-sdmmc",
  "fdt",
+ "m6-alloc",
  "m6-arch",
  "m6-cap",
  "m6-common",
- "m6-std",
  "m6-syscall",
  "tar-no-std",
 ]
@@ -246,7 +246,6 @@ name = "m6-user"
 version = "0.1.0"
 dependencies = [
  "m6-cap",
- "m6-std",
 ]
 
 [[package]]
