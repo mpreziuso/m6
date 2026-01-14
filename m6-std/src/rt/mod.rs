@@ -1,6 +1,31 @@
 //! Runtime initialisation module
 //!
 //! Provides the entry point and runtime setup for M6 userspace programs.
+//!
+//! # Entry Point
+//!
+//! This module provides the `_start` entry point that the kernel jumps to
+//! when starting a userspace program. It initialises the runtime and calls
+//! the user's `main()` function.
+//!
+//! # Usage
+//!
+//! User programs should define a `main` function:
+//!
+//! ```ignore
+//! #![no_std]
+//! #![no_main]
+//!
+//! extern crate m6_std as std;
+//!
+//! use std::println;
+//!
+//! #[no_mangle]
+//! fn main() -> i32 {
+//!     println!("Hello from M6!");
+//!     0
+//! }
+//! ```
 
 pub mod lang_items;
 pub mod providers;
@@ -62,4 +87,44 @@ pub unsafe fn init(boot_info_ptr: usize) -> Result<(), &'static str> {
     }
 
     Ok(())
+}
+
+// -- Entry point (only when entry-point feature is enabled)
+
+#[cfg(feature = "entry-point")]
+mod entry {
+    use super::init;
+    use crate::process::exit;
+
+    unsafe extern "Rust" {
+        /// User-defined main function.
+        ///
+        /// This function must be defined by the user program with `#[unsafe(no_mangle)]`.
+        safe fn main() -> i32;
+    }
+
+    /// Program entry point.
+    ///
+    /// This function is called by the kernel when starting a userspace program.
+    /// It initialises the runtime and calls the user's `main()` function.
+    ///
+    /// # Safety
+    ///
+    /// This function must only be called once by the kernel at program start.
+    /// The user must define a `main` function with `#[unsafe(no_mangle)]`.
+    #[unsafe(no_mangle)]
+    #[unsafe(link_section = ".text.entry")]
+    pub unsafe extern "C" fn _start() -> ! {
+        // Initialise runtime (boot_info_ptr is 0 for non-init processes)
+        // SAFETY: Called once at program start
+        unsafe {
+            let _ = init(0);
+        }
+
+        // Call user's main function
+        let exit_code = main();
+
+        // Exit with the return code
+        exit(exit_code);
+    }
 }

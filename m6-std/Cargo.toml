@@ -18,7 +18,7 @@ spin = { workspace = true }
 
 [features]
 default = ["full"]
-full = ["alloc", "thread", "sync", "io", "ipc", "cap", "process", "time"]
+full = ["alloc", "thread", "sync", "io", "ipc", "cap", "process", "time", "entry-point"]
 alloc = []
 thread = ["alloc", "sync"]
 sync = []
@@ -27,3 +27,5 @@ ipc = []
 cap = []
 process = []
 time = []
+# Provides the _start entry point that calls user's main()
+entry-point = ["process"]

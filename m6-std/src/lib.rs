@@ -5,7 +5,9 @@
 //!
 //! # Usage
 //!
-//! In your crate root, alias m6-std as `std`:
+//! In your crate root, alias m6-std as `std`. The library provides the
+//! entry point (`_start`) which initialises the runtime and calls your
+//! `main()` function:
 //!
 //! ```ignore
 //! #![no_std]
@@ -15,7 +17,7 @@
 //!
 //! use std::println;
 //!
-//! #[no_mangle]
+//! #[unsafe(no_mangle)]
 //! fn main() -> i32 {
 //!     println!("Hello from M6!");
 //!     0

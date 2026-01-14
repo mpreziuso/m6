@@ -1,0 +1,42 @@
+[package]
+name = "m6-system"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "M6 system components: init, device-mgr, drivers, and services"
+
+[[bin]]
+name = "init"
+path = "src/main.rs"
+
+[[bin]]
+name = "device-mgr"
+path = "src/device_mgr/main.rs"
+
+[[bin]]
+name = "drv-uart-pl011"
+path = "src/drivers/uart_pl011/main.rs"
+
+[[bin]]
+name = "drv-smmu"
+path = "src/drivers/smmu/main.rs"
+
+[[bin]]
+name = "drv-virtio-blk"
+path = "src/drivers/virtio_blk/main.rs"
+
+[[bin]]
+name = "svc-fat32"
+path = "src/services/fat32/main.rs"
+
+[dependencies]
+m6-syscall = { path = "../m6-syscall", features = ["userspace"] }
+m6-cap = { path = "../m6-cap" }
+m6-common = { path = "../m6-common" }
+m6-arch = { path = "../m6-arch" }
+m6-std = { path = "../m6-std", default-features = false, features = ["alloc"] }
+fdt = "0.1"
+tar-no-std = "0.4"
+embedded-sdmmc = { version = "0.8", default-features = false }

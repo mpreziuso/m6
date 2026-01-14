@@ -8,10 +8,16 @@ boot:
 kernel:
 	cargo build --package m6-kernel --target aarch64-unknown-none --release
 
+# Build system components (init, device-mgr, drivers, services)
+system:
+	cargo build --package m6-system --target aarch64-unknown-none --release
+
+# Build user applications (shell, utilities)
 user:
 	cargo build --package m6-user --target aarch64-unknown-none --release
 
-initrd: user
+# Create initrd from system binaries (core system only)
+initrd: system
 	@mkdir -p target/initrd
 	cd target/aarch64-unknown-none/release && \
 		tar --format=ustar -cf ../../../target/initrd/INITRD init device-mgr drv-uart-pl011 drv-smmu drv-virtio-blk svc-fat32
@@ -19,6 +25,16 @@ initrd: user
 	@echo "Contents:"
 	@tar -tvf target/initrd/INITRD
 
+# Create initrd with user applications included
+initrd-full: system user
+	@mkdir -p target/initrd
+	cd target/aarch64-unknown-none/release && \
+		tar --format=ustar -cf ../../../target/initrd/INITRD \
+		init device-mgr drv-uart-pl011 drv-smmu drv-virtio-blk svc-fat32 \
+		shell ls cat cp echo mkdir
+	@echo "Created full initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
+	@echo "Contents:"
+	@tar -tvf target/initrd/INITRD
 
 clean:
 	cargo clean
