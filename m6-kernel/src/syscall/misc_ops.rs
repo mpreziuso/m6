@@ -77,8 +77,8 @@ fn fill_random(buf: &mut [u8]) {
 ///
 /// Tries RNDR first (ARMv8.5-RNG), falls back to timer-based entropy.
 fn read_random_u64() -> u64 {
-    // Try RNDR instruction (ARMv8.5-RNG feature)
-    if let Some(val) = try_rndr() {
+    // Try hardware RNG first
+    if let Some(val) = m6_arch::cpu::read_random() {
         return val;
     }
 
@@ -86,40 +86,14 @@ fn read_random_u64() -> u64 {
     fallback_entropy()
 }
 
-/// Try to read from ARMv8.5 RNDR register.
-///
-/// Returns None if RNDR fails (entropy exhausted or not supported).
-fn try_rndr() -> Option<u64> {
-    let val: u64;
-    let success: u64;
-
-    // SAFETY: RNDR is a safe read-only register.
-    // On ARMv8.5+ systems with RNG feature, this reads hardware random.
-    // On older systems or when entropy is exhausted, it sets the Z flag.
-    unsafe {
-        core::arch::asm!(
-            "mrs {val}, s3_3_c2_c4_0",  // RNDR encoding
-            "cset {success}, ne",        // Success if Z flag not set
-            val = out(reg) val,
-            success = out(reg) success,
-            options(nomem, nostack)
-        );
-    }
-
-    if success != 0 {
-        Some(val)
-    } else {
-        None
-    }
-}
-
-/// Generate entropy from timer and performance counters.
+/// Generate entropy from timer counter.
 ///
 /// This is a fallback when RNDR is not available. It provides
 /// some entropy but should not be used for high-security purposes.
 fn fallback_entropy() -> u64 {
     // Read generic timer counter
     let cntpct: u64;
+    // SAFETY: Reading CNTPCT_EL0 is safe.
     unsafe {
         core::arch::asm!(
             "mrs {}, cntpct_el0",
@@ -128,8 +102,7 @@ fn fallback_entropy() -> u64 {
         );
     }
 
-    // Mix with a simple hash
-    // Using a variant of SplitMix64
+    // Mix with SplitMix64
     let mut z = cntpct;
     z = z.wrapping_add(0x9e37_79b9_7f4a_7c15);
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);

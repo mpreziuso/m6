@@ -63,8 +63,14 @@ pub unsafe fn enable_mmu_and_jump(
             "msr sctlr_el1, x9",
             "isb",
 
+            // Switch to using SP_EL1 for kernel stack
+            // This is critical: SPSel=1 means SP refers to SP_EL1 when at EL1
+            // SP_EL0 will be used for userspace stack pointers
+            "msr spsel, #1",
+
             // Set up stack pointer to kernel stack (virtual address)
             // Stack must be 16-byte aligned per AArch64 ABI
+            // Since SPSel=1, this sets SP_EL1
             "mov sp, {stack}",
 
             // Set up arguments and jump to kernel

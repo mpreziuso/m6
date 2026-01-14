@@ -483,6 +483,50 @@ pub fn handle_tcb_exit(args: &SyscallArgs) -> SyscallResult {
     Ok(0)
 }
 
+/// Handle TcbSleep syscall.
+///
+/// Puts the current thread to sleep for a specified duration. The thread is
+/// set to Sleeping state and added to the sleep queue. The kernel's timer
+/// system will wake the thread after the specified time has elapsed.
+///
+/// # ABI
+///
+/// - x0: Duration to sleep in nanoseconds
+///
+/// # Returns
+///
+/// - 0 on success (after wakeup)
+/// - Negative error code on failure
+pub fn handle_tcb_sleep(args: &SyscallArgs) -> SyscallResult {
+    let nanoseconds = args.arg0;
+
+    // Get current task
+    let tcb_ref = sched::current_task().ok_or(SyscallError::InvalidState)?;
+
+    // Zero sleep is a no-op (just yield)
+    if nanoseconds == 0 {
+        sched::request_reschedule();
+        return Ok(0);
+    }
+
+    // Set state to Sleeping and remove from run queue
+    let _: () = object_table::with_tcb_mut(tcb_ref, |tcb_full| {
+        tcb_full.tcb.state = ThreadState::Sleeping;
+    });
+
+    // Remove from scheduler run queue
+    sched::remove_task(tcb_ref);
+
+    // Add to sleep queue
+    sched::sleep::sleep_for(tcb_ref, nanoseconds);
+
+    // Request reschedule to switch to another task
+    sched::request_reschedule();
+
+    // Return success - this will be the return value when the thread wakes up
+    Ok(0)
+}
+
 // -- Helper functions
 
 /// Resume a TCB (internal helper).

@@ -473,6 +473,9 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     // Request UART driver via ENSURE
     // This triggers device-mgr to spawn the PL011 driver
     request_uart_driver(registry_ep_slot, radix, &mut next_slot);
+
+    // Spawn the shell
+    spawn_shell(boot_info, &mut next_slot);
 }
 
 /// Request the UART driver from device-mgr.
@@ -525,6 +528,37 @@ fn request_uart_driver(registry_ep: u64, radix: u8, next_slot: &mut u64) {
             io::newline();
         }
     }
+}
+
+/// Spawn the shell.
+fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64) {
+    let elf_data = match find_in_initrd(boot_info, "shell") {
+        Some(data) => data,
+        None => return,
+    };
+
+    let radix = boot_info.cnode_radix as u8;
+    let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
+
+    let config = SpawnConfig {
+        elf_data,
+        root_cnode: Slot::RootCNode as u64,
+        cnode_radix: radix,
+        ram_untyped: Slot::FirstUntyped as u64,
+        asid_pool: Slot::AsidPool as u64,
+        next_free_slot: *next_slot,
+        initial_caps: &[],
+        x0: 0,
+        resume: false,
+    };
+
+    let result = match process::spawn_process(&config) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    *next_slot = result.next_free_slot;
+    let _ = m6_syscall::invoke::tcb_resume(cptr(result.tcb_slot));
 }
 
 fn print_spawn_error(e: process::SpawnError) {

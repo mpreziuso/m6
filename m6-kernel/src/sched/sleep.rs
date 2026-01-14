@@ -115,7 +115,8 @@ fn wake_sleeping_task(tcb_ref: ObjectRef) {
     with_tcb_mut(tcb_ref, |tcb| {
         // Only wake if the task is in a sleeping/blocked state
         match tcb.tcb.state {
-            ThreadState::BlockedOnNotification
+            ThreadState::Sleeping
+            | ThreadState::BlockedOnNotification
             | ThreadState::BlockedOnSend
             | ThreadState::BlockedOnRecv
             | ThreadState::BlockedOnReply => {

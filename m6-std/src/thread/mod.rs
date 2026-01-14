@@ -390,12 +390,42 @@ pub fn current_id() -> u64 {
 /// Sleep for a short period using busy-wait.
 ///
 /// This is a simple busy-wait loop for short delays. For longer delays,
-/// use the timer system.
+/// use [`sleep`] instead.
 pub fn sleep_ticks(ticks: u64) {
     let start = crate::time::Instant::now();
     let target = start.as_ticks() + ticks;
     while crate::time::Instant::now().as_ticks() < target {
         core::hint::spin_loop();
+    }
+}
+
+/// Puts the current thread to sleep for at least the specified duration.
+///
+/// The thread is blocked and the kernel's timer system will wake it after
+/// the specified duration has elapsed. This is more efficient than busy-waiting
+/// as it allows other threads to run.
+///
+/// # Example
+///
+/// ```ignore
+/// use m6_std::thread;
+/// use core::time::Duration;
+///
+/// // Sleep for 100 milliseconds
+/// thread::sleep(Duration::from_millis(100));
+/// ```
+///
+/// # Platform behaviour
+///
+/// The actual sleep time may be slightly longer than requested due to
+/// scheduler latency and timer resolution.
+#[inline]
+pub fn sleep(duration: core::time::Duration) {
+    let nanos = duration.as_nanos();
+    // Cap to u64::MAX nanoseconds (over 500 years)
+    let nanos = nanos.min(u64::MAX as u128) as u64;
+    if nanos > 0 {
+        let _ = m6_syscall::invoke::tcb_sleep(nanos);
     }
 }
 

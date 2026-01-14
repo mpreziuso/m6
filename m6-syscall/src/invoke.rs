@@ -853,6 +853,23 @@ pub fn tcb_exit(code: i32) -> ! {
     }
 }
 
+/// Sleep the current thread for a specified duration.
+///
+/// The thread is suspended and will be woken by the kernel's timer
+/// system after the specified number of nanoseconds have elapsed.
+///
+/// # Arguments
+///
+/// * `nanoseconds` - Duration to sleep in nanoseconds
+///
+/// # Returns
+///
+/// Returns `Ok(())` on success, or an error if the syscall fails.
+#[inline]
+pub fn tcb_sleep(nanoseconds: u64) -> SyscallResult {
+    check_result(syscall1(Syscall::TcbSleep, nanoseconds))
+}
+
 // -- IRQ Operations
 
 /// Claim an IRQ from IRQControl and create an IRQHandler capability.

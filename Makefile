@@ -1,6 +1,6 @@
 .PHONY: clean check clippy run debug fmt fmt-check sysroot system user
 
-all: boot kernel initrd
+all: boot kernel initrd-full
 
 boot:
 	cargo build --package m6-boot --target aarch64-unknown-uefi --release
@@ -80,7 +80,14 @@ clippy:
 run: all
 	./scripts/run-qemu.sh
 
+# Run with user applications included
+run-full: boot kernel initrd-full
+	./scripts/run-qemu.sh
+
 debug: all
+	./scripts/run-qemu.sh -s -S
+
+debug-full: boot kernel initrd-full
 	./scripts/run-qemu.sh -s -S
 
 fmt:

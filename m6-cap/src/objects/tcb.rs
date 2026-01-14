@@ -39,6 +39,8 @@ pub enum ThreadState {
     Suspended = 6,
     /// Restarting after a fault.
     Restart = 7,
+    /// Sleeping (timer-based wakeup).
+    Sleeping = 8,
 }
 
 impl ThreadState {
@@ -59,6 +61,7 @@ impl ThreadState {
                 | Self::BlockedOnRecv
                 | Self::BlockedOnNotification
                 | Self::BlockedOnReply
+                | Self::Sleeping
         )
     }
 

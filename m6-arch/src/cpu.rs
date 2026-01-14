@@ -155,6 +155,37 @@ pub fn clean_invalidate_dcache_line(addr: usize) {
     }
 }
 
+/// Read a random value from the hardware RNG (ARMv8.5-RNG).
+///
+/// Returns `Some(value)` if successful, or `None` if:
+/// - Hardware RNG is not supported
+/// - Entropy pool is temporarily exhausted
+///
+/// Use `features::has_rng()` to check for support beforehand.
+#[inline]
+pub fn read_random() -> Option<u64> {
+    // First check if the CPU supports RNDR
+    if !features::has_rng() {
+        return None;
+    }
+
+    let val: u64;
+    let success: u64;
+
+    // SAFETY: RNDR is a safe read-only register, and we've verified support.
+    unsafe {
+        asm!(
+            "mrs {val}, s3_3_c2_c4_0",  // RNDR encoding
+            "cset {success}, ne",        // Success if Z flag not set
+            val = out(reg) val,
+            success = out(reg) success,
+            options(nomem, nostack)
+        );
+    }
+
+    if success != 0 { Some(val) } else { None }
+}
+
 /// CPU feature detection
 pub mod features {
     use aarch64_cpu::registers::Readable;

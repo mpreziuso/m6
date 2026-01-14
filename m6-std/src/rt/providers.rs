@@ -165,6 +165,12 @@ impl SecretProvider for M6SecretProvider {
 /// # Safety
 ///
 /// Must be called exactly once before any allocations.
+///
+/// # Note
+///
+/// If the process doesn't have the required capabilities (untyped memory),
+/// the allocator won't be initialised and heap allocations will panic.
+/// This is acceptable for simple processes that don't need heap allocation.
 #[cfg(feature = "alloc")]
 pub fn init_allocator(_boot_info_ptr: usize) -> Result<(), &'static str> {
     // For now, use fixed capability slots that the init process is expected to have
@@ -173,14 +179,24 @@ pub fn init_allocator(_boot_info_ptr: usize) -> Result<(), &'static str> {
     // TODO: These values should come from boot info or be passed to child processes
     // For now, use reasonable defaults that match the kernel's init setup
     const ROOT_CNODE_CPTR: u64 = 0; // Self-reference at slot 0
-    const ROOT_VSPACE_CPTR: u64 = 2 << 54; // Slot 2
-    const UNTYPED_CPTR: u64 = 15 << 54; // First untyped at slot 15
-    const CNODE_RADIX: u8 = 10; // 1024 slots
+    const ROOT_VSPACE_CPTR: u64 = 2 << 52; // Slot 2 with radix 12
+    const UNTYPED_CPTR: u64 = 15 << 52; // First untyped at slot 15 with radix 12
+    const CNODE_RADIX: u8 = 12; // 4096 slots (matches spawn_process)
     const HEAP_SLOTS_START: u64 = 128; // Start allocating heap frames at slot 128
+
+    // Try to get random - if this fails, we likely don't have proper capabilities
+    // In that case, skip allocator init (process can't use heap but can still run)
+    let secret_provider = match M6SecretProvider::new() {
+        Ok(sp) => sp,
+        Err(_) => {
+            // No capabilities available - skip allocator init
+            // Process can still run but heap allocations will panic
+            return Ok(());
+        }
+    };
 
     let vm_provider = M6VmProvider::new(ROOT_VSPACE_CPTR);
     let page_pool = M6PagePool::new(UNTYPED_CPTR, ROOT_CNODE_CPTR, CNODE_RADIX, HEAP_SLOTS_START);
-    let secret_provider = M6SecretProvider::new().map_err(|_| "Failed to get random secret")?;
 
     // SAFETY: We ensure this is called exactly once during runtime init
     unsafe {
