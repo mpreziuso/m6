@@ -20,6 +20,10 @@ name = "drv-uart-pl011"
 path = "src/drivers/uart_pl011/main.rs"
 
 [[bin]]
+name = "drv-uart-dw"
+path = "src/drivers/uart_dw8250/main.rs"
+
+[[bin]]
 name = "drv-smmu"
 path = "src/drivers/smmu/main.rs"
 

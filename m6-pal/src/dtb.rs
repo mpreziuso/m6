@@ -69,7 +69,7 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
 
     // Extract configuration from DTB
     let (gic_dist, gic_cpu, gic_redist, gic_version) = parse_gic(&fdt)?;
-    let uart_base = parse_uart(&fdt)?;
+    let (uart_base, uart_type) = parse_uart(&fdt)?;
     let (ram_base, ram_size) = parse_memory(&fdt)?;
     let timer_irq = parse_timer(&fdt)?;
     let name = parse_platform_name(&fdt)?;
@@ -84,7 +84,7 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
         gic_version,
         timer_irq,
         uart_base,
-        uart_type: UartType::Pl011,
+        uart_type,
         ram_base,
         ram_size,
         smmu_config,
@@ -111,7 +111,7 @@ pub fn parse_gic_address(fdt: &Fdt) -> Result<u64, DtbError> {
 /// This is a public utility function that can be used by the bootloader
 /// and other components that need to extract UART address from DTB.
 pub fn parse_uart_address(fdt: &Fdt) -> Result<u64, DtbError> {
-    parse_uart(fdt)
+    parse_uart(fdt).map(|(addr, _)| addr)
 }
 
 /// Parse GIC and UART addresses from raw DTB slice
@@ -168,16 +168,30 @@ fn parse_gic(fdt: &Fdt) -> Result<(u64, u64, u64, GicVersion), DtbError> {
 }
 
 /// Parse UART (serial console) configuration
-fn parse_uart(fdt: &Fdt) -> Result<u64, DtbError> {
+///
+/// Returns (base_address, uart_type)
+fn parse_uart(fdt: &Fdt) -> Result<(u64, UartType), DtbError> {
     for node in fdt.all_nodes() {
-        if let Some(compatible) = node.compatible()
-            && compatible.all().any(|c| c == "arm,pl011")
-        {
-            let reg = node.reg()
-                .ok_or(DtbError::MissingProperty("reg"))?
-                .next()
-                .ok_or(DtbError::InvalidData)?;
-            return Ok(reg.starting_address as u64);
+        if let Some(compatible) = node.compatible() {
+            // Check for ARM PL011 UART
+            if compatible.all().any(|c| c == "arm,pl011") {
+                let reg = node.reg()
+                    .ok_or(DtbError::MissingProperty("reg"))?
+                    .next()
+                    .ok_or(DtbError::InvalidData)?;
+                return Ok((reg.starting_address as u64, UartType::Pl011));
+            }
+
+            // Check for Synopsys DesignWare UART (RK3588 and others)
+            if compatible.all().any(|c| {
+                c == "snps,dw-apb-uart" || c.starts_with("rockchip,rk") && c.contains("uart")
+            }) {
+                let reg = node.reg()
+                    .ok_or(DtbError::MissingProperty("reg"))?
+                    .next()
+                    .ok_or(DtbError::InvalidData)?;
+                return Ok((reg.starting_address as u64, UartType::Dw8250));
+            }
         }
     }
     Err(DtbError::MissingNode("uart"))

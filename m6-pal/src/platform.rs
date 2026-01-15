@@ -63,6 +63,11 @@ pub trait Platform: Send + Sync {
     fn cpu_count(&self) -> Option<u32> {
         None
     }
+
+    /// Get the UART type for early console.
+    fn uart_type(&self) -> crate::dtb_platform::UartType {
+        crate::dtb_platform::UartType::Unknown
+    }
 }
 
 pub struct PlatformInfo {

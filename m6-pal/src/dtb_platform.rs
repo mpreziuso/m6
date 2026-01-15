@@ -21,6 +21,8 @@ pub enum GicVersion {
 pub enum UartType {
     /// ARM PL011 UART
     Pl011,
+    /// Synopsys DesignWare 8250 UART (RK3588, etc.)
+    Dw8250,
     /// Unknown UART type
     Unknown,
 }
@@ -71,7 +73,6 @@ pub struct DtbPlatform {
     pub(crate) gic_version: GicVersion,
     pub(crate) timer_irq: u32,
     pub(crate) uart_base: u64,
-    #[expect(dead_code)]
     pub(crate) uart_type: UartType,
     pub(crate) ram_base: u64,
     pub(crate) ram_size: u64,
@@ -149,5 +150,9 @@ impl Platform for DtbPlatform {
         } else {
             None
         }
+    }
+
+    fn uart_type(&self) -> UartType {
+        self.uart_type
     }
 }

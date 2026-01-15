@@ -27,7 +27,7 @@ user: sysroot
 initrd: system
 	@mkdir -p target/initrd
 	cd target/aarch64-unknown-none/release && \
-		tar --format=ustar -cf ../../../target/initrd/INITRD init device-mgr drv-uart-pl011 drv-smmu drv-virtio-blk svc-fat32
+		tar --format=ustar -cf ../../../target/initrd/INITRD init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk svc-fat32
 	@echo "Created initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
 	@echo "Contents:"
 	@tar -tvf target/initrd/INITRD
@@ -39,6 +39,7 @@ initrd-full: system user
 	@cp target/aarch64-unknown-none/release/init target/initrd/
 	@cp target/aarch64-unknown-none/release/device-mgr target/initrd/
 	@cp target/aarch64-unknown-none/release/drv-uart-pl011 target/initrd/
+	@cp target/aarch64-unknown-none/release/drv-uart-dw target/initrd/
 	@cp target/aarch64-unknown-none/release/drv-smmu target/initrd/
 	@cp target/aarch64-unknown-none/release/drv-virtio-blk target/initrd/
 	@cp target/aarch64-unknown-none/release/svc-fat32 target/initrd/
@@ -52,7 +53,7 @@ initrd-full: system user
 	@# Create TAR archive
 	cd target/initrd && \
 		tar --format=ustar -cf INITRD \
-		init device-mgr drv-uart-pl011 drv-smmu drv-virtio-blk svc-fat32 \
+		init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk svc-fat32 \
 		shell ls cat cp echo mkdir
 	@echo "Created full initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
 	@echo "Contents:"

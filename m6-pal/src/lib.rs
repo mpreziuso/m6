@@ -20,4 +20,4 @@ pub mod psci;
 
 pub use platform::{Platform, PlatformInfo, current_platform};
 pub use dtb::get_parsed_dtb;
-pub use dtb_platform::GicVersion;
+pub use dtb_platform::{GicVersion, UartType};

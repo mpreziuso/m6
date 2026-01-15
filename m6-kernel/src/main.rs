@@ -63,7 +63,12 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
     }
 
     platform::init(boot_info);
-    console::init_with_base(boot_info.uart_virt_base.0);
+    // Use the virtual address from boot_info (set up by bootloader) with the
+    // UART type detected from DTB
+    let uart_type = m6_pal::current_platform()
+        .map(|p| p.uart_type())
+        .unwrap_or(m6_pal::UartType::Pl011);
+    console::init_with_base(boot_info.uart_virt_base.0, uart_type);
 
     print_banner();
 
