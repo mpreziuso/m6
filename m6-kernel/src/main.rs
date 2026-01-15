@@ -121,9 +121,13 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
         match unsafe { m6_kernel::smmu::init(smmu_config.base_addr, smmu_virt) } {
             Ok(()) => {
                 log::info!("SMMU initialised successfully");
-                // TODO: Register event queue IRQ handler
-                // gic::register_handler(smmu_config.event_irq, smmu_event_handler);
-                // gic::enable_irq(smmu_config.event_irq);
+
+                // Register event queue IRQ handler
+                let event_irq = smmu_config.event_irq;
+                gic::register_handler(event_irq, smmu_event_irq_handler);
+                gic::set_priority(event_irq, 0x90); // Lower priority than timer
+                gic::enable_irq(event_irq);
+                log::info!("SMMU event IRQ {} enabled", event_irq);
             }
             Err(e) => {
                 log::error!("SMMU initialisation failed: {:?}", e);
@@ -277,4 +281,18 @@ fn ipi_handler(_intid: u32) {
     // The reschedule flag has already been set by the sender via request_reschedule_on()
     // The actual rescheduling happens in irq_handler after all interrupts are processed
     log::trace!("IPI received on CPU {}", m6_arch::cpu::cpu_id());
+}
+
+/// SMMU event queue IRQ handler
+///
+/// Called when the SMMU event queue has new entries (faults, errors, etc.)
+fn smmu_event_irq_handler(_intid: u32) {
+    // Get SMMU info to process events
+    if let Some(smmu_info) = m6_kernel::smmu::get_smmu_info() {
+        let events_processed = m6_kernel::smmu::process_events(smmu_info.index);
+
+        if events_processed > 0 {
+            log::trace!("Processed {} SMMU events", events_processed);
+        }
+    }
 }

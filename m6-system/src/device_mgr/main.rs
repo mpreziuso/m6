@@ -646,6 +646,7 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
                 spawn::SpawnError::DriverNotFound => io::puts("driver not found"),
                 spawn::SpawnError::TooManyDrivers => io::puts("too many drivers"),
                 spawn::SpawnError::DeviceUntypedNotFound => io::puts("device untyped not found"),
+                spawn::SpawnError::IommuRequired => io::puts("IOMMU required but not available"),
             }
             io::newline();
 

@@ -23,13 +23,14 @@
 //! - DmaPool: provides IOVA allocation for a driver
 
 use core::mem::ManuallyDrop;
+use core::sync::atomic::Ordering;
 
 use m6_cap::objects::{DmaPoolObject, IOSpaceObject, Ioasid};
 use m6_cap::{Badge, CapRights, CapSlot, ObjectType, SlotFlags};
 
 use crate::cap::cspace::{self, SlotLocation};
 use crate::cap::object_table::{self, KernelObjectType};
-use crate::memory::frame::alloc_frame_zeroed;
+use crate::memory::frame::{alloc_frame_zeroed, free_frame};
 use crate::memory::translate::phys_to_virt;
 use crate::smmu::{self, SmmuError};
 use crate::syscall::error::{SyscallError, SyscallResult};
@@ -707,6 +708,10 @@ pub fn handle_iospace_bind_stream(args: &SyscallArgs) -> SyscallResult {
     })
     .ok_or(SyscallError::Revoked)?;
 
+    // Allocate Context Descriptor table (1 frame = 64 CDs)
+    let cd_table_phys = alloc_frame_zeroed().ok_or(SyscallError::NoMemory)?;
+    let cd_table_virt = phys_to_virt(cd_table_phys);
+
     // Configure STE in SMMU
     smmu::with_smmu(smmu_index, |smmu| {
         use crate::smmu::registers::{ContextDescriptor, StreamTableEntry};
@@ -715,13 +720,30 @@ pub fn handle_iospace_bind_stream(args: &SyscallArgs) -> SyscallResult {
         // T0SZ=16 for 48-bit address space with 4KB pages
         let cd = ContextDescriptor::new_stage1(root_table, ioasid, 16);
 
-        // TODO: Allocate CD table and install CD
-        // For now, configure STE with S1CDMax=0 (single CD)
-        let ste = StreamTableEntry::new_s1_only(root_table, 0);
+        // Install CD at index 0 in CD table
+        // SAFETY: We just allocated and zeroed this frame, and cd_table_virt is valid
+        unsafe {
+            let cd_ptr = cd_table_virt as *mut ContextDescriptor;
+            core::ptr::write_volatile(cd_ptr, cd);
+        }
 
+        // Memory barrier to ensure CD is written before STE
+        core::sync::atomic::fence(Ordering::Release);
+
+        // Configure STE with CD table base address
+        // S1CDMax=0 (single CD at index 0)
+        let ste = StreamTableEntry::new_s1_only(cd_table_phys, 0);
         smmu.configure_ste(stream_id, ste)?;
 
-        let _ = cd; // CD will be used when CD table allocation is implemented
+        // Register stream binding with fault handler tracking
+        // For now, no fault handler (fault_notification = NULL, badge = 0)
+        smmu.bind_stream(
+            stream_id,
+            cd_table_phys,
+            iospace_ref,
+            m6_cap::ObjectRef::NULL,
+            0,
+        )?;
 
         Ok::<(), SmmuError>(())
     })
@@ -812,15 +834,33 @@ pub fn handle_iospace_unbind_stream(args: &SyscallArgs) -> SyscallResult {
         .ok_or(SyscallError::Revoked)?;
 
     // Configure bypass STE in SMMU (invalidates the stream)
-    smmu::with_smmu(smmu_index, |smmu| {
+    // Also retrieve and unbind the stream, freeing the CD table
+    let cd_table_phys = smmu::with_smmu(smmu_index, |smmu| {
         use crate::smmu::registers::StreamTableEntry;
 
+        // Get CD table address before unbinding
+        let cd_table_phys = smmu
+            .get_stream_binding(stream_id)
+            .map(|binding| binding.cd_table_phys)
+            .unwrap_or(0);
+
+        // Configure bypass STE
         let ste = StreamTableEntry::bypass();
         smmu.configure_ste(stream_id, ste)?;
-        Ok::<(), SmmuError>(())
+
+        // Unbind stream (clears binding entry)
+        smmu.unbind_stream(stream_id)?;
+
+        Ok::<u64, SmmuError>(cd_table_phys)
     })
     .map_err(smmu_error_to_syscall)?
     .map_err(smmu_error_to_syscall)?;
+
+    // Free CD table frame if it was allocated
+    if cd_table_phys != 0 {
+        free_frame(cd_table_phys);
+        log::debug!("Freed CD table frame at {:#x}", cd_table_phys);
+    }
 
     // Release stream
     object_table::with_smmu_control_mut(smmu_ref, |smmu_ctrl| {
@@ -836,6 +876,97 @@ pub fn handle_iospace_unbind_stream(args: &SyscallArgs) -> SyscallResult {
     });
 
     log::debug!("Unbound stream {} from IOSpace", stream_id);
+    Ok(0)
+}
+
+/// Handle IOSpaceSetFaultHandler syscall.
+///
+/// Configures fault notification for a bound stream.
+///
+/// # Arguments (registers)
+///
+/// - x0: iospace_cptr - Capability to IOSpace
+/// - x1: stream_id - Stream ID to configure
+/// - x2: notification_cptr - Notification for fault delivery
+/// - x3: badge - Badge to OR with fault info
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+pub fn handle_iospace_set_fault_handler(args: &SyscallArgs) -> SyscallResult {
+    let iospace_cptr = args.arg0;
+    let stream_id = args.arg1 as u32;
+    let notification_cptr = args.arg2;
+    let badge = args.arg3;
+
+    // Check SMMU availability
+    if !smmu::is_available() {
+        return Err(SyscallError::NotSupported);
+    }
+
+    // Verify IOSpace capability
+    let iospace_loc = cspace::resolve_cptr(iospace_cptr, 0)?;
+    let (iospace_ref, smmu_index) = cspace::with_slot(&iospace_loc, |slot| {
+        if slot.is_empty() {
+            return Err(SyscallError::EmptySlot);
+        }
+        if slot.cap_type() != ObjectType::IOSpace {
+            return Err(SyscallError::TypeMismatch);
+        }
+        if !slot.rights().contains(CapRights::WRITE) {
+            return Err(SyscallError::NoRights);
+        }
+
+        // Get SMMU index from IOSpace
+        let smmu_index = object_table::with_iospace_mut(slot.object_ref(), |iospace| {
+            iospace.smmu_index
+        })
+        .ok_or(SyscallError::Revoked)?;
+
+        Ok((slot.object_ref(), smmu_index))
+    })?;
+
+    // Verify notification capability
+    let notification_loc = cspace::resolve_cptr(notification_cptr, 0)?;
+    let notification_ref = cspace::with_slot(&notification_loc, |slot| {
+        if slot.is_empty() {
+            return Err(SyscallError::EmptySlot);
+        }
+        if slot.cap_type() != ObjectType::Notification {
+            return Err(SyscallError::TypeMismatch);
+        }
+        if !slot.rights().contains(CapRights::WRITE) {
+            return Err(SyscallError::NoRights);
+        }
+        Ok(slot.object_ref())
+    })?;
+
+    // Update stream binding fault handler
+    smmu::with_smmu(smmu_index, |smmu| {
+        // Verify stream is bound to this IOSpace
+        let binding = smmu
+            .get_stream_binding(stream_id)
+            .ok_or(SmmuError::InvalidStreamId)?;
+
+        if binding.iospace_ref != iospace_ref {
+            return Err(SmmuError::InvalidConfig);
+        }
+
+        // Set fault handler
+        smmu.set_fault_handler(stream_id, notification_ref, badge)?;
+
+        Ok(())
+    })
+    .map_err(smmu_error_to_syscall)?
+    .map_err(smmu_error_to_syscall)?;
+
+    log::debug!(
+        "Configured fault handler for stream {}: notif={:?} badge={:#x}",
+        stream_id,
+        notification_ref,
+        badge
+    );
+
     Ok(0)
 }
 

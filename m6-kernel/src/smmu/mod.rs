@@ -20,10 +20,14 @@
 
 pub mod registers;
 
+extern crate alloc;
+
+use alloc::boxed::Box;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use m6_arch::IrqSpinMutex;
+use m6_cap::ObjectRef;
 use m6_common::memory::page;
 use spin::Once;
 
@@ -68,6 +72,40 @@ struct QueueState {
     cons: u32,
 }
 
+// -- Stream Binding Tracking
+
+/// Per-stream binding information for fault delivery.
+///
+/// This tracks the association between a stream ID and its IOSpace,
+/// including the fault handler notification for delivering SMMU
+/// events to userspace.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct StreamBindingEntry {
+    /// Physical address of Context Descriptor table for this stream.
+    /// Used for cleanup on unbind.
+    pub(crate) cd_table_phys: u64,
+    /// Bound IOSpace reference.
+    pub(crate) iospace_ref: ObjectRef,
+    /// Notification to signal on fault.
+    pub(crate) fault_notification: ObjectRef,
+    /// Badge to OR with fault info when signalling.
+    pub(crate) fault_badge: u64,
+    /// Whether this stream is currently bound.
+    pub(crate) is_bound: bool,
+}
+
+impl Default for StreamBindingEntry {
+    fn default() -> Self {
+        Self {
+            cd_table_phys: 0,
+            iospace_ref: ObjectRef::NULL,
+            fault_notification: ObjectRef::NULL,
+            fault_badge: 0,
+            is_bound: false,
+        }
+    }
+}
+
 /// Single SMMU instance state.
 pub struct SmmuInstance {
     /// Base virtual address of SMMU registers.
@@ -89,6 +127,8 @@ pub struct SmmuInstance {
     enabled: bool,
     /// SMMU instance index.
     index: u8,
+    /// Per-stream binding tracking (heap-allocated, sized by max_streams).
+    stream_bindings: Box<[StreamBindingEntry]>,
 }
 
 // SAFETY: SmmuInstance is only accessed with the SMMU_INSTANCES lock held.
@@ -204,6 +244,76 @@ impl SmmuInstance {
         self.submit_cmd_sync(CommandEntry::tlbi_nh_va(asid, iova, true))
     }
 
+    // -- Stream Binding Management
+
+    /// Bind a stream with fault handler configuration.
+    ///
+    /// # Arguments
+    /// - `stream_id`: Stream ID to bind
+    /// - `cd_table_phys`: Physical address of CD table for this stream
+    /// - `iospace_ref`: IOSpace object reference
+    /// - `fault_notif`: Notification to signal on fault (or NULL)
+    /// - `fault_badge`: Badge to OR with fault info
+    pub fn bind_stream(
+        &mut self,
+        stream_id: u32,
+        cd_table_phys: u64,
+        iospace_ref: ObjectRef,
+        fault_notif: ObjectRef,
+        fault_badge: u64,
+    ) -> Result<(), SmmuError> {
+        let entry = self
+            .stream_bindings
+            .get_mut(stream_id as usize)
+            .ok_or(SmmuError::InvalidStreamId)?;
+
+        entry.cd_table_phys = cd_table_phys;
+        entry.iospace_ref = iospace_ref;
+        entry.fault_notification = fault_notif;
+        entry.fault_badge = fault_badge;
+        entry.is_bound = true;
+        Ok(())
+    }
+
+    /// Unbind a stream and clear its binding entry.
+    pub fn unbind_stream(&mut self, stream_id: u32) -> Result<(), SmmuError> {
+        let entry = self
+            .stream_bindings
+            .get_mut(stream_id as usize)
+            .ok_or(SmmuError::InvalidStreamId)?;
+
+        *entry = StreamBindingEntry::default();
+        Ok(())
+    }
+
+    /// Get stream binding info for fault delivery.
+    pub fn get_stream_binding(&self, stream_id: u32) -> Option<&StreamBindingEntry> {
+        self.stream_bindings
+            .get(stream_id as usize)
+            .filter(|e| e.is_bound)
+    }
+
+    /// Configure fault handler for an already-bound stream.
+    pub fn set_fault_handler(
+        &mut self,
+        stream_id: u32,
+        fault_notif: ObjectRef,
+        fault_badge: u64,
+    ) -> Result<(), SmmuError> {
+        let entry = self
+            .stream_bindings
+            .get_mut(stream_id as usize)
+            .ok_or(SmmuError::InvalidStreamId)?;
+
+        if !entry.is_bound {
+            return Err(SmmuError::InvalidStreamId);
+        }
+
+        entry.fault_notification = fault_notif;
+        entry.fault_badge = fault_badge;
+        Ok(())
+    }
+
     /// Process pending events in the event queue.
     ///
     /// Returns the number of events processed.
@@ -226,8 +336,8 @@ impl SmmuInstance {
             // SAFETY: We own the event queue and the offset is within bounds.
             let event = unsafe { core::ptr::read_volatile(entry_ptr) };
 
-            // Handle the event
-            Self::handle_event(self.index, &event);
+            // Handle the event with stream binding context
+            Self::handle_event(self.index, &self.stream_bindings, &event);
 
             // Update consumer
             self.eventq.cons = self.eventq.cons.wrapping_add(1);
@@ -245,26 +355,70 @@ impl SmmuInstance {
         processed
     }
 
-    /// Handle a single SMMU event.
-    fn handle_event(smmu_index: u8, event: &EventEntry) {
+    /// Handle a single SMMU event and deliver to userspace if possible.
+    ///
+    /// # Arguments
+    /// - `smmu_index`: SMMU instance index
+    /// - `stream_bindings`: Stream binding table for fault delivery
+    /// - `event`: Event queue entry
+    fn handle_event(smmu_index: u8, stream_bindings: &[StreamBindingEntry], event: &EventEntry) {
         let event_type = event.event_type();
         let stream_id = event.stream_id();
         let address = event.address();
 
-        log::warn!(
+        log::debug!(
             "SMMU{} event: type={:#x} stream={:#x} addr={:#x}",
             smmu_index, event_type, stream_id, address
         );
 
+        // Look up stream binding for fault delivery
+        if let Some(binding) = stream_bindings.get(stream_id as usize) {
+            if binding.is_bound && binding.fault_notification.is_valid() {
+                // Encode fault info into badge
+                // Bits [63:48]: stream_id, Bits [47:40]: event_type
+                let fault_info = ((stream_id as u64) << 48) | ((event_type as u64) << 40);
+                let combined_badge = binding.fault_badge | fault_info;
+
+                // Signal fault notification
+                use crate::ipc::notification::do_signal;
+                match do_signal(binding.fault_notification, combined_badge) {
+                    Ok(()) => {
+                        log::trace!(
+                            "Delivered SMMU fault to userspace: stream={:#x} badge={:#x}",
+                            stream_id,
+                            combined_badge
+                        );
+                        return;
+                    }
+                    Err(e) => {
+                        log::error!(
+                            "Failed to deliver SMMU fault to userspace: stream={:#x} error={:?}",
+                            stream_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // No fault handler configured - log error
         if event.is_translation_fault() {
             log::error!(
-                "SMMU translation fault: stream={:#x} addr={:#x}",
-                stream_id, address
+                "SMMU translation fault (no handler): stream={:#x} addr={:#x}",
+                stream_id,
+                address
             );
         } else if event.is_permission_fault() {
             log::error!(
-                "SMMU permission fault: stream={:#x} addr={:#x}",
-                stream_id, address
+                "SMMU permission fault (no handler): stream={:#x} addr={:#x}",
+                stream_id,
+                address
+            );
+        } else {
+            log::warn!(
+                "SMMU event (no handler): type={:#x} stream={:#x}",
+                event_type,
+                stream_id
             );
         }
     }
@@ -337,6 +491,12 @@ pub unsafe fn init(smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
     let eventq_phys = alloc_frames_zeroed(eventq_pages).ok_or(SmmuError::AllocFailed)?;
     let eventq_virt = phys_to_virt(eventq_phys);
 
+    // Allocate stream bindings array
+    let max_streams = 1usize << strtab_log2size;
+    let stream_bindings = (0..max_streams)
+        .map(|_| StreamBindingEntry::default())
+        .collect();
+
     let mut instance = SmmuInstance {
         base,
         base_phys: smmu_phys,
@@ -359,6 +519,7 @@ pub unsafe fn init(smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
         },
         enabled: false,
         index: 0,
+        stream_bindings,
     };
 
     // Configure SMMU registers

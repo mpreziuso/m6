@@ -122,6 +122,8 @@ pub enum Syscall {
     IOSpaceBindStream = 99,
     /// Unbind stream ID from IOSpace.
     IOSpaceUnbindStream = 100,
+    /// Configure fault handler for IOSpace stream.
+    IOSpaceSetFaultHandler = 101,
     /// Create DmaPool from IOSpace.
     DmaPoolCreate = 104,
     /// Allocate DMA buffer from pool.
@@ -190,6 +192,7 @@ impl Syscall {
             98 => Some(Self::IOSpaceUnmapFrame),
             99 => Some(Self::IOSpaceBindStream),
             100 => Some(Self::IOSpaceUnbindStream),
+            101 => Some(Self::IOSpaceSetFaultHandler),
             104 => Some(Self::DmaPoolCreate),
             105 => Some(Self::DmaPoolAlloc),
             106 => Some(Self::DmaPoolFree),
@@ -249,6 +252,7 @@ impl Syscall {
             Self::IOSpaceUnmapFrame => "IOSpaceUnmapFrame",
             Self::IOSpaceBindStream => "IOSpaceBindStream",
             Self::IOSpaceUnbindStream => "IOSpaceUnbindStream",
+            Self::IOSpaceSetFaultHandler => "IOSpaceSetFaultHandler",
             Self::DmaPoolCreate => "DmaPoolCreate",
             Self::DmaPoolAlloc => "DmaPoolAlloc",
             Self::DmaPoolFree => "DmaPoolFree",

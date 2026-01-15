@@ -199,6 +199,7 @@ fn dispatch_syscall(
         Syscall::IOSpaceUnmapFrame => iommu_ops::handle_iospace_unmap_frame(args),
         Syscall::IOSpaceBindStream => iommu_ops::handle_iospace_bind_stream(args),
         Syscall::IOSpaceUnbindStream => iommu_ops::handle_iospace_unbind_stream(args),
+        Syscall::IOSpaceSetFaultHandler => iommu_ops::handle_iospace_set_fault_handler(args),
         Syscall::DmaPoolCreate => iommu_ops::handle_dma_pool_create(args),
         Syscall::DmaPoolAlloc => iommu_ops::handle_dma_pool_alloc(args),
         Syscall::DmaPoolFree => iommu_ops::handle_dma_pool_free(args),

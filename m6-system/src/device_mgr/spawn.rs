@@ -50,6 +50,8 @@ pub enum SpawnError {
     TooManyDrivers,
     /// No device untyped capability covers the required address
     DeviceUntypedNotFound,
+    /// IOMMU required but not available (security violation)
+    IommuRequired,
 }
 
 impl From<ElfError> for SpawnError {
@@ -298,6 +300,14 @@ pub fn spawn_driver(
     } else {
         false
     };
+
+    // SECURITY: Verify drivers that need IOMMU actually got IOSpace
+    // This is a defence-in-depth check - the create_iospace() call should have
+    // already failed if SMMU was unavailable, but we verify for safety.
+    if config.manifest.needs_iommu && !iospace_created {
+        return Err(SpawnError::IommuRequired);
+    }
+
     // Only pass iospace_slot to install_driver_caps if it was actually created
     let effective_iospace_slot = if iospace_created { iospace_slot } else { None };
 
@@ -522,6 +532,11 @@ fn claim_irq(slot: u64, irq: u32, cptr: &impl Fn(u64) -> u64) -> Result<(), Spaw
 /// The IOSpace provides IOMMU translation for device DMA.
 /// Optionally binds a stream ID if the device has one.
 ///
+/// # Security
+///
+/// Returns `Err(IommuRequired)` if SMMU is not available. This enforces
+/// the security requirement that DMA-capable drivers MUST use IOMMU isolation.
+///
 /// Returns `Ok(true)` if IOSpace was created successfully.
 fn create_iospace(
     slot: u64,
@@ -529,10 +544,10 @@ fn create_iospace(
     stream_id: Option<u32>,
     cptr: &impl Fn(u64) -> u64,
 ) -> Result<bool, SpawnError> {
-    // Check if we have SmmuControl capability
+    // SECURITY: Require SMMU capability - drivers with DMA must use IOMMU
     let smmu_slot = match smmu_control_slot {
         Some(s) => s,
-        None => return Ok(false),  // No SMMU support
+        None => return Err(SpawnError::IommuRequired),
     };
 
     // Create IOSpace from SmmuControl + untyped memory
