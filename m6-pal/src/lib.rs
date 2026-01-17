@@ -17,7 +17,10 @@ pub mod boot_uart;
 pub mod timer;
 pub mod gic;
 pub mod psci;
+pub mod framebuffer;
+pub mod fb_console;
 
 pub use platform::{Platform, PlatformInfo, current_platform};
 pub use dtb::get_parsed_dtb;
 pub use dtb_platform::{GicVersion, UartType};
+pub use framebuffer::FramebufferConfig;

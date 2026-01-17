@@ -51,6 +51,12 @@ pub const KERNEL_UART_VIRT: u64 = KERNEL_MMIO_BASE + 0x0100_0000; // 16MB offset
 /// Size of UART mapping
 pub const KERNEL_UART_SIZE: usize = 0x0001_0000; // 64KB
 
+/// Kernel virtual address for framebuffer (offset from UART)
+pub const KERNEL_FB_VIRT: u64 = KERNEL_MMIO_BASE + 0x0200_0000; // 32MB offset
+/// Maximum framebuffer mapping size (covers up to 4K displays at 32bpp)
+/// 4K (3840x2160) at 32bpp = ~32MB
+pub const KERNEL_FB_MAX_SIZE: usize = 32 * 1024 * 1024; // 32MB
+
 // -- A direct mapping of all physical RAM into kernel virtual space.
 // -- This allows the kernel to access any physical address by adding
 // KERNEL_PHYS_MAP_BASE to the physical address.

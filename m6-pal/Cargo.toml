@@ -14,3 +14,4 @@ aarch64-cpu = { workspace = true }
 tock-registers = { workspace = true }
 arm-gic = { workspace = true }
 fdt = "0.1"
+embedded-graphics = { version = "0.8", default-features = false }

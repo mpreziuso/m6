@@ -17,7 +17,8 @@ pub const MAX_CPUS: usize = 8;
 /// Version 3: Added frame bitmap and max_phys_addr for dynamic memory
 /// Version 4: Added SMP support (cpu_count, per_cpu_stacks)
 /// Version 5: Added ttbr0_el1 for secondary CPU MMU setup
-pub const BOOT_INFO_VERSION: u32 = 5;
+/// Version 6: Added framebuffer virt_base for GOP support
+pub const BOOT_INFO_VERSION: u32 = 6;
 
 /// Maximum number of memory regions supported
 pub const MAX_MEMORY_REGIONS: usize = 64;
@@ -59,6 +60,8 @@ impl PerCpuStackInfo {
 pub struct FramebufferInfo {
     /// Physical base address of the framebuffer
     pub base: u64,
+    /// Virtual base address (kernel-mapped)
+    pub virt_base: u64,
     /// Size of the framebuffer in bytes
     pub size: u64,
     /// Width in pixels
@@ -91,6 +94,7 @@ impl FramebufferInfo {
     pub const fn empty() -> Self {
         Self {
             base: 0,
+            virt_base: 0,
             size: 0,
             width: 0,
             height: 0,
@@ -106,9 +110,16 @@ impl FramebufferInfo {
         }
     }
 
+    /// Check if framebuffer information is valid (has both physical and virtual addresses).
     #[must_use]
     pub const fn is_valid(&self) -> bool {
-        self.base != 0 && self.size != 0 && self.width != 0 && self.height != 0
+        self.base != 0 && self.virt_base != 0 && self.size != 0 && self.width != 0 && self.height != 0
+    }
+
+    /// Check if the framebuffer uses BGR pixel format (blue at position 0).
+    #[must_use]
+    pub const fn is_bgr(&self) -> bool {
+        self.blue_position == 0
     }
 }
 
@@ -228,10 +239,10 @@ pub const TCR_VALUE: u64 = 16            // T0SZ = 16 (48-bit VA for TTBR0)
 pub const BOOTINFO_PAGE_TABLE_BASE_OFFSET: usize = 40;
 
 /// Offset of `per_cpu_stacks` in BootInfo
-pub const BOOTINFO_PER_CPU_STACKS_OFFSET: usize = 1720;
+pub const BOOTINFO_PER_CPU_STACKS_OFFSET: usize = 1728;
 
 /// Offset of `ttbr0_el1` in BootInfo
-pub const BOOTINFO_TTBR0_OFFSET: usize = 1848;
+pub const BOOTINFO_TTBR0_OFFSET: usize = 1856;
 
 /// Size of PerCpuStackInfo (phys_base: u64, virt_top: u64)
 pub const PER_CPU_STACK_INFO_SIZE: usize = 16;

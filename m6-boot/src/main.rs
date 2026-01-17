@@ -14,11 +14,12 @@ use m6_boot::config::{
     KERNEL_GIC_VIRT, KERNEL_UART_VIRT, KERNEL_VIRT_BASE, MAX_CPUS, PAGE_TABLE_ALLOC_SIZE,
     PER_CPU_STACK_SIZE,
 };
+use m6_boot::gop::init_gop;
 use m6_boot::initrd_loader::load_initrd;
 use m6_boot::kernel_loader::load_kernel;
 use m6_boot::memory::{mark_region, translate_memory_map};
 use m6_boot::page_table::{
-    setup_initial_page_tables, BootPageAllocator, MmioConfig,
+    setup_initial_page_tables, BootPageAllocator, FramebufferMapping, MmioConfig, RamRegions,
 };
 use m6_common::boot::{BootInfo, FramebufferInfo, PerCpuStackInfo, BOOT_INFO_MAGIC, BOOT_INFO_VERSION};
 use m6_common::{PhysAddr, VirtAddr};
@@ -46,10 +47,10 @@ fn efi_main() -> Status {
     // Initialise UEFI services
     uefi::helpers::init().unwrap();
 
-    // Verify we're running at EL1 (required for configuring EL1 system registers)
-    let _current_el = m6_arch::cpu::current_el();
+    // Check current exception level (EL1 on QEMU, EL2 on Rock 5B+)
+    let current_el = m6_arch::cpu::current_el();
 
-    log::info!("M6 Bootloader starting...");
+    log::info!("M6 Bootloader starting at EL{}...", current_el);
     log::info!("UEFI Firmware Vendor: {}", system::firmware_vendor());
     log::info!(
         "UEFI Firmware Revision: {:#x}",
@@ -92,6 +93,12 @@ fn efi_main() -> Status {
             rd.size
         );
     }
+
+    // Try to initialise GOP framebuffer (optional - may not be available on headless systems)
+    let mut framebuffer_info = init_gop().unwrap_or_else(|| {
+        log::info!("No GOP framebuffer available (headless mode)");
+        FramebufferInfo::empty()
+    });
 
     // Allocate memory for page tables
     let pt_pages = PAGE_TABLE_ALLOC_SIZE.div_ceil(4096);
@@ -147,15 +154,15 @@ fn efi_main() -> Status {
     // Parse platform-specific MMIO physical addresses from DTB
     let mmio = parse_mmio_from_dtb(dtb_address);
 
-    // Get memory map to determine how much physical memory to map
+    // Get memory map to determine RAM regions for page table setup
     // We need to do this before exit_boot_services, but the map may change slightly
-    // when we exit boot services. The important thing is to get the highest address.
+    // when we exit boot services. The important thing is to identify RAM vs MMIO regions.
     let mmap_storage = boot::memory_map(MemoryType::LOADER_DATA).expect("Failed to get memory map");
-    
-    // Calculate the highest physical address we need to map
-    let mut max_phys_addr: u64 = 0x4000_0000; // At least 1GB (covers MMIO)
+
+    // Build RAM regions from memory map
+    let mut ram_regions = RamRegions::new();
     for descriptor in mmap_storage.entries().copied() {
-        // Only consider conventional memory and reclaimable memory
+        // Check if this is a RAM region (conventional memory or reclaimable)
         let is_ram = matches!(
             descriptor.ty,
             MemoryType::CONVENTIONAL
@@ -163,18 +170,34 @@ fn efi_main() -> Status {
                 | MemoryType::BOOT_SERVICES_DATA
                 | MemoryType::LOADER_CODE
                 | MemoryType::LOADER_DATA
+                | MemoryType::PERSISTENT_MEMORY
         );
         if is_ram {
-            let end_addr = descriptor.phys_start + (descriptor.page_count * 4096);
-            max_phys_addr = max_phys_addr.max(end_addr);
+            let start = descriptor.phys_start;
+            let end = descriptor.phys_start + (descriptor.page_count * 4096);
+            ram_regions.add(start, end);
         }
     }
-    
+
+    let max_phys_addr = ram_regions.max_addr();
     log::info!(
-        "Detected physical memory up to {:#x} ({} MB)",
+        "Detected {} RAM region(s), up to {:#x} ({} MB)",
+        ram_regions.count,
         max_phys_addr,
         max_phys_addr / (1024 * 1024)
     );
+
+    // Log individual RAM regions for debugging
+    for i in 0..ram_regions.count {
+        let r = &ram_regions.regions[i];
+        log::debug!(
+            "  RAM region {}: {:#x} - {:#x} ({} MB)",
+            i,
+            r.start,
+            r.end,
+            (r.end - r.start) / (1024 * 1024)
+        );
+    }
 
     // Calculate and allocate frame allocator bitmap
     // Each bit represents one 4KB frame
@@ -208,25 +231,42 @@ fn efi_main() -> Status {
         total_frames
     );
 
-    let page_tables = match setup_initial_page_tables(
+    // Prepare framebuffer mapping if available
+    let fb_mapping = if framebuffer_info.base != 0 && framebuffer_info.size != 0 {
+        Some(FramebufferMapping {
+            phys: framebuffer_info.base,
+            size: framebuffer_info.size,
+        })
+    } else {
+        None
+    };
+
+    let pt_result = match setup_initial_page_tables(
         &mut pt_allocator,
         &kernel,
         stack_base_phys,
         total_stack_size as u64,
         &mmio,
-        max_phys_addr,
+        &ram_regions,
+        fb_mapping.as_ref(),
     ) {
-        Some(pt) => pt,
+        Some(result) => result,
         None => {
             log::error!("Failed to set up page tables");
             return Status::OUT_OF_RESOURCES;
         }
     };
 
+    // Update framebuffer_info with virtual address if mapped
+    if let Some(virt) = pt_result.fb_virt {
+        framebuffer_info.virt_base = virt;
+        log::info!("Framebuffer mapped at virtual {:#x}", virt);
+    }
+
     log::info!(
         "Page tables set up, TTBR0 = {:#x}, TTBR1 = {:#x}, used {} bytes",
-        page_tables.ttbr0,
-        page_tables.ttbr1,
+        pt_result.tables.ttbr0,
+        pt_result.tables.ttbr1,
         pt_allocator.bytes_used()
     );
 
@@ -284,7 +324,7 @@ fn efi_main() -> Status {
         (*ptr).page_table_base = PhysAddr::new(pt_phys);
         (*ptr).page_table_size = PAGE_TABLE_ALLOC_SIZE as u64;
         (*ptr).memory_map = m6_mmap;
-        (*ptr).framebuffer = FramebufferInfo::empty();
+        (*ptr).framebuffer = framebuffer_info;
         (*ptr).acpi_rsdp = PhysAddr::new(acpi_rsdp);
         (*ptr).dtb_address = PhysAddr::new(dtb_address);
         // Kernel MMIO virtual addresses (mapped in TTBR1)
@@ -316,15 +356,15 @@ fn efi_main() -> Status {
             }
         }
         // TTBR0 value for secondary CPU MMU setup (identity mapping)
-        (*ptr).ttbr0_el1 = page_tables.ttbr0;
+        (*ptr).ttbr0_el1 = pt_result.tables.ttbr0;
     }
 
     // Enable MMU and jump to kernel
     // SAFETY: We've set up page tables and prepared everything
     unsafe {
         enable_mmu_and_jump(
-            page_tables.ttbr1,
-            page_tables.ttbr0,
+            pt_result.tables.ttbr1,
+            pt_result.tables.ttbr0,
             kernel.entry_virt,
             boot_info_phys,
             kernel.stack_virt,

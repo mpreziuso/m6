@@ -70,6 +70,19 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
         .unwrap_or(m6_pal::UartType::Pl011);
     console::init_with_base(boot_info.uart_virt_base.0, uart_type);
 
+    // Initialise framebuffer console if available
+    if boot_info.framebuffer.is_valid() {
+        let fb_config = m6_pal::FramebufferConfig {
+            base: boot_info.framebuffer.virt_base,
+            width: boot_info.framebuffer.width,
+            height: boot_info.framebuffer.height,
+            stride: boot_info.framebuffer.stride,
+            bpp: boot_info.framebuffer.bpp,
+            is_bgr: boot_info.framebuffer.is_bgr(),
+        };
+        console::init_framebuffer(fb_config);
+    }
+
     print_banner();
 
     // Initialise timer before logging (for timestamps)

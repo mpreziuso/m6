@@ -7,8 +7,8 @@
 //! Uses 4KB pages with 4-level page tables (48-bit VA).
 
 use crate::config::{
-    KERNEL_GIC_SIZE, KERNEL_GIC_VIRT, KERNEL_PHYS_MAP_BASE, KERNEL_UART_SIZE, KERNEL_UART_VIRT,
-    KERNEL_VIRT_BASE,
+    KERNEL_FB_MAX_SIZE, KERNEL_FB_VIRT, KERNEL_GIC_SIZE, KERNEL_GIC_VIRT, KERNEL_PHYS_MAP_BASE,
+    KERNEL_UART_SIZE, KERNEL_UART_VIRT, KERNEL_VIRT_BASE,
 };
 use crate::kernel_loader::LoadedKernel;
 use core::ptr;
@@ -285,20 +285,92 @@ fn map_mmio_regions(
     Some(())
 }
 
+/// Map framebuffer into TTBR1 as device memory
+///
+/// Maps the GOP framebuffer physical address into kernel virtual space.
+/// Returns the virtual address where the framebuffer is mapped.
+///
+/// Uses Device memory type which is safe for framebuffers. Write-combining
+/// would be more performant but requires extending MemoryType enum.
+///
+/// Parameters:
+/// - `ttbr1_l0`: L0 page table for TTBR1
+/// - `fb_phys`: Physical address of the framebuffer
+/// - `fb_size`: Size of the framebuffer in bytes
+/// - `allocator`: Page table allocator
+///
+/// Returns `Some(virt_addr)` on success, `None` on failure.
+pub fn map_framebuffer(
+    ttbr1_l0: &mut L0Table,
+    fb_phys: u64,
+    fb_size: u64,
+    allocator: &mut BootPageAllocator,
+) -> Option<u64> {
+    // Skip if no framebuffer
+    if fb_phys == 0 || fb_size == 0 {
+        return None;
+    }
+
+    // Check if framebuffer is too large
+    if fb_size > KERNEL_FB_MAX_SIZE as u64 {
+        log::warn!(
+            "Framebuffer too large: {} bytes > {} bytes max",
+            fb_size,
+            KERNEL_FB_MAX_SIZE
+        );
+        return None;
+    }
+
+    // Page-align the framebuffer region
+    let fb_phys_aligned = fb_phys & !(PAGE_SIZE as u64 - 1);
+    let fb_offset = fb_phys - fb_phys_aligned;
+    let fb_end = (fb_phys + fb_size + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+    let fb_size_aligned = fb_end - fb_phys_aligned;
+
+    let fb_phys_region = PhysMemoryRegion::from_raw(fb_phys_aligned, fb_size_aligned as usize);
+    let fb_virt_region = VirtMemoryRegion::from_raw(KERNEL_FB_VIRT, fb_size_aligned as usize);
+
+    log::debug!(
+        "Mapping Framebuffer: VA {:#x}..{:#x} -> PA {:#x} (Device, {} bytes)",
+        KERNEL_FB_VIRT,
+        KERNEL_FB_VIRT + fb_size_aligned,
+        fb_phys_aligned,
+        fb_size_aligned
+    );
+
+    if let Err(e) = map_range(
+        ttbr1_l0,
+        MapAttributes::new(
+            fb_phys_region,
+            fb_virt_region,
+            MemoryType::Device, // Device memory is safe for framebuffers
+            PtePermissions::rw(false), // Kernel-only, RW, no execute
+        ),
+        allocator,
+    ) {
+        log::error!("Failed to map framebuffer: {:?}", e);
+        return None;
+    }
+
+    // Return virtual address adjusted for page alignment offset
+    Some(KERNEL_FB_VIRT + fb_offset)
+}
+
 /// Map direct physical memory map into TTBR1
 ///
 /// Maps all physical memory into kernel virtual space at KERNEL_PHYS_MAP_BASE
 /// in 1GB chunks to use block mappings where possible.
 ///
-/// The first 1GB is always mapped as Device memory (MMIO region).
-/// Remaining chunks up to max_phys_addr are mapped as Normal memory.
+/// Uses the RAM regions from UEFI memory map to determine which chunks
+/// are RAM (Normal memory) vs MMIO (Device memory).
 fn map_direct_physmap(
     ttbr1_l0: &mut L0Table,
-    max_phys_addr: u64,
+    ram_regions: &RamRegions,
     allocator: &mut BootPageAllocator,
 ) -> Option<()> {
     const GB: u64 = 0x4000_0000; // 1GB
 
+    let max_phys_addr = ram_regions.max_addr();
     // Round up max_phys_addr to next 1GB boundary
     let total_size = max_phys_addr.div_ceil(GB) * GB;
     let num_chunks = (total_size / GB).max(1) as usize; // At least 1 chunk
@@ -313,12 +385,11 @@ fn map_direct_physmap(
         let phys_base = chunk as u64 * GB;
         let virt_base = KERNEL_PHYS_MAP_BASE + phys_base;
 
-        // First chunk (0x0 - 0x40000000) is MMIO/Device memory
-        // Remaining chunks are Normal memory (RAM)
-        let (mem_type, type_str) = if chunk == 0 {
-            (MemoryType::Device, "Device")
-        } else {
+        // Use UEFI memory map to determine if this chunk contains RAM
+        let (mem_type, type_str) = if ram_regions.chunk_is_ram(phys_base) {
             (MemoryType::Normal, "Normal")
+        } else {
+            (MemoryType::Device, "Device")
         };
 
         let phys_region = PhysMemoryRegion::from_raw(phys_base, GB as usize);
@@ -355,8 +426,11 @@ fn map_direct_physmap(
 ///
 /// Creates identity mapping so the bootloader can continue fetching
 /// instructions after enabling MMU.
+///
+/// Uses the RAM regions from UEFI memory map to determine which chunks
+/// are RAM (Normal memory with RWX) vs MMIO (Device memory with RW).
 fn setup_ttbr0_identity(
-    max_phys_addr: u64,
+    ram_regions: &RamRegions,
     allocator: &mut BootPageAllocator,
 ) -> Option<TPA<L0Table>> {
     const GB: u64 = 0x4000_0000; // 1GB
@@ -365,6 +439,7 @@ fn setup_ttbr0_identity(
     let mut ttbr0_l0 = unsafe { L0Table::from_pa(ttbr0_pa) };
     log::debug!("Allocated TTBR0 L0 at {:#x}", ttbr0_pa.value());
 
+    let max_phys_addr = ram_regions.max_addr();
     // Round up max_phys_addr to next 1GB boundary
     let total_size = max_phys_addr.div_ceil(GB) * GB;
     let num_chunks = (total_size / GB).max(1) as usize; // At least 1 chunk
@@ -378,12 +453,13 @@ fn setup_ttbr0_identity(
     for chunk in 0..num_chunks {
         let phys_base = chunk as u64 * GB;
 
-        // First chunk (0x0 - 0x40000000) is MMIO/Device memory
-        // Remaining chunks are Normal memory (RAM) with RWX for bootloader code
-        let (mem_type, perms, type_str) = if chunk == 0 {
-            (MemoryType::Device, PtePermissions::rw(false), "Device")
-        } else {
+        // Use UEFI memory map to determine if this chunk contains RAM
+        // RAM chunks need RWX for bootloader code execution
+        // Non-RAM chunks (MMIO) use Device memory with RW only
+        let (mem_type, perms, type_str) = if ram_regions.chunk_is_ram(phys_base) {
             (MemoryType::Normal, PtePermissions::rwx(false), "Normal")
+        } else {
+            (MemoryType::Device, PtePermissions::rw(false), "Device")
         };
 
         let phys_region = PhysMemoryRegion::from_raw(phys_base, GB as usize);
@@ -410,12 +486,117 @@ fn setup_ttbr0_identity(
     Some(ttbr0_pa)
 }
 
+/// Framebuffer information for page table setup
+pub struct FramebufferMapping {
+    /// Physical base address of framebuffer
+    pub phys: u64,
+    /// Size in bytes
+    pub size: u64,
+}
+
+/// RAM region from UEFI memory map
+#[derive(Clone, Copy, Debug)]
+pub struct RamRegion {
+    /// Physical start address
+    pub start: u64,
+    /// Physical end address (exclusive)
+    pub end: u64,
+}
+
+/// Maximum number of RAM regions we track
+pub const MAX_RAM_REGIONS: usize = 32;
+
+/// RAM regions from UEFI memory map
+pub struct RamRegions {
+    /// Array of RAM regions
+    pub regions: [RamRegion; MAX_RAM_REGIONS],
+    /// Number of valid regions
+    pub count: usize,
+}
+
+impl RamRegions {
+    /// Create empty RAM regions
+    pub const fn new() -> Self {
+        Self {
+            regions: [RamRegion { start: 0, end: 0 }; MAX_RAM_REGIONS],
+            count: 0,
+        }
+    }
+
+    /// Add a RAM region (merges overlapping/adjacent regions)
+    pub fn add(&mut self, start: u64, end: u64) {
+        if start >= end {
+            return;
+        }
+
+        // Try to merge with existing region
+        for i in 0..self.count {
+            let r = &mut self.regions[i];
+            // Check if regions overlap or are adjacent
+            if start <= r.end && end >= r.start {
+                r.start = r.start.min(start);
+                r.end = r.end.max(end);
+                return;
+            }
+        }
+
+        // Add as new region if space available
+        if self.count < MAX_RAM_REGIONS {
+            self.regions[self.count] = RamRegion { start, end };
+            self.count += 1;
+        }
+    }
+
+    /// Check if a physical address is within a RAM region
+    pub fn contains(&self, addr: u64) -> bool {
+        for i in 0..self.count {
+            let r = &self.regions[i];
+            if addr >= r.start && addr < r.end {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a 1GB chunk overlaps with any RAM region
+    pub fn chunk_is_ram(&self, chunk_start: u64) -> bool {
+        const GB: u64 = 0x4000_0000;
+        let chunk_end = chunk_start + GB;
+
+        for i in 0..self.count {
+            let r = &self.regions[i];
+            // Check if chunk overlaps with this RAM region
+            if chunk_start < r.end && chunk_end > r.start {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the highest address across all regions
+    pub fn max_addr(&self) -> u64 {
+        let mut max = 0u64;
+        for i in 0..self.count {
+            max = max.max(self.regions[i].end);
+        }
+        max
+    }
+}
+
+/// Result of page table setup including optional framebuffer virtual address
+pub struct PageTableSetupResult {
+    /// Page table setup with TTBR0/TTBR1
+    pub tables: PageTableSetup,
+    /// Virtual address of framebuffer (if mapped)
+    pub fb_virt: Option<u64>,
+}
+
 /// Set up initial page tables for kernel boot
 ///
 /// Creates:
 /// - TTBR0: Identity mapping for bootloader transition (RAM only for code execution)
 /// - TTBR1: High-half mapping for kernel at KERNEL_VIRT_BASE with W^X enforcement,
-///   plus MMIO mappings for GIC and UART
+///   plus MMIO mappings for GIC and UART, and optional framebuffer
 ///
 /// Parameters:
 /// - `allocator`: Page table allocator
@@ -423,17 +604,20 @@ fn setup_ttbr0_identity(
 /// - `stack_phys`: Physical address of kernel stack (base, not top)
 /// - `stack_size`: Size of kernel stack
 /// - `mmio`: Platform-specific MMIO physical addresses
-/// - `max_phys_addr`: Highest physical address to map in direct physmap
+/// - `ram_regions`: RAM regions from UEFI memory map
+/// - `framebuffer`: Optional framebuffer to map
 ///
-/// Returns PageTableSetup with physical addresses for both TTBR0 and TTBR1.
+/// Returns PageTableSetupResult with physical addresses for both TTBR0 and TTBR1,
+/// plus the framebuffer virtual address if mapped.
 pub fn setup_initial_page_tables(
     allocator: &mut BootPageAllocator,
     kernel: &LoadedKernel,
     stack_phys: u64,
     stack_size: u64,
     mmio: &MmioConfig,
-    max_phys_addr: u64,
-) -> Option<PageTableSetup> {
+    ram_regions: &RamRegions,
+    framebuffer: Option<&FramebufferMapping>,
+) -> Option<PageTableSetupResult> {
     // TTBR1: Kernel high-half mapping with W^X enforcement
 
     // Allocate L0 (PGD) for TTBR1 (kernel space)
@@ -450,15 +634,25 @@ pub fn setup_initial_page_tables(
     // Map MMIO regions (GIC and UART)
     map_mmio_regions(&mut ttbr1_l0, mmio, allocator)?;
 
+    // Map framebuffer if present
+    let fb_virt = if let Some(fb) = framebuffer {
+        map_framebuffer(&mut ttbr1_l0, fb.phys, fb.size, allocator)
+    } else {
+        None
+    };
+
     // Map direct physical memory map
-    map_direct_physmap(&mut ttbr1_l0, max_phys_addr, allocator)?;
+    map_direct_physmap(&mut ttbr1_l0, ram_regions, allocator)?;
 
     // TTBR0: Identity mapping for bootloader transition
-    let ttbr0_pa = setup_ttbr0_identity(max_phys_addr, allocator)?;
+    let ttbr0_pa = setup_ttbr0_identity(ram_regions, allocator)?;
 
-    Some(PageTableSetup {
-        ttbr0: ttbr0_pa.value(),
-        ttbr1: ttbr1_pa.value(),
+    Some(PageTableSetupResult {
+        tables: PageTableSetup {
+            ttbr0: ttbr0_pa.value(),
+            ttbr1: ttbr1_pa.value(),
+        },
+        fb_virt,
     })
 }
 

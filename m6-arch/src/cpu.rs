@@ -17,6 +17,18 @@ pub fn current_el() -> u8 {
     ((CurrentEL.get() >> 2) & 0x3) as u8
 }
 
+/// Check if currently running at EL2
+#[must_use]
+pub fn is_el2() -> bool {
+    current_el() == 2
+}
+
+/// Check if currently running at EL1
+#[must_use]
+pub fn is_el1() -> bool {
+    current_el() == 1
+}
+
 /// Halt the CPU (spin loop)
 #[inline]
 pub fn halt() -> ! {
@@ -228,5 +240,137 @@ pub mod features {
     pub fn has_sha() -> bool {
         let id = ID_AA64ISAR0_EL1.get();
         ((id >> 8) & 0xF >= 1) || ((id >> 12) & 0xF >= 1)
+    }
+}
+
+/// EL2 (Hypervisor) configuration for dropping to EL1
+///
+/// These functions are used during boot when the UEFI firmware leaves
+/// the CPU at EL2 (e.g., Rock 5B+). They configure EL2 state to allow
+/// clean transition to EL1 where the kernel runs.
+pub mod el2 {
+    use core::arch::asm;
+
+    /// HCR_EL2 bit definitions
+    pub mod hcr {
+        /// RW bit: EL1 is AArch64 (not AArch32)
+        pub const RW: u64 = 1 << 31;
+        /// SWIO bit: Set/Way Invalidation Override
+        pub const SWIO: u64 = 1 << 1;
+    }
+
+    /// SPSR_EL2 value for returning to EL1h with interrupts masked
+    /// D=1, A=1, I=1, F=1 (all masked), M=0b0101 (EL1h)
+    pub const SPSR_EL1H_MASKED: u64 = 0x3c5;
+
+    /// Configure HCR_EL2 for EL1 execution
+    ///
+    /// Sets RW=1 to indicate EL1 is AArch64, and SWIO=1 for cache ops.
+    ///
+    /// # Safety
+    /// Must be called from EL2. Calling from other ELs will fault.
+    #[inline]
+    pub unsafe fn configure_hcr_for_el1() {
+        // SAFETY: Caller guarantees we're at EL2
+        unsafe {
+            asm!(
+                "msr hcr_el2, {val}",
+                val = in(reg) hcr::RW | hcr::SWIO,
+                options(nomem, nostack)
+            );
+        }
+    }
+
+    /// Enable EL1 access to physical timer and counter
+    ///
+    /// Configures CNTHCTL_EL2 to allow EL1 to access the physical
+    /// timer registers without trapping to EL2.
+    ///
+    /// # Safety
+    /// Must be called from EL2. Calling from other ELs will fault.
+    #[inline]
+    pub unsafe fn enable_el1_timer_access() {
+        // SAFETY: Caller guarantees we're at EL2
+        unsafe {
+            asm!(
+                // CNTHCTL_EL2: EL1PCEN=1, EL1PCTEN=1 (bits 1:0)
+                "mov {tmp}, #3",
+                "msr cnthctl_el2, {tmp}",
+                // CNTVOFF_EL2: No offset between physical and virtual counters
+                "msr cntvoff_el2, xzr",
+                tmp = out(reg) _,
+                options(nomem, nostack)
+            );
+        }
+    }
+
+    /// Disable EL2 trapping of GIC system registers
+    ///
+    /// Configures ICC_SRE_EL2 to allow EL1 to use the GICv3 system
+    /// register interface directly.
+    ///
+    /// # Safety
+    /// Must be called from EL2 on a system with GICv3.
+    #[inline]
+    pub unsafe fn enable_el1_gic_access() {
+        // SAFETY: Caller guarantees we're at EL2 with GICv3
+        unsafe {
+            asm!(
+                // ICC_SRE_EL2: SRE=1 (enable), Enable=1 (allow EL1 access)
+                "mov {tmp}, #0xf",
+                "msr icc_sre_el2, {tmp}",
+                "isb",
+                tmp = out(reg) _,
+                options(nomem, nostack)
+            );
+        }
+    }
+
+    /// Set SPSR_EL2 for return to EL1h with interrupts masked
+    ///
+    /// # Safety
+    /// Must be called from EL2 before executing ERET.
+    #[inline]
+    pub unsafe fn set_spsr_for_el1h() {
+        // SAFETY: Caller guarantees we're at EL2
+        unsafe {
+            asm!(
+                "msr spsr_el2, {val}",
+                val = in(reg) SPSR_EL1H_MASKED,
+                options(nomem, nostack)
+            );
+        }
+    }
+
+    /// Set ELR_EL2 (return address for ERET)
+    ///
+    /// # Safety
+    /// Must be called from EL2 with a valid code address.
+    #[inline]
+    pub unsafe fn set_elr(addr: u64) {
+        // SAFETY: Caller guarantees we're at EL2 and addr is valid code
+        unsafe {
+            asm!(
+                "msr elr_el2, {addr}",
+                addr = in(reg) addr,
+                options(nomem, nostack)
+            );
+        }
+    }
+
+    /// Set SP_EL1 (stack pointer for EL1)
+    ///
+    /// # Safety
+    /// Must be called from EL2 with a valid, aligned stack address.
+    #[inline]
+    pub unsafe fn set_sp_el1(sp: u64) {
+        // SAFETY: Caller guarantees we're at EL2 and sp is valid stack
+        unsafe {
+            asm!(
+                "msr sp_el1, {sp}",
+                sp = in(reg) sp,
+                options(nomem, nostack)
+            );
+        }
     }
 }

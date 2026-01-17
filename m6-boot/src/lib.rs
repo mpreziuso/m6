@@ -12,6 +12,7 @@
 
 pub mod config;
 pub mod efi_file;
+pub mod gop;
 pub mod initrd_loader;
 pub mod kernel_loader;
 pub mod memory;

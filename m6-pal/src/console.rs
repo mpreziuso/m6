@@ -1,7 +1,10 @@
 //! Console implementation
 //!
-//! Provides basic output functionality via a memory-mapped UART
-//! for early boot logging. Supports both ARM PL011 and DesignWare 8250 UARTs.
+//! Provides output functionality with dual-output support:
+//! - Framebuffer console (primary, when available)
+//! - UART console (secondary, always available for debugging)
+//!
+//! Supports both ARM PL011 and DesignWare 8250 UARTs.
 
 use core::fmt::{self, Write};
 
@@ -10,6 +13,8 @@ use spin::mutex::SpinMutex;
 use crate::boot_uart::drivers::{dw8250, pl011};
 use crate::current_platform;
 use crate::dtb_platform::UartType;
+use crate::fb_console;
+use crate::framebuffer::FramebufferConfig;
 
 struct Console {
     base: u64,
@@ -100,14 +105,36 @@ pub fn init_with_base(base: u64, uart_type: UartType) {
     console.init(base, uart_type);
 }
 
+/// Initialise the framebuffer console
+///
+/// When called, the framebuffer becomes the primary output device,
+/// with UART remaining as secondary for debugging purposes.
+pub fn init_framebuffer(config: FramebufferConfig) {
+    fb_console::init(config);
+}
+
 /// Print a string to the console
+///
+/// Outputs to framebuffer (if available) and UART (always).
 pub fn puts(s: &str) {
+    // Output to framebuffer first (primary) if available
+    if fb_console::is_available() {
+        fb_console::puts(s);
+    }
+    // Always output to UART (secondary/debug)
     let console = CONSOLE.lock();
     console.puts(s);
 }
 
 /// Print a character to the console
+///
+/// Outputs to framebuffer (if available) and UART (always).
 pub fn putc(c: u8) {
+    // Output to framebuffer first (primary) if available
+    if fb_console::is_available() {
+        fb_console::putc(c);
+    }
+    // Always output to UART (secondary/debug)
     let console = CONSOLE.lock();
     console.putc(c);
 }

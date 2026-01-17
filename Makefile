@@ -1,4 +1,4 @@
-.PHONY: clean check clippy run debug fmt fmt-check sysroot system user
+.PHONY: clean check clippy run debug fmt fmt-check sysroot system user image
 
 all: boot kernel initrd-full
 
@@ -78,12 +78,16 @@ clippy:
 		--target targets/aarch64-unknown-m6.json \
 		-- -D warnings
 
-run: all
-	./scripts/run-qemu.sh
+run: #all
+	./scripts/run-qemu.sh -device VGA
 
 # Run with user applications included
 run-full: boot kernel initrd-full
 	./scripts/run-qemu.sh
+
+# Create image without running QEMU
+image: all
+	./scripts/run-qemu.sh --prepare-only
 
 debug: all
 	./scripts/run-qemu.sh -s -S

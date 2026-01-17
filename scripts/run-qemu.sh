@@ -8,6 +8,13 @@
 
 set -e
 
+# Check for --prepare-only flag
+PREPARE_ONLY=false
+if [[ "$1" == "--prepare-only" ]]; then
+    PREPARE_ONLY=true
+    shift
+fi
+
 # Configuration
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -77,38 +84,43 @@ mkfs.vfat -F 32 "$ESP_IMG" >/dev/null 2>&1 || true
 # Copy files to FAT image using mtools
 mcopy -i "$ESP_IMG" -s "$ESP_DIR/EFI" ::/ 2>/dev/null || true
 
-echo "Starting QEMU..."
-echo "  Firmware: $FIRMWARE"
-echo "  Memory: $MEMORY"
-echo "  CPUs: $CPUS"
-echo ""
-echo "Press Ctrl+A, X to exit QEMU"
-echo ""
+if [ "$PREPARE_ONLY" = true ]; then
+    echo "Image prepared successfully"
+    echo "  ESP image: $ESP_IMG"
+    echo "  Disk image: $BUILD_DIR/disk.img"
+else
+    echo "Starting QEMU..."
+    echo "  Firmware: $FIRMWARE"
+    echo "  Memory: $MEMORY"
+    echo "  CPUs: $CPUS"
+    echo ""
+    echo "Press Ctrl+A, X to exit QEMU"
+    echo ""
 
-# Create a test disk image if it doesn't exist
-DISK_IMG="$BUILD_DIR/disk.img"
-if [ ! -f "$DISK_IMG" ]; then
-    echo "Creating test disk image..."
-    dd if=/dev/zero of="$DISK_IMG" bs=1M count=64 2>/dev/null
-    echo "Created $DISK_IMG (64MB)"
+    # Create a test disk image if it doesn't exist
+    DISK_IMG="$BUILD_DIR/disk.img"
+    if [ ! -f "$DISK_IMG" ]; then
+        echo "Creating test disk image..."
+        dd if=/dev/zero of="$DISK_IMG" bs=1M count=64 2>/dev/null
+        echo "Created $DISK_IMG (64MB)"
+    fi
+
+    # Run QEMU
+    exec $QEMU \
+        -machine virt,gic-version=3,acpi=off,iommu=smmuv3 \
+        -cpu cortex-a72 \
+        -smp $CPUS \
+        -m $MEMORY \
+        -drive if=pflash,format=raw,readonly=on,file="$FIRMWARE" \
+        -drive format=raw,file="$ESP_IMG" \
+        -drive file="$DISK_IMG",if=none,format=raw,id=hd0 \
+        -device virtio-blk-device,drive=hd0 \
+        -device ramfb \
+        -device virtio-keyboard-pci \
+        -device virtio-mouse-pci \
+        -device virtio-net-pci,netdev=net0 \
+        -netdev user,id=net0 \
+        -serial stdio \
+        -monitor none \
+        "$@"
 fi
-
-# Run QEMU
-exec $QEMU \
-    -machine virt,gic-version=3,acpi=off,iommu=smmuv3 \
-    -cpu cortex-a72 \
-    -smp $CPUS \
-    -m $MEMORY \
-    -drive if=pflash,format=raw,readonly=on,file="$FIRMWARE" \
-    -drive format=raw,file="$ESP_IMG" \
-    -drive file="$DISK_IMG",if=none,format=raw,id=hd0 \
-    -device virtio-blk-device,drive=hd0 \
-    -device virtio-gpu-pci \
-    -device virtio-keyboard-pci \
-    -device virtio-mouse-pci \
-    -device virtio-net-pci,netdev=net0 \
-    -netdev user,id=net0 \
-    -serial stdio \
-    -monitor none \
-    -nographic \
-    "$@"

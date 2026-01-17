@@ -134,11 +134,13 @@ use m6_common::boot::{
 ///
 /// This is a naked function that sets up the MMU and stack, then jumps to Rust.
 /// PSCI starts the CPU with MMU disabled, so we must:
-/// 1. Read BootInfo using physical addresses (MMU is off)
-/// 2. Set up MMU with the same page tables as BSP
-/// 3. Enable MMU
-/// 4. Set stack pointer (now using virtual address)
-/// 5. Jump to Rust entry point
+/// 1. Detect exception level (EL1 or EL2)
+/// 2. If EL2, configure for EL1 and drop to EL1
+/// 3. Read BootInfo using physical addresses (MMU is off)
+/// 4. Set up MMU with the same page tables as BSP
+/// 5. Enable MMU
+/// 6. Set stack pointer (now using virtual address)
+/// 7. Jump to Rust entry point
 ///
 /// # Safety
 /// This is called directly by PSCI firmware with x0 containing our context.
@@ -155,10 +157,15 @@ pub unsafe extern "C" fn secondary_entry_stub() -> ! {
         //   x22 = scratch / TTBR0
         //   x23 = scratch / stack_virt_top
         //   x24 = scratch
+        //   x25 = current EL
 
         // -- Extract context
         "and x19, x0, #0xFFFF",        // x19 = cpu_id (lower 16 bits)
         "lsr x20, x0, #16",            // x20 = boot_info_phys (upper 48 bits)
+
+        // -- Detect current exception level
+        "mrs x25, CurrentEL",
+        "lsr x25, x25, #2",            // x25 = current EL (2 bits)
 
         // -- Read MMU configuration from BootInfo (using physical addresses)
         // TTBR1 = boot_info.page_table_base
@@ -181,22 +188,91 @@ pub unsafe extern "C" fn secondary_entry_stub() -> ! {
         "add x24, x20, x24",
         "ldr x23, [x24]",              // x23 = stack virt_top (save for later)
 
-        // -- Set up MMU registers
-        // Set MAIR_EL1
+        // -- Branch based on exception level
+        "cmp x25, #2",
+        "b.eq 1f",                     // If EL2, go to EL2 path
+        "b 2f",                        // Otherwise, EL1 path
+
+        // ============================================================
+        // EL2 path: Configure EL2 for EL1 and drop to EL1
+        // ============================================================
+        "1:",
+        // Disable interrupts at EL2
+        "msr daifset, #0xf",
+
+        // HCR_EL2: RW=1 (EL1 is AArch64), SWIO=1
+        "mov x24, #(1 << 31)",         // RW bit
+        "orr x24, x24, #(1 << 1)",     // SWIO bit
+        "msr hcr_el2, x24",
+
+        // Enable EL1 timer access
+        "mov x24, #3",
+        "msr cnthctl_el2, x24",
+        "msr cntvoff_el2, xzr",
+
+        // Enable EL1 GIC access (ICC_SRE_EL2)
+        "mov x24, #0xf",
+        "msr s3_4_c12_c9_5, x24",
+        "isb",
+
+        // Set up EL1 MMU registers
+        "ldr x24, ={mair}",
+        "msr mair_el1, x24",
+
+        "ldr x24, ={tcr}",
+        "msr tcr_el1, x24",
+
+        "msr ttbr0_el1, x22",
+        "msr ttbr1_el1, x21",
+
+        "dsb sy",
+        "isb",
+
+        // Invalidate TLB
+        "tlbi vmalle1",
+        "dsb sy",
+        "isb",
+
+        // Invalidate instruction cache
+        "ic iallu",
+        "dsb sy",
+        "isb",
+
+        // Set up SCTLR_EL1 with MMU enabled
+        "mov x24, #0",
+        "orr x24, x24, #(1 << 0)",     // M bit (MMU enable)
+        "orr x24, x24, #(1 << 2)",     // C bit (data cache)
+        "orr x24, x24, #(1 << 12)",    // I bit (instruction cache)
+        "msr sctlr_el1, x24",
+
+        // Set SP_EL1 for kernel stack
+        "msr sp_el1, x23",
+
+        // SPSR_EL2: Return to EL1h with interrupts masked
+        "mov x24, #0x3c5",
+        "msr spsr_el2, x24",
+
+        // Calculate EL1 entry address (after the EL2 block)
+        "adr x24, 3f",
+        "msr elr_el2, x24",
+
+        // Return to EL1
+        "eret",
+
+        // ============================================================
+        // EL1 path: Direct MMU setup (QEMU or after EL2 drop)
+        // ============================================================
+        "2:",
+        // -- Set up MMU registers at EL1
         "ldr x24, ={mair}",
         "msr MAIR_EL1, x24",
 
-        // Set TCR_EL1
         "ldr x24, ={tcr}",
         "msr TCR_EL1, x24",
 
-        // Set TTBR0_EL1 (identity mapping for transition)
         "msr TTBR0_EL1, x22",
-
-        // Set TTBR1_EL1 (kernel mapping)
         "msr TTBR1_EL1, x21",
 
-        // Ensure all writes complete before enabling MMU
         "isb",
         "dsb sy",
 
@@ -205,19 +281,21 @@ pub unsafe extern "C" fn secondary_entry_stub() -> ! {
         "dsb sy",
         "isb",
 
-        // -- Enable MMU via SCTLR_EL1
+        // Enable MMU via SCTLR_EL1
         "mrs x24, SCTLR_EL1",
-        "orr x24, x24, #(1 << 0)",     // M bit (MMU enable)
-        "orr x24, x24, #(1 << 2)",     // C bit (data cache enable)
-        "orr x24, x24, #(1 << 12)",    // I bit (instruction cache enable)
+        "orr x24, x24, #(1 << 0)",     // M bit
+        "orr x24, x24, #(1 << 2)",     // C bit
+        "orr x24, x24, #(1 << 12)",    // I bit
         "msr SCTLR_EL1, x24",
         "isb",
 
-        // -- MMU is now enabled, we can use virtual addresses
-
-        // Set stack pointer (virtual address)
+        // Set stack pointer
         "mov sp, x23",
 
+        // ============================================================
+        // Common path: MMU enabled, at EL1
+        // ============================================================
+        "3:",
         // Convert boot_info_phys to virtual address
         "ldr x24, ={phys_map_base}",
         "add x20, x20, x24",           // x20 = boot_info_virt

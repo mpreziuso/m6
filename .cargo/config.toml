@@ -1,6 +1,7 @@
 [build]
 # Default target for kernel builds
 target = "aarch64-unknown-none"
+rustc-wrapper = "sccache"
 
 [target.aarch64-unknown-none]
 # Use rust-lld as the linker
