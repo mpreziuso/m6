@@ -50,7 +50,9 @@ pub fn resolve_cptr(cptr: u64, depth_bits: u8) -> Result<SlotLocation, SyscallEr
 
     log::trace!(
         "resolve_cptr: cptr={:#x} current_task={:?} cspace_root={:?}",
-        cptr, current, cspace_root
+        cptr,
+        current,
+        cspace_root
     );
 
     if !cspace_root.is_valid() {
@@ -89,7 +91,8 @@ pub fn resolve_cptr_from_root(
             }
             let cnode = unsafe { &*cnode_ptr };
             cnode.meta().radix()
-        }).unwrap_or(12); // default to radix 12 if lookup fails
+        })
+        .unwrap_or(12); // default to radix 12 if lookup fails
         CptrDepth::new(radix)
     } else {
         CptrDepth::new(depth_bits)
@@ -121,7 +124,8 @@ pub fn resolve_cnode_slot(
 
     log::trace!(
         "resolve_cnode_slot: cnode_ref={:?} checking slot_index={}",
-        cnode_ref, slot_index
+        cnode_ref,
+        slot_index
     );
 
     // Verify the slot index is within bounds
@@ -145,13 +149,15 @@ pub fn resolve_cnode_slot(
 
         log::trace!(
             "resolve_cnode_slot: cnode has {} slots, checking index {}",
-            num_slots, slot_index
+            num_slots,
+            slot_index
         );
 
         if slot_index >= num_slots {
             log::warn!(
                 "resolve_cnode_slot: slot_index {} >= num_slots {}",
-                slot_index, num_slots
+                slot_index,
+                num_slots
             );
             return Err(SyscallError::InvalidCap);
         }
@@ -180,12 +186,16 @@ pub fn resolve_cnode_slot(
 fn get_cnode_from_slot(loc: SlotLocation) -> Result<ObjectRef, SyscallError> {
     log::trace!(
         "get_cnode_from_slot: cnode_ref={:?} slot_index={}",
-        loc.cnode_ref, loc.slot_index
+        loc.cnode_ref,
+        loc.slot_index
     );
 
     let result = object_table::with_object(loc.cnode_ref, |obj| {
         if obj.obj_type != KernelObjectType::CNode {
-            log::warn!("get_cnode_from_slot: obj_type is {:?}, expected CNode", obj.obj_type);
+            log::warn!(
+                "get_cnode_from_slot: obj_type is {:?}, expected CNode",
+                obj.obj_type
+            );
             return Err(SyscallError::TypeMismatch);
         }
 
@@ -210,7 +220,8 @@ fn get_cnode_from_slot(loc: SlotLocation) -> Result<ObjectRef, SyscallError> {
         if cap_type != ObjectType::CNode {
             log::warn!(
                 "get_cnode_from_slot: slot {} has type {:?}, expected CNode",
-                loc.slot_index, cap_type
+                loc.slot_index,
+                cap_type
             );
             return Err(SyscallError::TypeMismatch);
         }
@@ -221,7 +232,10 @@ fn get_cnode_from_slot(loc: SlotLocation) -> Result<ObjectRef, SyscallError> {
     match result {
         Some(r) => r,
         None => {
-            log::warn!("get_cnode_from_slot: with_object returned None for {:?}", loc.cnode_ref);
+            log::warn!(
+                "get_cnode_from_slot: with_object returned None for {:?}",
+                loc.cnode_ref
+            );
             Err(SyscallError::InvalidCap)
         }
     }
@@ -403,11 +417,7 @@ where
 /// If `ref1 == ref2`, the same CNode is passed twice. The caller must ensure
 /// they don't access overlapping slots mutably (which the capability operations
 /// guarantee by operating on distinct slot indices).
-pub fn with_two_cnodes<F, R>(
-    ref1: ObjectRef,
-    ref2: ObjectRef,
-    f: F,
-) -> Result<R, SyscallError>
+pub fn with_two_cnodes<F, R>(ref1: ObjectRef, ref2: ObjectRef, f: F) -> Result<R, SyscallError>
 where
     F: FnOnce(&mut CNodeStorage, &mut CNodeStorage, bool) -> Result<R, SyscallError>,
 {
@@ -438,11 +448,7 @@ where
         // Order by ObjectRef index for consistent ordering (not for deadlock
         // prevention since we use a single lock)
         let swapped = ref1.index() > ref2.index();
-        let (first_ref, second_ref) = if swapped {
-            (ref2, ref1)
-        } else {
-            (ref1, ref2)
-        };
+        let (first_ref, second_ref) = if swapped { (ref2, ref1) } else { (ref1, ref2) };
 
         // Access both objects within the same lock scope
         let obj1 = table.get(first_ref).ok_or(SyscallError::InvalidCap)?;

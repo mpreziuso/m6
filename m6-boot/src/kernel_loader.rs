@@ -67,7 +67,11 @@ pub struct LoadedKernel {
 /// * `cpu_count` - Number of CPUs to allocate stacks for (from DTB parsing)
 pub fn load_kernel(cpu_count: u32) -> uefi::Result<LoadedKernel> {
     let cpu_count = (cpu_count as usize).clamp(1, MAX_CPUS);
-    log::info!("Loading kernel from {} (for {} CPUs)", KERNEL_PATH, cpu_count);
+    log::info!(
+        "Loading kernel from {} (for {} CPUs)",
+        KERNEL_PATH,
+        cpu_count
+    );
     let kernel_data: Vec<u8> = match read_efi_file(KERNEL_PATH) {
         Some(data) => data,
         None => {
@@ -188,8 +192,11 @@ pub fn load_kernel(cpu_count: u32) -> uefi::Result<LoadedKernel> {
     // Allocate per-CPU kernel stacks (contiguous block for all CPUs)
     let stack_pages_per_cpu = PER_CPU_STACK_SIZE.div_ceil(4096);
     let total_stack_pages = stack_pages_per_cpu * cpu_count;
-    let stacks_phys =
-        boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, total_stack_pages)?;
+    let stacks_phys = boot::allocate_pages(
+        AllocateType::AnyPages,
+        MemoryType::LOADER_DATA,
+        total_stack_pages,
+    )?;
 
     log::info!(
         "Allocated {} per-CPU stacks: {} pages at physical {:#x}",
@@ -216,10 +223,15 @@ pub fn load_kernel(cpu_count: u32) -> uefi::Result<LoadedKernel> {
         // Stack top is at base + size (stack grows downward)
         let virt_top = virt_base + PER_CPU_STACK_SIZE as u64;
 
-        *stack = PerCpuStack { phys_base, virt_top };
+        *stack = PerCpuStack {
+            phys_base,
+            virt_top,
+        };
         log::debug!(
             "CPU {} stack: phys_base={:#x}, virt_top={:#x}",
-            cpu, phys_base, virt_top
+            cpu,
+            phys_base,
+            virt_top
         );
     }
 

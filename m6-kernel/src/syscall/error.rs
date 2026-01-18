@@ -3,8 +3,8 @@
 //! Re-exports error definitions from the shared ABI crate and provides
 //! kernel-specific conversions.
 
-pub use m6_syscall::error::SyscallError;
 use m6_cap::CapError;
+pub use m6_syscall::error::SyscallError;
 
 /// Convert a capability error to a syscall error.
 ///

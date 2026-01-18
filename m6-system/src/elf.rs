@@ -7,34 +7,34 @@
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Elf64Header {
-    e_ident: [u8; 16],      // ELF identification
-    e_type: u16,            // Object file type
-    e_machine: u16,         // Architecture
-    e_version: u32,         // Object file version
-    e_entry: u64,           // Entry point virtual address
-    e_phoff: u64,           // Program header table offset
-    e_shoff: u64,           // Section header table offset
-    e_flags: u32,           // Processor-specific flags
-    e_ehsize: u16,          // ELF header size
-    e_phentsize: u16,       // Program header table entry size
-    e_phnum: u16,           // Program header table entry count
-    e_shentsize: u16,       // Section header table entry size
-    e_shnum: u16,           // Section header table entry count
-    e_shstrndx: u16,        // Section header string table index
+    e_ident: [u8; 16], // ELF identification
+    e_type: u16,       // Object file type
+    e_machine: u16,    // Architecture
+    e_version: u32,    // Object file version
+    e_entry: u64,      // Entry point virtual address
+    e_phoff: u64,      // Program header table offset
+    e_shoff: u64,      // Section header table offset
+    e_flags: u32,      // Processor-specific flags
+    e_ehsize: u16,     // ELF header size
+    e_phentsize: u16,  // Program header table entry size
+    e_phnum: u16,      // Program header table entry count
+    e_shentsize: u16,  // Section header table entry size
+    e_shnum: u16,      // Section header table entry count
+    e_shstrndx: u16,   // Section header string table index
 }
 
 /// ELF64 program header
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Elf64ProgramHeader {
-    p_type: u32,            // Segment type
-    p_flags: u32,           // Segment flags
-    p_offset: u64,          // Segment file offset
-    p_vaddr: u64,           // Segment virtual address
-    p_paddr: u64,           // Segment physical address (unused)
-    p_filesz: u64,          // Segment size in file
-    p_memsz: u64,           // Segment size in memory
-    p_align: u64,           // Segment alignment
+    p_type: u32,   // Segment type
+    p_flags: u32,  // Segment flags
+    p_offset: u64, // Segment file offset
+    p_vaddr: u64,  // Segment virtual address
+    p_paddr: u64,  // Segment physical address (unused)
+    p_filesz: u64, // Segment size in file
+    p_memsz: u64,  // Segment size in memory
+    p_align: u64,  // Segment alignment
 }
 
 // ELF constants
@@ -168,9 +168,7 @@ impl<'a> Elf64<'a> {
             }
 
             // SAFETY: We validated the offset above
-            let ph = unsafe {
-                &*(data.as_ptr().add(offset) as *const Elf64ProgramHeader)
-            };
+            let ph = unsafe { &*(data.as_ptr().add(offset) as *const Elf64ProgramHeader) };
 
             // Only return LOAD segments
             if ph.p_type != PT_LOAD {

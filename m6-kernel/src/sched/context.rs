@@ -23,7 +23,7 @@ use m6_cap::ObjectRef;
 use m6_cap::objects::ThreadState;
 
 use super::run_queue::{with_tcb, with_tcb_mut};
-use super::{eevdf, PerCpuSched};
+use super::{PerCpuSched, eevdf};
 use crate::cap::object_table::{self, KernelObjectType};
 use crate::memory::asid::current_generation;
 
@@ -51,12 +51,12 @@ pub fn context_switch(sched: &mut PerCpuSched, ctx: &mut ExceptionContext) {
     }
 
     // Get VSpace of current task (if any)
-    let prev_vspace = sched.current()
+    let prev_vspace = sched
+        .current()
         .and_then(|tcb_ref| with_tcb(tcb_ref, |tcb| tcb.tcb.vspace));
 
     // Find next task using EEVDF (or idle task as fallback)
-    let next = eevdf::find_next_runnable(sched)
-        .unwrap_or(sched.idle_thread);
+    let next = eevdf::find_next_runnable(sched).unwrap_or(sched.idle_thread);
 
     if !next.is_valid() {
         log::error!("No runnable task and no idle task!");
@@ -215,12 +215,21 @@ pub fn enter_userspace() -> ! {
 
     // Get context and perform eret
     let (elr, sp, spsr, x0) = with_tcb(tcb_ref, |tcb| {
-        (tcb.context.elr, tcb.context.sp, tcb.context.spsr, tcb.context.gpr[0])
-    }).expect("Failed to read task context");
+        (
+            tcb.context.elr,
+            tcb.context.sp,
+            tcb.context.spsr,
+            tcb.context.gpr[0],
+        )
+    })
+    .expect("Failed to read task context");
 
     log::debug!(
         "Entering userspace: ELR={:#x} SP={:#x} SPSR={:#x} x0={:#x}",
-        elr, sp, spsr, x0
+        elr,
+        sp,
+        spsr,
+        x0
     );
 
     // SAFETY: We've set up a valid user context. This function won't return.

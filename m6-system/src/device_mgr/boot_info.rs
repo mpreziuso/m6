@@ -101,7 +101,10 @@ impl DevMgrBootInfo {
     pub unsafe fn initrd_slice(&self) -> Option<&[u8]> {
         if self.has_initrd() {
             Some(unsafe {
-                core::slice::from_raw_parts(self.initrd_vaddr as *const u8, self.initrd_size as usize)
+                core::slice::from_raw_parts(
+                    self.initrd_vaddr as *const u8,
+                    self.initrd_size as usize,
+                )
             })
         } else {
             None

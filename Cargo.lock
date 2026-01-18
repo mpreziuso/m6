@@ -189,6 +189,7 @@ name = "m6-boot"
 version = "0.1.0"
 dependencies = [
  "elf_rs",
+ "fdt",
  "log",
  "m6-arch",
  "m6-common",

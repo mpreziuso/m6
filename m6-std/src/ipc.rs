@@ -23,12 +23,10 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use m6_cap::ObjectType;
 use m6_syscall::error::SyscallError;
-use m6_syscall::invoke::{retype, IpcRecvResult};
+use m6_syscall::invoke::{IpcRecvResult, retype};
 
 // Re-export syscall wrappers for direct IPC access
-pub use m6_syscall::invoke::{
-    call, nb_recv, nb_send, poll, recv, reply_recv, send, signal, wait,
-};
+pub use m6_syscall::invoke::{call, nb_recv, nb_send, poll, recv, reply_recv, send, signal, wait};
 
 // -- Capability slot management
 
@@ -448,7 +446,12 @@ impl IntoMessage for (u64, u64, u64, u64) {
 
 impl FromMessage for (u64, u64, u64, u64) {
     fn from_message(msg: Message) -> Option<Self> {
-        Some((msg.payload[0], msg.payload[1], msg.payload[2], msg.payload[3]))
+        Some((
+            msg.payload[0],
+            msg.payload[1],
+            msg.payload[2],
+            msg.payload[3],
+        ))
     }
 }
 

@@ -64,12 +64,7 @@ impl Log for KernelLogger {
             let _ = write!(msg_buf, "{}", record.args());
 
             // Create log entry
-            let entry = LogEntry::new(
-                time_ms,
-                record.level(),
-                record.target(),
-                msg_buf.as_str(),
-            );
+            let entry = LogEntry::new(time_ms, record.level(), record.target(), msg_buf.as_str());
 
             // Push to lock-free buffer
             buffer::push(entry);

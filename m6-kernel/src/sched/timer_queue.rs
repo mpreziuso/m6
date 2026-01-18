@@ -43,7 +43,9 @@ impl Ord for TimerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap: earliest expiry first
         // BinaryHeap is a max-heap, so we reverse the comparison
-        other.expiry_ticks.cmp(&self.expiry_ticks)
+        other
+            .expiry_ticks
+            .cmp(&self.expiry_ticks)
             .then_with(|| other.timer_ref.index().cmp(&self.timer_ref.index()))
     }
 }
@@ -97,9 +99,7 @@ pub fn unregister_timer(timer_ref: ObjectRef) {
     let mut queue = get_timer_queue().lock();
 
     // Drain and filter
-    let entries: Vec<_> = queue.drain()
-        .filter(|e| e.timer_ref != timer_ref)
-        .collect();
+    let entries: Vec<_> = queue.drain().filter(|e| e.timer_ref != timer_ref).collect();
 
     // Re-insert remaining entries
     for entry in entries {
@@ -140,8 +140,8 @@ pub fn process_expirations() {
 ///
 /// Returns a new entry if the timer is periodic and should be re-armed.
 fn process_timer_expiry(timer_ref: ObjectRef, now_ticks: u64) -> Option<TimerEntry> {
-    use m6_cap::objects::TimerState;
     use crate::ipc::notification::do_signal;
+    use m6_cap::objects::TimerState;
 
     // Access timer under lock, get signal info
     let rearm_info = object_table::with_timer_mut(timer_ref, |timer| {

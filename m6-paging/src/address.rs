@@ -130,7 +130,6 @@ impl<K: MemKind, T> Address<K, T> {
     pub unsafe fn from_ptr<P>(ptr: *const P) -> Self {
         Self::new(ptr as u64)
     }
-
 }
 
 impl<K: MemKind, T> Address<K, T> {

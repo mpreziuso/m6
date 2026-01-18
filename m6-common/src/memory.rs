@@ -177,7 +177,10 @@ pub mod page {
 
     // Compile-time verification of page constants
     const _: () = assert!(SIZE_4K.is_power_of_two(), "SIZE_4K must be a power of two");
-    const _: () = assert!(SIZE_16K.is_power_of_two(), "SIZE_16K must be a power of two");
+    const _: () = assert!(
+        SIZE_16K.is_power_of_two(),
+        "SIZE_16K must be a power of two"
+    );
     const _: () = assert!(SIZE_2M.is_power_of_two(), "SIZE_2M must be a power of two");
     const _: () = assert!(SHIFT_4K == 12, "4KB page shift must be 12");
     const _: () = assert!(1 << SHIFT_4K == SIZE_4K, "SHIFT_4K must match SIZE_4K");

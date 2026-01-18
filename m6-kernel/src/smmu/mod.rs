@@ -213,7 +213,11 @@ impl SmmuInstance {
     }
 
     /// Configure a stream table entry.
-    pub fn configure_ste(&mut self, stream_id: u32, ste: StreamTableEntry) -> Result<(), SmmuError> {
+    pub fn configure_ste(
+        &mut self,
+        stream_id: u32,
+        ste: StreamTableEntry,
+    ) -> Result<(), SmmuError> {
         let max_streams = 1u32 << self.strtab_log2size;
         if stream_id >= max_streams {
             return Err(SmmuError::InvalidStreamId);
@@ -368,12 +372,16 @@ impl SmmuInstance {
 
         log::debug!(
             "SMMU{} event: type={:#x} stream={:#x} addr={:#x}",
-            smmu_index, event_type, stream_id, address
+            smmu_index,
+            event_type,
+            stream_id,
+            address
         );
 
         // Look up stream binding for fault delivery
         if let Some(binding) = stream_bindings.get(stream_id as usize)
-            && binding.is_bound && binding.fault_notification.is_valid()
+            && binding.is_bound
+            && binding.fault_notification.is_valid()
         {
             // Encode fault info into badge
             // Bits [63:48]: stream_id, Bits [47:40]: event_type
@@ -462,11 +470,22 @@ pub unsafe fn init(smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
     let cohacc = (idr0 >> 4) & 0x1;
     let oas = idr5 & 0x7;
     let oas_bits = match oas {
-        0 => 32, 1 => 36, 2 => 40, 3 => 42, 4 => 44, 5 => 48, 6 => 52, _ => 0,
+        0 => 32,
+        1 => 36,
+        2 => 40,
+        3 => 42,
+        4 => 44,
+        5 => 48,
+        6 => 52,
+        _ => 0,
     };
     log::info!(
         "SMMU capabilities: IDR0={:#010x} IDR5={:#010x} TTF={} COHACC={} OAS={}bit",
-        idr0, idr5, ttf, cohacc, oas_bits
+        idr0,
+        idr5,
+        ttf,
+        cohacc,
+        oas_bits
     );
 
     // Verify AArch64 translation table format support
@@ -483,7 +502,10 @@ pub unsafe fn init(smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
 
     log::info!(
         "SMMU: IDR0={:#x} IDR1={:#x} SIDsize={} TTF={:#x}",
-        idr0, idr1, sid_size, ttf
+        idr0,
+        idr1,
+        sid_size,
+        ttf
     );
 
     // Allocate stream table (linear format)
@@ -609,7 +631,9 @@ pub unsafe fn init(smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
 
     log::info!(
         "SMMU initialised: {} streams, cmdq={} entries, eventq={} entries",
-        1 << strtab_log2size, CMDQ_ENTRIES, EVENTQ_ENTRIES
+        1 << strtab_log2size,
+        CMDQ_ENTRIES,
+        EVENTQ_ENTRIES
     );
 
     Ok(())
@@ -657,12 +681,10 @@ pub fn with_smmu<F, R>(index: u8, f: F) -> Result<R, SmmuError>
 where
     F: FnOnce(&mut SmmuInstance) -> R,
 {
-    let mut guard = SMMU_INSTANCES
-        .get()
-        .ok_or(SmmuError::NotAvailable)?
-        .lock();
+    let mut guard = SMMU_INSTANCES.get().ok_or(SmmuError::NotAvailable)?.lock();
 
-    let instance = guard.instances
+    let instance = guard
+        .instances
         .get_mut(index as usize)
         .and_then(|opt| opt.as_mut())
         .ok_or(SmmuError::NotAvailable)?;

@@ -4,7 +4,7 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use m6_arch::IrqSpinMutex;
-use m6_common::memory::{page, MemoryMap};
+use m6_common::memory::{MemoryMap, page};
 
 use super::translate::{phys_to_virt, phys_to_virt_checked};
 
@@ -35,11 +35,17 @@ pub enum FrameAllocError {
         valid_end: usize,
     },
     /// Not enough contiguous frames available
-    InsufficientContiguous { requested: usize, largest_free: usize },
+    InsufficientContiguous {
+        requested: usize,
+        largest_free: usize,
+    },
     /// Not enough total frames available
     InsufficientTotal { requested: usize, available: usize },
     /// Bitmap is too small to cover the frame range
-    BitmapTooSmall { required_entries: usize, actual_entries: usize },
+    BitmapTooSmall {
+        required_entries: usize,
+        actual_entries: usize,
+    },
     /// Allocator not initialised
     NotInitialised,
     /// Zero-count operation requested
@@ -93,11 +99,7 @@ impl FrameAllocator {
     /// # Panics
     ///
     /// Panics if the bitmap is too small for the requested frame count.
-    pub unsafe fn new(
-        bitmap: &'static mut [u64],
-        first_frame: usize,
-        total_frames: usize,
-    ) -> Self {
+    pub unsafe fn new(bitmap: &'static mut [u64], first_frame: usize, total_frames: usize) -> Self {
         let required_entries = total_frames.div_ceil(Self::BITS_PER_ENTRY);
 
         assert!(
@@ -149,7 +151,10 @@ impl FrameAllocator {
     /// Get the bitmap entry and bit position for a relative frame index.
     #[inline]
     fn bitmap_pos(&self, relative: usize) -> (usize, usize) {
-        (relative / Self::BITS_PER_ENTRY, relative % Self::BITS_PER_ENTRY)
+        (
+            relative / Self::BITS_PER_ENTRY,
+            relative % Self::BITS_PER_ENTRY,
+        )
     }
 
     /// Check if a relative frame is free.
@@ -170,7 +175,11 @@ impl FrameAllocator {
     ///
     /// `Ok(freed_count)` - Number of frames actually freed (excludes already-free frames)
     /// `Err(FrameAllocError)` - If the range is invalid
-    pub fn free_range(&mut self, start_frame: usize, count: usize) -> Result<usize, FrameAllocError> {
+    pub fn free_range(
+        &mut self,
+        start_frame: usize,
+        count: usize,
+    ) -> Result<usize, FrameAllocError> {
         if count == 0 {
             return Ok(0);
         }
@@ -230,7 +239,11 @@ impl FrameAllocator {
     ///
     /// `Ok(marked_count)` - Number of frames actually marked (excludes already-allocated frames)
     /// `Err(FrameAllocError)` - If the range is invalid
-    pub fn mark_allocated(&mut self, start_frame: usize, count: usize) -> Result<usize, FrameAllocError> {
+    pub fn mark_allocated(
+        &mut self,
+        start_frame: usize,
+        count: usize,
+    ) -> Result<usize, FrameAllocError> {
         if count == 0 {
             return Ok(0);
         }
@@ -539,9 +552,8 @@ pub(super) unsafe fn init_frame_allocator(
 
     // SAFETY: Bootloader allocated this bitmap and passed it via BootInfo.
     // We access it via the direct physical map which is set up before kernel entry.
-    let bitmap = unsafe {
-        core::slice::from_raw_parts_mut(bitmap_virt as *mut u64, bitmap_entries)
-    };
+    let bitmap =
+        unsafe { core::slice::from_raw_parts_mut(bitmap_virt as *mut u64, bitmap_entries) };
 
     // SAFETY: We've verified this is the first call and bitmap is valid
     let mut allocator = unsafe { FrameAllocator::new(bitmap, first_frame, total_frames) };
@@ -567,8 +579,12 @@ pub(super) unsafe fn init_frame_allocator(
                         );
                     }
                     Err(e) => {
-                        log::warn!("  Failed to free region {:#x}..{:#x}: {:?}",
-                            region.base, region.end(), e);
+                        log::warn!(
+                            "  Failed to free region {:#x}..{:#x}: {:?}",
+                            region.base,
+                            region.end(),
+                            e
+                        );
                     }
                 }
             }
@@ -631,14 +647,11 @@ pub(super) unsafe fn init_frame_allocator(
 #[must_use]
 pub fn alloc_frame() -> Option<u64> {
     let mut guard = FRAME_ALLOCATOR.lock();
-    guard
-        .as_mut()
-        .and_then(|alloc| alloc.alloc())
-        .map(|frame| {
-            frame
-                .checked_mul(page::SIZE_4K)
-                .expect("frame address overflow") as u64
-        })
+    guard.as_mut().and_then(|alloc| alloc.alloc()).map(|frame| {
+        frame
+            .checked_mul(page::SIZE_4K)
+            .expect("frame address overflow") as u64
+    })
 }
 
 /// Allocate a physical frame and zero its contents.

@@ -11,6 +11,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod config;
+pub mod dtb_devices;
 pub mod efi_file;
 pub mod gop;
 pub mod initrd_loader;

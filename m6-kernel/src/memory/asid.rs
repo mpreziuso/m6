@@ -154,7 +154,8 @@ impl Default for AsidAllocator {
 /// Protected by an interrupt-safe spinlock to allow allocation from
 /// any context (though allocation from interrupt handlers should be
 /// avoided where possible).
-static ASID_ALLOCATOR: IrqSpinMutex<AsidAllocator> = IrqSpinMutex::new(AsidAllocator::new_default());
+static ASID_ALLOCATOR: IrqSpinMutex<AsidAllocator> =
+    IrqSpinMutex::new(AsidAllocator::new_default());
 
 /// Initialise the ASID allocator with the correct ASID width.
 ///

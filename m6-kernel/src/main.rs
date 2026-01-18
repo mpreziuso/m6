@@ -13,7 +13,6 @@ use m6_kernel::logging::logger;
 use m6_kernel::memory;
 use m6_pal::{console, gic, platform, timer};
 
-
 /// Panic handler for the kernel
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -32,7 +31,9 @@ fn panic(info: &PanicInfo) -> ! {
             buf[i] = b'0' + (n % 10) as u8;
             n /= 10;
             i += 1;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
         }
         for j in (0..i).rev() {
             console::putc(buf[j]);
@@ -46,7 +47,6 @@ fn panic(info: &PanicInfo) -> ! {
     }
     cpu::halt();
 }
-
 
 /// Kernel entry point called by the bootloader
 ///
@@ -101,8 +101,7 @@ pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
     m6_kernel::sched::init();
 
     // Create idle task for CPU 0
-    let idle_ref = m6_kernel::sched::idle::create_idle_task(0)
-        .expect("Failed to create idle task");
+    let idle_ref = m6_kernel::sched::idle::create_idle_task(0).expect("Failed to create idle task");
     m6_kernel::sched::init_cpu(0, idle_ref);
 
     // Initialise exception vectors
@@ -216,7 +215,8 @@ pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
             } else {
                 false
             }
-        }).unwrap_or(false);
+        })
+        .unwrap_or(false);
 
         if has_vspace {
             log::info!("Entering userspace for root task");
@@ -232,10 +232,9 @@ pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
     }
 }
 
-
 fn print_banner() {
     console::puts("\n");
-    console::puts("\x1b[36m");  // Cyan
+    console::puts("\x1b[36m"); // Cyan
     console::puts("\n");
     console::puts("  ███╗   ███╗ ██████╗ \n");
     console::puts("  ████╗ ████║██╔════╝ \n");
@@ -249,7 +248,6 @@ fn print_banner() {
     console::puts("\n");
 }
 
-
 /// Main IRQ handler called from exception vector
 fn irq_handler(ctx: &mut exceptions::ExceptionContext) {
     // Dispatch to GIC (this calls timer_irq_handler, etc.)
@@ -260,7 +258,6 @@ fn irq_handler(ctx: &mut exceptions::ExceptionContext) {
         m6_kernel::sched::timer_context_switch(ctx);
     }
 }
-
 
 /// Timer interrupt handler
 fn timer_irq_handler(_intid: u32) {

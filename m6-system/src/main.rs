@@ -9,17 +9,17 @@
 
 extern crate alloc;
 
-mod rt;
 mod elf;
 mod io;
 pub mod process;
+mod rt;
 
 use m6_cap::root_slots::Slot;
 use m6_syscall::{
-    invoke::{sched_yield, ipc_set_recv_slots, ipc_get_recv_caps},
-    IpcBuffer, UserBootInfo, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION,
+    IpcBuffer, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION, UserBootInfo,
+    invoke::{ipc_get_recv_caps, ipc_set_recv_slots, sched_yield},
 };
-use process::{SpawnConfig, InitialCap};
+use process::{InitialCap, SpawnConfig};
 
 /// First free slot for dynamic allocation
 const FIRST_FREE_SLOT: u64 = 64;
@@ -56,7 +56,7 @@ pub unsafe extern "C" fn _start() -> ! {
     io::puts("\n");
     io::puts("\x1b[32m"); // Green
     io::puts("[init] M6 Init starting\n");
-    io::puts("\x1b[0m");  // Reset
+    io::puts("\x1b[0m"); // Reset
 
     // Print platform info
     io::puts("[init] Platform ID: ");
@@ -192,8 +192,8 @@ const DEV_MGR_BOOT_INFO_VERSION: u32 = 1;
 
 /// Addresses where we map data into device-mgr's VSpace
 const DEVMGR_BOOT_INFO_ADDR: u64 = 0x0000_1000_0000; // 256MB mark
-const DEVMGR_DTB_ADDR: u64 = 0x0000_1001_0000;       // Just after boot info
-const DEVMGR_INITRD_ADDR: u64 = 0x0000_2000_0000;    // 512MB mark
+const DEVMGR_DTB_ADDR: u64 = 0x0000_1001_0000; // Just after boot info
+const DEVMGR_INITRD_ADDR: u64 = 0x0000_2000_0000; // 512MB mark
 
 /// Maximum number of device untyped regions to pass to device-mgr
 const MAX_DEVICE_UNTYPED: usize = 8;
@@ -279,7 +279,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         0,  // size_bits (not used for endpoints)
         cptr(Slot::RootCNode as u64),
         registry_ep_slot,
-        1,  // count - create one endpoint
+        1, // count - create one endpoint
     ) {
         io::puts("[init] ERROR: Failed to create registry endpoint: ");
         io::put_hex(e as u64);
@@ -291,23 +291,45 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
 
     // Build initial capabilities list including device untypeds
     // Max 16 initial caps: 3 standard + up to 8 device untypeds + some margin
-    let mut initial_caps_storage: [InitialCap; 16] = [InitialCap { src_slot: 0, dst_slot: 0 }; 16];
+    let mut initial_caps_storage: [InitialCap; 16] = [InitialCap {
+        src_slot: 0,
+        dst_slot: 0,
+    }; 16];
     let mut cap_idx = 0;
 
     // Standard caps
-    initial_caps_storage[cap_idx] = InitialCap { src_slot: registry_ep_slot, dst_slot: 12 };
+    initial_caps_storage[cap_idx] = InitialCap {
+        src_slot: registry_ep_slot,
+        dst_slot: 12,
+    };
     cap_idx += 1;
-    initial_caps_storage[cap_idx] = InitialCap { src_slot: Slot::IrqControl as u64, dst_slot: 14 };
+    initial_caps_storage[cap_idx] = InitialCap {
+        src_slot: Slot::IrqControl as u64,
+        dst_slot: 14,
+    };
     cap_idx += 1;
-    initial_caps_storage[cap_idx] = InitialCap { src_slot: Slot::FirstUntyped as u64, dst_slot: 15 };
+    initial_caps_storage[cap_idx] = InitialCap {
+        src_slot: Slot::FirstUntyped as u64,
+        dst_slot: 15,
+    };
     cap_idx += 1;
-    initial_caps_storage[cap_idx] = InitialCap { src_slot: Slot::AsidPool as u64, dst_slot: 16 };
+    initial_caps_storage[cap_idx] = InitialCap {
+        src_slot: Slot::AsidPool as u64,
+        dst_slot: 16,
+    };
     cap_idx += 1;
-    initial_caps_storage[cap_idx] = InitialCap { src_slot: Slot::SmmuControl as u64, dst_slot: 18 };
+    initial_caps_storage[cap_idx] = InitialCap {
+        src_slot: Slot::SmmuControl as u64,
+        dst_slot: 18,
+    };
     cap_idx += 1;
 
     // Device untypeds at slots 20+
-    for (i, &slot) in device_untyped_slots.iter().enumerate().take(device_untyped_count) {
+    for (i, &slot) in device_untyped_slots
+        .iter()
+        .enumerate()
+        .take(device_untyped_count)
+    {
         initial_caps_storage[cap_idx] = InitialCap {
             src_slot: slot,
             dst_slot: DEVMGR_FIRST_DEVICE_UNTYPED + i as u64,
@@ -327,7 +349,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         next_free_slot: FIRST_FREE_SLOT + 1, // +1 for the endpoint we just created
         initial_caps,
         x0: DEVMGR_BOOT_INFO_ADDR, // Will point to boot info
-        resume: false, // Don't resume yet
+        resume: false,             // Don't resume yet
     };
 
     let result = match process::spawn_process(&config) {
@@ -354,7 +376,9 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         &mut next_slot,
         DEVMGR_BOOT_INFO_ADDR,
         DEVMGR_DTB_ADDR + boot_info.dtb_size,
-    ).is_err() {
+    )
+    .is_err()
+    {
         io::puts("[init] ERROR: Failed to create page tables for boot info region\n");
         return;
     }
@@ -369,7 +393,8 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             &mut next_slot,
             DEVMGR_INITRD_ADDR,
             DEVMGR_INITRD_ADDR + boot_info.initrd_size,
-        ).is_err()
+        )
+        .is_err()
     {
         io::puts("[init] ERROR: Failed to create page tables for initrd region\n");
         return;
@@ -382,9 +407,17 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         cnode_radix: 12, // Device-mgr's CNode has radix 12 (set in spawn_process)
         device_untyped_count: device_untyped_count as u8,
         _reserved: [0; 2],
-        dtb_vaddr: if boot_info.has_dtb() { DEVMGR_DTB_ADDR } else { 0 },
+        dtb_vaddr: if boot_info.has_dtb() {
+            DEVMGR_DTB_ADDR
+        } else {
+            0
+        },
         dtb_size: boot_info.dtb_size,
-        initrd_vaddr: if boot_info.has_initrd() { DEVMGR_INITRD_ADDR } else { 0 },
+        initrd_vaddr: if boot_info.has_initrd() {
+            DEVMGR_INITRD_ADDR
+        } else {
+            0
+        },
         initrd_size: boot_info.initrd_size,
         device_untyped_phys,
         device_untyped_size_bits,
@@ -406,7 +439,9 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         DEVMGR_BOOT_INFO_ADDR,
         boot_info_bytes,
         process::MapRights::R,
-    ).is_err() {
+    )
+    .is_err()
+    {
         io::puts("[init] ERROR: Failed to map boot info\n");
         return;
     }
@@ -427,7 +462,9 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             DEVMGR_DTB_ADDR,
             dtb_data,
             process::MapRights::R,
-        ).is_err() {
+        )
+        .is_err()
+        {
             io::puts("[init] ERROR: Failed to map DTB\n");
             return;
         }
@@ -449,7 +486,9 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             DEVMGR_INITRD_ADDR,
             initrd_data,
             process::MapRights::R,
-        ).is_err() {
+        )
+        .is_err()
+        {
             io::puts("[init] ERROR: Failed to map initrd\n");
             return;
         }
@@ -494,7 +533,9 @@ fn request_uart_driver(registry_ep: u64, radix: u8, next_slot: &mut u64) {
 
     // Set up receive slot hint in IPC buffer
     // SAFETY: IPC buffer is mapped for init by kernel at bootstrap
-    unsafe { ipc_set_recv_slots(&[uart_ep_slot]); }
+    unsafe {
+        ipc_set_recv_slots(&[uart_ep_slot]);
+    }
 
     const ENSURE: u64 = 0x0001;
 

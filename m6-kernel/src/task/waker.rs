@@ -11,12 +11,8 @@ use m6_cap::ObjectRef;
 use super::TaskId;
 
 /// RawWaker vtable for task-based wakers.
-static VTABLE: RawWakerVTable = RawWakerVTable::new(
-    waker_clone,
-    waker_wake,
-    waker_wake_by_ref,
-    waker_drop,
-);
+static VTABLE: RawWakerVTable =
+    RawWakerVTable::new(waker_clone, waker_wake, waker_wake_by_ref, waker_drop);
 
 /// Clone the waker (just copy the task ID pointer).
 unsafe fn waker_clone(data: *const ()) -> RawWaker {

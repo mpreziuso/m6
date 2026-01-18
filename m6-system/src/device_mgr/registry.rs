@@ -171,7 +171,11 @@ pub struct VirtioProbeFrame {
 
 impl VirtioProbeFrame {
     pub const fn empty() -> Self {
-        Self { phys_base: 0, slot: 0, valid: false }
+        Self {
+            phys_base: 0,
+            slot: 0,
+            valid: false,
+        }
     }
 }
 
@@ -224,7 +228,11 @@ impl Registry {
     pub fn add_virtio_probe_frame(&mut self, phys_base: u64, slot: u64) -> bool {
         for frame in &mut self.virtio_probe_frames {
             if !frame.valid {
-                *frame = VirtioProbeFrame { phys_base, slot, valid: true };
+                *frame = VirtioProbeFrame {
+                    phys_base,
+                    slot,
+                    valid: true,
+                };
                 return true;
             }
         }

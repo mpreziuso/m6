@@ -67,8 +67,8 @@ impl IpcBlockDevice {
     /// Initialise the block device by querying device info.
     pub fn init(&mut self) -> Result<(), BlockError> {
         // Send GET_INFO to virtio-blk
-        let reply = call(self.blk_ep, blk_request::GET_INFO, 0, 0, 0)
-            .map_err(|_| BlockError::IpcError)?;
+        let reply =
+            call(self.blk_ep, blk_request::GET_INFO, 0, 0, 0).map_err(|_| BlockError::IpcError)?;
 
         if reply.label != blk_response::OK {
             return Err(BlockError::IoError);
@@ -85,8 +85,8 @@ impl IpcBlockDevice {
 
     /// Sync all pending writes to the device.
     pub fn sync(&self) -> Result<(), BlockError> {
-        let reply = call(self.blk_ep, blk_request::FLUSH, 0, 0, 0)
-            .map_err(|_| BlockError::IpcError)?;
+        let reply =
+            call(self.blk_ep, blk_request::FLUSH, 0, 0, 0).map_err(|_| BlockError::IpcError)?;
 
         // FLUSH may return ERR_UNSUPPORTED (4) if not implemented
         if reply.label & 0xFFFF != blk_response::OK && reply.label & 0xFFFF != 4 {

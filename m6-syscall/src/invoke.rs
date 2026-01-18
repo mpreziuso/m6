@@ -14,9 +14,9 @@
 //! On send/call: message is in x1-x5 (x0 = endpoint cptr)
 //! On recv: message is delivered to x0-x4, badge in x6
 
+use crate::IpcBuffer;
 use crate::error::{SyscallResult, check_result};
 use crate::numbers::Syscall;
-use crate::IpcBuffer;
 
 /// Result of an IPC receive operation.
 ///
@@ -254,7 +254,8 @@ pub fn recv(src: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
     // If x0 is negative, it's an error code from the kernel
     // If x0 is non-negative, the message was delivered
     if x0 < 0 {
-        Err(crate::error::SyscallError::from_i64(x0).unwrap_or(crate::error::SyscallError::InvalidArg))
+        Err(crate::error::SyscallError::from_i64(x0)
+            .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
         Ok(IpcRecvResult {
             badge,
@@ -279,7 +280,13 @@ pub fn recv(src: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
 ///
 /// The full reply message including label and payload registers.
 #[inline]
-pub fn call(dest: u64, msg0: u64, msg1: u64, msg2: u64, msg3: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
+pub fn call(
+    dest: u64,
+    msg0: u64,
+    msg1: u64,
+    msg2: u64,
+    msg3: u64,
+) -> Result<IpcRecvResult, crate::error::SyscallError> {
     let x0: i64;
     let x1: u64;
     let x2: u64;
@@ -303,7 +310,8 @@ pub fn call(dest: u64, msg0: u64, msg1: u64, msg2: u64, msg3: u64) -> Result<Ipc
     // If x0 is negative, it's an error code from the kernel
     // If x0 is non-negative, the reply was delivered
     if x0 < 0 {
-        Err(crate::error::SyscallError::from_i64(x0).unwrap_or(crate::error::SyscallError::InvalidArg))
+        Err(crate::error::SyscallError::from_i64(x0)
+            .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
         Ok(IpcRecvResult {
             badge,
@@ -327,7 +335,13 @@ pub fn call(dest: u64, msg0: u64, msg1: u64, msg2: u64, msg3: u64) -> Result<Ipc
 ///
 /// On success, returns the badge and message from the new sender.
 #[inline]
-pub fn reply_recv(ep: u64, msg0: u64, msg1: u64, msg2: u64, msg3: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
+pub fn reply_recv(
+    ep: u64,
+    msg0: u64,
+    msg1: u64,
+    msg2: u64,
+    msg3: u64,
+) -> Result<IpcRecvResult, crate::error::SyscallError> {
     let x0: i64;
     let x1: u64;
     let x2: u64;
@@ -351,7 +365,8 @@ pub fn reply_recv(ep: u64, msg0: u64, msg1: u64, msg2: u64, msg3: u64) -> Result
     // If x0 is negative, it's an error code from the kernel
     // If x0 is non-negative, the message was delivered
     if x0 < 0 {
-        Err(crate::error::SyscallError::from_i64(x0).unwrap_or(crate::error::SyscallError::InvalidArg))
+        Err(crate::error::SyscallError::from_i64(x0)
+            .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
         Ok(IpcRecvResult {
             badge,
@@ -397,7 +412,8 @@ pub fn nb_recv(src: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
     // If x0 is negative, it's an error code from the kernel
     // If x0 is non-negative, the message was delivered
     if x0 < 0 {
-        Err(crate::error::SyscallError::from_i64(x0).unwrap_or(crate::error::SyscallError::InvalidArg))
+        Err(crate::error::SyscallError::from_i64(x0)
+            .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
         Ok(IpcRecvResult {
             badge,
@@ -520,12 +536,7 @@ pub fn cap_move(
 /// - `set_badge` - Whether to set a badge (0 or 1)
 /// - `badge_value` - Badge value (only used if set_badge != 0)
 #[inline]
-pub fn cap_mint(
-    dest_cnode: u64,
-    dest_index: u64,
-    src_cnode: u64,
-    src_index: u64,
-) -> SyscallResult {
+pub fn cap_mint(dest_cnode: u64, dest_index: u64, src_cnode: u64, src_index: u64) -> SyscallResult {
     check_result(syscall4(
         Syscall::CapMint,
         dest_cnode,
@@ -582,7 +593,13 @@ pub fn cap_revoke(cnode: u64, index: u64, depth: u64) -> SyscallResult {
 /// * `new_rights` - New rights (must be subset of current)
 #[inline]
 pub fn cap_mutate(cnode: u64, index: u64, depth: u64, new_rights: u64) -> SyscallResult {
-    check_result(syscall4(Syscall::CapMutate, cnode, index, depth, new_rights))
+    check_result(syscall4(
+        Syscall::CapMutate,
+        cnode,
+        index,
+        depth,
+        new_rights,
+    ))
 }
 
 /// Atomically rotate capabilities between three slots.
@@ -603,7 +620,14 @@ pub fn cap_mutate(cnode: u64, index: u64, depth: u64, new_rights: u64) -> Syscal
 /// * `depth` - Bits to consume resolving CNode (0 = auto)
 #[inline]
 pub fn cap_rotate(cnode: u64, slot1: u64, slot2: u64, slot3: u64, depth: u64) -> SyscallResult {
-    check_result(syscall5(Syscall::CapRotate, cnode, slot1, slot2, slot3, depth))
+    check_result(syscall5(
+        Syscall::CapRotate,
+        cnode,
+        slot1,
+        slot2,
+        slot3,
+        depth,
+    ))
 }
 
 // -- Memory Operations
@@ -660,7 +684,14 @@ pub fn retype(
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn map_frame(vspace: u64, frame: u64, vaddr: u64, rights: u64, attr: u64) -> SyscallResult {
-    check_result(syscall5(Syscall::MapFrame, vspace, frame, vaddr, rights, attr))
+    check_result(syscall5(
+        Syscall::MapFrame,
+        vspace,
+        frame,
+        vaddr,
+        rights,
+        attr,
+    ))
 }
 
 /// Unmap a frame from a VSpace.
@@ -691,7 +722,13 @@ pub fn unmap_frame(frame: u64) -> SyscallResult {
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn map_page_table(vspace: u64, page_table: u64, vaddr: u64, level: u64) -> SyscallResult {
-    check_result(syscall4(Syscall::MapPageTable, vspace, page_table, vaddr, level))
+    check_result(syscall4(
+        Syscall::MapPageTable,
+        vspace,
+        page_table,
+        vaddr,
+        level,
+    ))
 }
 
 /// Assign an ASID from a pool to a VSpace.
@@ -727,7 +764,13 @@ pub fn asid_pool_assign(asid_pool: u64, vspace: u64) -> SyscallResult {
 /// Number of bytes written on success, negative error code on failure.
 #[inline]
 pub fn frame_write(frame: u64, offset: u64, src: *const u8, len: usize) -> SyscallResult {
-    check_result(syscall4(Syscall::FrameWrite, frame, offset, src as u64, len as u64))
+    check_result(syscall4(
+        Syscall::FrameWrite,
+        frame,
+        offset,
+        src as u64,
+        len as u64,
+    ))
 }
 
 // -- TCB Operations
@@ -790,10 +833,10 @@ pub fn tcb_write_registers(tcb: u64, pc: u64, sp: u64, arg0: u64) -> SyscallResu
     // [x0..x30, sp, pc, spsr] as u64 array
     // We write: x0, sp (index 31), pc (index 32), spsr (index 33)
     let mut regs = [0u64; 34];
-    regs[0] = arg0;         // x0
-    regs[31] = sp;          // SP
-    regs[32] = pc;          // ELR (PC)
-    regs[33] = 0;           // SPSR (EL0 AArch64 = 0)
+    regs[0] = arg0; // x0
+    regs[31] = sp; // SP
+    regs[32] = pc; // ELR (PC)
+    regs[33] = 0; // SPSR (EL0 AArch64 = 0)
 
     // Syscall ABI:
     // x0: TCB cptr
@@ -804,10 +847,10 @@ pub fn tcb_write_registers(tcb: u64, pc: u64, sp: u64, arg0: u64) -> SyscallResu
     check_result(syscall5(
         Syscall::TcbWriteRegisters,
         tcb,
-        0,                      // resume = false
-        0,                      // arch_flags = 0
-        34,                     // count = 34 registers
-        regs.as_ptr() as u64,   // buffer address
+        0,                    // resume = false
+        0,                    // arch_flags = 0
+        34,                   // count = 34 registers
+        regs.as_ptr() as u64, // buffer address
     ))
 }
 
@@ -1026,12 +1069,7 @@ pub fn iospace_create(
 ///
 /// 0 on success, negative error code on failure.
 #[inline]
-pub fn iospace_map_frame(
-    iospace: u64,
-    frame: u64,
-    iova: u64,
-    rights: u64,
-) -> SyscallResult {
+pub fn iospace_map_frame(iospace: u64, frame: u64, iova: u64, rights: u64) -> SyscallResult {
     check_result(syscall4(
         Syscall::IOSpaceMapFrame,
         iospace,
@@ -1074,11 +1112,7 @@ pub fn iospace_unmap_frame(iospace: u64, iova: u64) -> SyscallResult {
 ///
 /// 0 on success, negative error code on failure.
 #[inline]
-pub fn iospace_bind_stream(
-    iospace: u64,
-    smmu_control: u64,
-    stream_id: u32,
-) -> SyscallResult {
+pub fn iospace_bind_stream(iospace: u64, smmu_control: u64, stream_id: u32) -> SyscallResult {
     check_result(syscall3(
         Syscall::IOSpaceBindStream,
         iospace,
@@ -1101,11 +1135,7 @@ pub fn iospace_bind_stream(
 ///
 /// 0 on success, negative error code on failure.
 #[inline]
-pub fn iospace_unbind_stream(
-    iospace: u64,
-    smmu_control: u64,
-    stream_id: u32,
-) -> SyscallResult {
+pub fn iospace_unbind_stream(iospace: u64, smmu_control: u64, stream_id: u32) -> SyscallResult {
     check_result(syscall3(
         Syscall::IOSpaceUnbindStream,
         iospace,
@@ -1167,10 +1197,15 @@ pub fn dma_pool_create(
 ///
 /// IOVA address on success, negative error code on failure.
 #[inline]
-pub fn dma_pool_alloc(dma_pool: u64, size: u64, alignment: u64) -> Result<u64, crate::error::SyscallError> {
+pub fn dma_pool_alloc(
+    dma_pool: u64,
+    size: u64,
+    alignment: u64,
+) -> Result<u64, crate::error::SyscallError> {
     let result = syscall3(Syscall::DmaPoolAlloc, dma_pool, size, alignment);
     if result < 0 {
-        Err(crate::error::SyscallError::from_i64(result).unwrap_or(crate::error::SyscallError::InvalidSyscall))
+        Err(crate::error::SyscallError::from_i64(result)
+            .unwrap_or(crate::error::SyscallError::InvalidSyscall))
     } else {
         Ok(result as u64)
     }

@@ -39,7 +39,7 @@ pub mod notification;
 pub mod queue;
 
 pub use endpoint::{do_call, do_recv, do_reply_recv, do_send};
-pub use fault::{classify_fault, deliver_fault, handle_user_fault, FaultDeliveryError};
+pub use fault::{FaultDeliveryError, classify_fault, deliver_fault, handle_user_fault};
 pub use message::IpcMessage;
 pub use notification::{do_poll, do_signal, do_wait};
 pub use queue::{ipc_dequeue, ipc_enqueue, ipc_remove};
@@ -86,7 +86,9 @@ pub fn lookup_cap(
 
     log::trace!(
         "lookup_cap: cptr={:#x} resolved to cnode={:?} slot={}",
-        cptr, loc.cnode_ref, loc.slot_index
+        cptr,
+        loc.cnode_ref,
+        loc.slot_index
     );
 
     // Access the resolved slot and validate

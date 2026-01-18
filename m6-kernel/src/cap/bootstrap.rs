@@ -21,15 +21,17 @@ extern crate alloc;
 use core::mem::ManuallyDrop;
 
 use m6_cap::{
-    Badge, CapRights, CapSlot, CNodeGuard, CNodeOps, ObjectRef, ObjectType, SlotFlags,
-    objects::{Asid, AsidPoolObject, IrqControlObject, TimerControlObject, UntypedObject, VSpaceObject},
+    Badge, CNodeGuard, CNodeOps, CapRights, CapSlot, ObjectRef, ObjectType, SlotFlags,
+    objects::{
+        Asid, AsidPoolObject, IrqControlObject, TimerControlObject, UntypedObject, VSpaceObject,
+    },
     root_slots::Slot as BootSlot,
 };
 use m6_common::PhysAddr;
 use m6_common::boot::BootInfo;
-use m6_syscall::boot_info::{UserBootInfo, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION};
+use m6_syscall::boot_info::{USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION, UserBootInfo};
 
-use super::cnode_storage::{create_cnode, CNodeStorage};
+use super::cnode_storage::{CNodeStorage, create_cnode};
 use super::object_table::{self, KernelObjectType};
 use super::tcb_storage::create_tcb;
 
@@ -108,28 +110,70 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
         let cnode = unsafe { &mut *cnode_obj.data.cnode_ptr };
 
         // Self-reference to root CNode
-        install_cap(cnode, BootSlot::RootCNode as usize, cnode_ref, ObjectType::CNode, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::RootCNode as usize,
+            cnode_ref,
+            ObjectType::CNode,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
         // Root TCB
-        install_cap(cnode, BootSlot::RootTcb as usize, tcb_ref, ObjectType::TCB, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::RootTcb as usize,
+            tcb_ref,
+            ObjectType::TCB,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
         // Root VSpace
-        install_cap(cnode, BootSlot::RootVSpace as usize, vspace_ref, ObjectType::VSpace, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::RootVSpace as usize,
+            vspace_ref,
+            ObjectType::VSpace,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
         // Control capabilities
-        install_cap(cnode, BootSlot::IrqControl as usize, irq_control_ref, ObjectType::IRQControl, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::IrqControl as usize,
+            irq_control_ref,
+            ObjectType::IRQControl,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
-        install_cap(cnode, BootSlot::AsidControl as usize, asid_control_ref, ObjectType::ASIDControl, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::AsidControl as usize,
+            asid_control_ref,
+            ObjectType::ASIDControl,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
-        install_cap(cnode, BootSlot::SchedControl as usize, sched_control_ref, ObjectType::SchedControl, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::SchedControl as usize,
+            sched_control_ref,
+            ObjectType::SchedControl,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
-        install_cap(cnode, BootSlot::TimerControl as usize, timer_control_ref, ObjectType::TimerControl, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::TimerControl as usize,
+            timer_control_ref,
+            ObjectType::TimerControl,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
         Ok(())
@@ -152,12 +196,12 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
 /// Create the root CNode.
 fn create_root_cnode(radix: u8) -> BootstrapResult<ObjectRef> {
     // Allocate object table entry
-    let obj_ref = object_table::alloc(KernelObjectType::CNode)
-        .ok_or(BootstrapError::NoObjectSlots)?;
+    let obj_ref =
+        object_table::alloc(KernelObjectType::CNode).ok_or(BootstrapError::NoObjectSlots)?;
 
     // Create CNode storage
-    let cnode_ptr = create_cnode(radix, CNodeGuard::NONE)
-        .map_err(|_| BootstrapError::OutOfMemory)?;
+    let cnode_ptr =
+        create_cnode(radix, CNodeGuard::NONE).map_err(|_| BootstrapError::OutOfMemory)?;
 
     // Store pointer in object table
     object_table::with_object_mut(obj_ref, |obj| {
@@ -170,8 +214,8 @@ fn create_root_cnode(radix: u8) -> BootstrapResult<ObjectRef> {
 /// Create the root VSpace.
 fn create_root_vspace() -> BootstrapResult<ObjectRef> {
     // Allocate object table entry
-    let obj_ref = object_table::alloc(KernelObjectType::VSpace)
-        .ok_or(BootstrapError::NoObjectSlots)?;
+    let obj_ref =
+        object_table::alloc(KernelObjectType::VSpace).ok_or(BootstrapError::NoObjectSlots)?;
 
     // Create VSpace object
     // Note: The L0 page table will be allocated when the VSpace is first used
@@ -188,8 +232,8 @@ fn create_root_vspace() -> BootstrapResult<ObjectRef> {
 /// Create the root TCB.
 fn create_root_tcb(cspace_root: ObjectRef, vspace: ObjectRef) -> BootstrapResult<ObjectRef> {
     // Allocate object table entry
-    let obj_ref = object_table::alloc(KernelObjectType::Tcb)
-        .ok_or(BootstrapError::NoObjectSlots)?;
+    let obj_ref =
+        object_table::alloc(KernelObjectType::Tcb).ok_or(BootstrapError::NoObjectSlots)?;
 
     // Create TCB storage
     let tcb_ptr = create_tcb().map_err(|_| BootstrapError::OutOfMemory)?;
@@ -215,8 +259,8 @@ fn create_irq_control() -> BootstrapResult<ObjectRef> {
     use alloc::boxed::Box;
 
     // Allocate object table entry
-    let obj_ref = object_table::alloc(KernelObjectType::IrqControl)
-        .ok_or(BootstrapError::NoObjectSlots)?;
+    let obj_ref =
+        object_table::alloc(KernelObjectType::IrqControl).ok_or(BootstrapError::NoObjectSlots)?;
 
     // Create IRQ control object (heap-allocated due to large bitmap)
     let ctrl = Box::new(IrqControlObject::new());
@@ -232,21 +276,19 @@ fn create_irq_control() -> BootstrapResult<ObjectRef> {
 
 /// Create the ASID control object (singleton).
 fn create_asid_control() -> BootstrapResult<ObjectRef> {
-    object_table::alloc(KernelObjectType::AsidControl)
-        .ok_or(BootstrapError::NoObjectSlots)
+    object_table::alloc(KernelObjectType::AsidControl).ok_or(BootstrapError::NoObjectSlots)
 }
 
 /// Create the scheduling control object (singleton).
 fn create_sched_control() -> BootstrapResult<ObjectRef> {
-    object_table::alloc(KernelObjectType::SchedControl)
-        .ok_or(BootstrapError::NoObjectSlots)
+    object_table::alloc(KernelObjectType::SchedControl).ok_or(BootstrapError::NoObjectSlots)
 }
 
 /// Create the timer control object (singleton).
 fn create_timer_control() -> BootstrapResult<ObjectRef> {
     // Allocate object table entry
-    let obj_ref = object_table::alloc(KernelObjectType::TimerControl)
-        .ok_or(BootstrapError::NoObjectSlots)?;
+    let obj_ref =
+        object_table::alloc(KernelObjectType::TimerControl).ok_or(BootstrapError::NoObjectSlots)?;
 
     // Initialise TimerControlObject (stored inline)
     object_table::with_object_mut(obj_ref, |obj| {
@@ -261,8 +303,8 @@ fn create_asid_pool() -> BootstrapResult<ObjectRef> {
     use alloc::boxed::Box;
 
     // Allocate object table entry
-    let obj_ref = object_table::alloc(KernelObjectType::AsidPool)
-        .ok_or(BootstrapError::NoObjectSlots)?;
+    let obj_ref =
+        object_table::alloc(KernelObjectType::AsidPool).ok_or(BootstrapError::NoObjectSlots)?;
 
     // Create ASID pool object (base ASID 0, first pool)
     let pool = Box::new(AsidPoolObject::new(0));
@@ -288,8 +330,8 @@ fn create_smmu_control() -> BootstrapResult<Option<ObjectRef>> {
     };
 
     // Allocate object table entry
-    let obj_ref = object_table::alloc(KernelObjectType::SmmuControl)
-        .ok_or(BootstrapError::NoObjectSlots)?;
+    let obj_ref =
+        object_table::alloc(KernelObjectType::SmmuControl).ok_or(BootstrapError::NoObjectSlots)?;
 
     // Create SMMU control object
     let mut ctrl = Box::new(SmmuControlObject::new(
@@ -345,7 +387,8 @@ fn create_untyped_cap_with_table(
     is_device: bool,
 ) -> BootstrapResult<ObjectRef> {
     // Allocate object table entry using the passed-in table
-    let obj_ref = table.alloc(KernelObjectType::Untyped)
+    let obj_ref = table
+        .alloc(KernelObjectType::Untyped)
         .ok_or(BootstrapError::NoObjectSlots)?;
 
     // Create untyped object
@@ -357,50 +400,6 @@ fn create_untyped_cap_with_table(
     install_cap(cnode, slot, obj_ref, ObjectType::Untyped, CapRights::ALL);
 
     Ok(obj_ref)
-}
-
-/// Device memory region for creating device untyped capabilities.
-struct DeviceRegion {
-    /// Physical base address.
-    phys_base: u64,
-    /// Size in bits (log2).
-    size_bits: u8,
-    /// Human-readable name for debugging.
-    name: &'static str,
-}
-
-/// Get the list of device memory regions for the current platform.
-///
-/// This returns MMIO regions that should be provided to userspace as device
-/// untyped capabilities. Currently hardcoded for known platforms.
-fn get_device_regions() -> &'static [DeviceRegion] {
-    // Check platform via PAL
-    let platform_name = m6_pal::platform::platform().name();
-
-    if platform_name.contains("virt") || platform_name.contains("QEMU") {
-        // QEMU virt machine device regions
-        static QEMU_VIRT_DEVICES: [DeviceRegion; 3] = [
-            DeviceRegion {
-                phys_base: 0x0900_0000,
-                size_bits: 12, // 4KB - PL011 UART
-                name: "pl011-uart",
-            },
-            DeviceRegion {
-                phys_base: 0x0905_0000,
-                size_bits: 16, // 64KB - ARM SMMUv3
-                name: "smmu-v3",
-            },
-            DeviceRegion {
-                phys_base: 0x0a00_0000,
-                size_bits: 15, // 32KB - VirtIO MMIO region (extra space for probing + drivers)
-                name: "virtio-mmio",
-            },
-        ];
-        &QEMU_VIRT_DEVICES
-    } else {
-        // Unknown platform - no device regions
-        &[]
-    }
 }
 
 /// Bootstrap the root task from initrd.
@@ -436,11 +435,10 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
     initrd::list_files(boot_info);
 
     // 2. Find init binary in initrd
-    let init_data = initrd::find_file(boot_info, "init")
-        .ok_or_else(|| {
-            log::error!("'init' binary not found in initrd");
-            BootstrapError::InitNotFound
-        })?;
+    let init_data = initrd::find_file(boot_info, "init").ok_or_else(|| {
+        log::error!("'init' binary not found in initrd");
+        BootstrapError::InitNotFound
+    })?;
     log::info!("Found init binary: {} bytes", init_data.len());
 
     // 3. Create UserBootInfo page
@@ -476,7 +474,8 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         get_dtb_size(boot_info),
         boot_info.initrd_phys_base,
         boot_info.initrd_size,
-    ).map_err(|e| {
+    )
+    .map_err(|e| {
         log::error!("Failed to set up root VSpace: {:?}", e);
         BootstrapError::VSpaceSetupFailed
     })?;
@@ -495,14 +494,16 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         // SAFETY: We just created this VSpace object.
         let vspace = unsafe { &mut *core::ptr::addr_of_mut!(obj.data.vspace) };
         vspace.root_table = vspace_result.l0_phys;
-        vspace.assign_asid_with_generation(Asid::new(vspace_result.asid.asid), vspace_result.asid.generation);
+        vspace.assign_asid_with_generation(
+            Asid::new(vspace_result.asid.asid),
+            vspace_result.asid.generation,
+        );
     });
 
     // 8. Allocate untyped memory for init (8 MiB = 2^23 bytes = 2048 frames)
     const UNTYPED_SIZE_BITS: u8 = 23; // 8 MiB
     const UNTYPED_FRAMES: usize = 1 << (UNTYPED_SIZE_BITS - 12); // frames = size / 4K
-    let untyped_phys = alloc_frames_zeroed(UNTYPED_FRAMES)
-        .ok_or(BootstrapError::OutOfMemory)?;
+    let untyped_phys = alloc_frames_zeroed(UNTYPED_FRAMES).ok_or(BootstrapError::OutOfMemory)?;
     log::info!(
         "Allocated {} MiB untyped memory for init at {:#x}",
         1 << (UNTYPED_SIZE_BITS - 20),
@@ -518,30 +519,78 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         // SAFETY: We just created this CNode.
         let cnode = unsafe { &mut *cnode_obj.data.cnode_ptr };
 
-        install_cap(cnode, BootSlot::RootCNode as usize, cnode_ref, ObjectType::CNode, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::RootCNode as usize,
+            cnode_ref,
+            ObjectType::CNode,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
-        install_cap(cnode, BootSlot::RootTcb as usize, tcb_ref, ObjectType::TCB, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::RootTcb as usize,
+            tcb_ref,
+            ObjectType::TCB,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
-        install_cap(cnode, BootSlot::RootVSpace as usize, vspace_ref, ObjectType::VSpace, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::RootVSpace as usize,
+            vspace_ref,
+            ObjectType::VSpace,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
-        install_cap(cnode, BootSlot::IrqControl as usize, irq_control_ref, ObjectType::IRQControl, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::IrqControl as usize,
+            irq_control_ref,
+            ObjectType::IRQControl,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
-        install_cap(cnode, BootSlot::AsidControl as usize, asid_control_ref, ObjectType::ASIDControl, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::AsidControl as usize,
+            asid_control_ref,
+            ObjectType::ASIDControl,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
-        install_cap(cnode, BootSlot::SchedControl as usize, sched_control_ref, ObjectType::SchedControl, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::SchedControl as usize,
+            sched_control_ref,
+            ObjectType::SchedControl,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
-        install_cap(cnode, BootSlot::AsidPool as usize, asid_pool_ref, ObjectType::ASIDPool, CapRights::ALL);
+        install_cap(
+            cnode,
+            BootSlot::AsidPool as usize,
+            asid_pool_ref,
+            ObjectType::ASIDPool,
+            CapRights::ALL,
+        );
         cap_count += 1;
 
         // Install SMMU control if available
         if let Some(smmu_ref) = smmu_control_ref {
-            install_cap(cnode, BootSlot::SmmuControl as usize, smmu_ref, ObjectType::SmmuControl, CapRights::ALL);
+            install_cap(
+                cnode,
+                BootSlot::SmmuControl as usize,
+                smmu_ref,
+                ObjectType::SmmuControl,
+                CapRights::ALL,
+            );
             cap_count += 1;
             log::debug!("Installed SMMU control capability");
         }
@@ -549,7 +598,10 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         log::debug!("Installed {} control capabilities", cap_count);
 
         // Create untyped capability (using table-aware version to avoid deadlock)
-        log::debug!("Creating untyped capability at slot {}...", BootSlot::FirstUntyped as usize);
+        log::debug!(
+            "Creating untyped capability at slot {}...",
+            BootSlot::FirstUntyped as usize
+        );
         let untyped_ref = create_untyped_cap_with_table(
             table,
             cnode,
@@ -562,40 +614,46 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         untyped_count = 1;
         log::debug!("Created untyped cap: {:?}", untyped_ref);
 
-        // Create device untyped capabilities for MMIO regions
-        // For QEMU virt: PL011 UART at 0x0900_0000
-        let device_regions = get_device_regions();
-        for (i, region) in device_regions.iter().enumerate() {
+        // Create device untyped capabilities for MMIO regions from DTB
+        for i in 0..boot_info.device_region_count as usize {
+            let region = &boot_info.device_regions[i];
+            if !region.is_valid() {
+                continue;
+            }
             let slot = BootSlot::FirstUntyped as usize + untyped_count as usize;
             log::debug!(
-                "Creating device untyped at slot {} for {:#x} ({} bytes)",
+                "Creating device untyped at slot {} for {:#x} ({} bytes, type {:?})",
                 slot,
-                region.phys_base,
-                1u64 << region.size_bits
+                region.phys_base.as_u64(),
+                1u64 << region.size_bits,
+                region.device_type
             );
             let _device_ref = create_untyped_cap_with_table(
                 table,
                 cnode,
                 slot,
-                PhysAddr::new(region.phys_base),
+                region.phys_base,
                 region.size_bits,
                 true, // device memory
             )?;
             cap_count += 1;
             untyped_count += 1;
-            log::debug!("Created device untyped cap {} for {:?}", i, region.name);
+            log::debug!(
+                "Created device untyped cap {} at {:#x}",
+                i,
+                region.phys_base.as_u64()
+            );
         }
 
         Ok(())
     })?;
 
     // 10. Update UserBootInfo with untyped region info (RAM + device regions)
-    let device_regions = get_device_regions();
     update_user_boot_info_all_untyped(
         user_boot_info_phys,
         untyped_phys,
         UNTYPED_SIZE_BITS,
-        device_regions,
+        boot_info,
     );
 
     // 11. Configure TCB for EL0 entry
@@ -690,12 +748,7 @@ fn get_dtb_size(boot_info: &BootInfo) -> u64 {
     }
 
     // Read totalsize from header (big-endian u32 at offset 4)
-    let size = u32::from_be_bytes([
-        dtb_header[4],
-        dtb_header[5],
-        dtb_header[6],
-        dtb_header[7],
-    ]);
+    let size = u32::from_be_bytes([dtb_header[4], dtb_header[5], dtb_header[6], dtb_header[7]]);
 
     size as u64
 }
@@ -757,16 +810,17 @@ fn update_user_boot_info_untyped(
 
 /// Update UserBootInfo with all untyped regions (RAM + device).
 fn update_user_boot_info_all_untyped(
-    boot_info_phys: PhysAddr,
+    user_boot_info_phys: PhysAddr,
     ram_phys_base: u64,
     ram_size_bits: u8,
-    device_regions: &[DeviceRegion],
+    boot_info: &BootInfo,
 ) {
-    let virt = phys_to_virt(boot_info_phys.0);
-    // SAFETY: boot_info_phys points to a valid UserBootInfo we allocated
+    let virt = phys_to_virt(user_boot_info_phys.0);
+    // SAFETY: user_boot_info_phys points to a valid UserBootInfo we allocated
     let info = unsafe { &mut *(virt as *mut UserBootInfo) };
 
-    let total_count = 1 + device_regions.len();
+    let device_count = boot_info.device_region_count as usize;
+    let total_count = 1 + device_count;
     info.untyped_count = total_count as u32;
 
     // First region: RAM untyped
@@ -774,28 +828,35 @@ fn update_user_boot_info_all_untyped(
     info.untyped_is_device[0] = 0; // not device memory
     info.untyped_phys_base[0] = ram_phys_base;
 
-    // Remaining regions: device untyped
-    for (i, region) in device_regions.iter().enumerate() {
+    // Remaining regions: device untyped from BootInfo
+    for i in 0..device_count {
+        let region = &boot_info.device_regions[i];
+        if !region.is_valid() {
+            continue;
+        }
         let idx = i + 1;
         info.untyped_size_bits[idx] = region.size_bits;
         info.untyped_is_device[idx] = 1; // device memory
-        info.untyped_phys_base[idx] = region.phys_base;
+        info.untyped_phys_base[idx] = region.phys_base.as_u64();
     }
 
     log::debug!(
         "Updated UserBootInfo: {} untyped region(s) ({} RAM, {} device)",
         total_count,
         1,
-        device_regions.len()
+        device_count
     );
-    for (i, region) in device_regions.iter().enumerate() {
-        log::debug!(
-            "  Device region {}: {} at {:#x} ({} bytes)",
-            i,
-            region.name,
-            region.phys_base,
-            1u64 << region.size_bits
-        );
+    for i in 0..device_count {
+        let region = &boot_info.device_regions[i];
+        if region.is_valid() {
+            log::debug!(
+                "  Device region {}: {:?} at {:#x} ({} bytes)",
+                i,
+                region.device_type,
+                region.phys_base.as_u64(),
+                1u64 << region.size_bits
+            );
+        }
     }
 }
 
@@ -815,8 +876,8 @@ fn configure_tcb_for_el0(
         let tcb = unsafe { &mut *obj.data.tcb_ptr };
 
         // Set exception context for eret to EL0
-        tcb.context.elr = entry;      // Entry point
-        tcb.context.sp = stack_top;   // Stack pointer (SP_EL0)
+        tcb.context.elr = entry; // Entry point
+        tcb.context.sp = stack_top; // Stack pointer (SP_EL0)
 
         // SPSR for EL0t (user mode with SP_EL0):
         // - Bits [3:0] = 0b0000 = EL0t

@@ -161,11 +161,7 @@ impl<T: ?Sized> RwLock<T> {
     #[inline]
     pub fn reader_count(&self) -> u32 {
         let state = self.state.load(Ordering::Relaxed);
-        if state == WRITER {
-            0
-        } else {
-            state
-        }
+        if state == WRITER { 0 } else { state }
     }
 }
 

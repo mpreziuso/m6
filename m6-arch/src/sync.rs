@@ -144,8 +144,14 @@ impl<T: Default> Default for IrqSpinMutex<T> {
 impl<T: core::fmt::Debug> core::fmt::Debug for IrqSpinMutex<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self.try_lock() {
-            Some(guard) => f.debug_struct("IrqSpinMutex").field("data", &*guard).finish(),
-            None => f.debug_struct("IrqSpinMutex").field("data", &"<locked>").finish(),
+            Some(guard) => f
+                .debug_struct("IrqSpinMutex")
+                .field("data", &*guard)
+                .finish(),
+            None => f
+                .debug_struct("IrqSpinMutex")
+                .field("data", &"<locked>")
+                .finish(),
         }
     }
 }

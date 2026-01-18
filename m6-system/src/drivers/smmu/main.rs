@@ -23,10 +23,10 @@ mod ipc;
 mod io;
 
 use core::ptr::{read_volatile, write_volatile};
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{Ordering, fence};
 
 use m6_arch::smmu::{EventEntry, SMMU_EVENTQ_BASE, SMMU_EVENTQ_CONS, SMMU_EVENTQ_PROD};
-use m6_syscall::invoke::{irq_ack, irq_set_handler, map_frame, recv, reply_recv, IpcRecvResult};
+use m6_syscall::invoke::{IpcRecvResult, irq_ack, irq_set_handler, map_frame, recv, reply_recv};
 
 // Import console functions from io module
 use io::{newline, put_hex, put_u64, puts};
@@ -121,8 +121,7 @@ impl SmmuState {
 
         while current_cons != prod_idx {
             // Calculate event entry address
-            let event_addr =
-                eventq_base + (current_cons as u64 * EventEntry::SIZE as u64);
+            let event_addr = eventq_base + (current_cons as u64 * EventEntry::SIZE as u64);
 
             // Read event entry
             // SAFETY: event_addr is within the event queue memory region.
@@ -210,7 +209,11 @@ pub unsafe extern "C" fn _start() -> ! {
     let mut state = SmmuState::new(SMMU_MMIO_VADDR);
 
     // Set up IRQ handler for event queue interrupt
-    match irq_set_handler(cptr(slots::IRQ_HANDLER), cptr(slots::NOTIF), IRQ_BADGE_EVENT) {
+    match irq_set_handler(
+        cptr(slots::IRQ_HANDLER),
+        cptr(slots::NOTIF),
+        IRQ_BADGE_EVENT,
+    ) {
         Ok(_) => {
             puts("[SMMU] IRQ handler configured (badge=");
             put_hex(IRQ_BADGE_EVENT);

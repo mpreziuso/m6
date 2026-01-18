@@ -344,7 +344,7 @@ pub fn map_framebuffer(
             fb_phys_region,
             fb_virt_region,
             MemoryType::NormalNonCacheable, // Write-combining for efficient framebuffer access
-            PtePermissions::rw(false), // Kernel-only, RW, no execute
+            PtePermissions::rw(false),      // Kernel-only, RW, no execute
         ),
         allocator,
     ) {
@@ -698,7 +698,7 @@ pub fn tcr_value() -> u64 {
         | (0b01 << 10)             // ORGN0 = WB-RWA
         | (0b01 << 26)             // ORGN1 = WB-RWA
         | (0b01 << 8)              // IRGN0 = WB-RWA
-        | (0b01 << 24);            // IRGN1 = WB-RWA
+        | (0b01 << 24); // IRGN1 = WB-RWA
 
-    base | (ips << 32)  // IPS is at bits [34:32]
+    base | (ips << 32) // IPS is at bits [34:32]
 }

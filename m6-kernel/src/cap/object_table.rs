@@ -532,7 +532,8 @@ where
 {
     let mut table = get_table().lock();
     if let Some(obj) = table.get_mut(frame_ref)
-        && (obj.obj_type == KernelObjectType::Frame || obj.obj_type == KernelObjectType::DeviceFrame)
+        && (obj.obj_type == KernelObjectType::Frame
+            || obj.obj_type == KernelObjectType::DeviceFrame)
     {
         // SAFETY: We verified the object type, so frame is the active variant.
         return Some(f(unsafe { &mut obj.data.frame }));
@@ -643,7 +644,8 @@ where
         } else {
             log::warn!(
                 "with_irq_control_mut: obj_type is {:?}, expected IrqControl for {:?}",
-                obj.obj_type, control_ref
+                obj.obj_type,
+                control_ref
             );
         }
     } else {

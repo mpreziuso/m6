@@ -32,7 +32,7 @@ use m6_arch::registers::{esr, spsr};
 use m6_cap::{CapRights, ObjectType};
 use m6_pal::console;
 
-use error::{SyscallError, SyscallResult, to_return_value, IPC_MESSAGE_DELIVERED};
+use error::{IPC_MESSAGE_DELIVERED, SyscallError, SyscallResult, to_return_value};
 use numbers::Syscall;
 
 use crate::ipc::{self, IpcMessage};
@@ -89,11 +89,7 @@ pub struct SyscallArgs {
 }
 
 /// Dispatch a syscall to its handler.
-fn dispatch_syscall(
-    num: u64,
-    args: &SyscallArgs,
-    ctx: &mut ExceptionContext,
-) -> SyscallResult {
+fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallResult {
     let syscall = match Syscall::from_number(num) {
         Some(s) => s,
         None => {
@@ -281,11 +277,7 @@ fn handle_send(args: &SyscallArgs, ctx: &ExceptionContext, blocking: bool) -> Sy
 ///
 /// x0: endpoint capability pointer
 /// Returns: x0-x4 = message, x6 = badge
-fn handle_recv(
-    args: &SyscallArgs,
-    ctx: &mut ExceptionContext,
-    blocking: bool,
-) -> SyscallResult {
+fn handle_recv(args: &SyscallArgs, ctx: &mut ExceptionContext, blocking: bool) -> SyscallResult {
     let cptr = args.arg0;
 
     // Look up endpoint capability with READ right
@@ -560,11 +552,7 @@ fn dump_registers(ctx: &ExceptionContext) {
             ctx.gpr[i + 1]
         );
     }
-    log::error!(
-        "  X30: {:#018x}     SP: {:#018x}",
-        ctx.gpr[30],
-        ctx.sp
-    );
+    log::error!("  X30: {:#018x}     SP: {:#018x}", ctx.gpr[30], ctx.sp);
 }
 
 /// Synchronous exception handler that dispatches syscalls and handles faults.

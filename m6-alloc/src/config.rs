@@ -56,16 +56,16 @@ impl SizeClass {
 /// Following jemalloc-style spacing for good coverage
 pub const SIZE_CLASSES: &[SizeClass] = &[
     // Tiny sizes (8-byte aligned)
-    SizeClass::new(8, 1),    // 0: 512 slots/span
-    SizeClass::new(16, 1),   // 1: 256 slots/span
-    SizeClass::new(32, 1),   // 2: 128 slots/span
-    SizeClass::new(48, 1),   // 3: 85 slots/span
-    SizeClass::new(64, 1),   // 4: 64 slots/span
+    SizeClass::new(8, 1),  // 0: 512 slots/span
+    SizeClass::new(16, 1), // 1: 256 slots/span
+    SizeClass::new(32, 1), // 2: 128 slots/span
+    SizeClass::new(48, 1), // 3: 85 slots/span
+    SizeClass::new(64, 1), // 4: 64 slots/span
     // Small sizes (16-byte aligned)
-    SizeClass::new(80, 1),   // 5: 51 slots/span
-    SizeClass::new(96, 1),   // 6: 42 slots/span
-    SizeClass::new(112, 1),  // 7: 36 slots/span
-    SizeClass::new(128, 1),  // 8: 32 slots/span
+    SizeClass::new(80, 1),  // 5: 51 slots/span
+    SizeClass::new(96, 1),  // 6: 42 slots/span
+    SizeClass::new(112, 1), // 7: 36 slots/span
+    SizeClass::new(128, 1), // 8: 32 slots/span
     // Medium sizes
     SizeClass::new(192, 1),  // 9: 21 slots/span
     SizeClass::new(256, 1),  // 10: 16 slots/span

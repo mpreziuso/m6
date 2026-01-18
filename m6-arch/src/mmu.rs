@@ -94,8 +94,7 @@ pub mod flags {
     /// User code (RX)
     pub const USER_CODE: u64 = VALID | PAGE | AF | SH_INNER | ATTR_NORMAL | AP_EL0 | PXN | NG;
     /// User data (RW, no execute)
-    pub const USER_DATA: u64 =
-        VALID | PAGE | AF | SH_INNER | ATTR_NORMAL | AP_EL0 | UXN | PXN | NG;
+    pub const USER_DATA: u64 = VALID | PAGE | AF | SH_INNER | ATTR_NORMAL | AP_EL0 | UXN | PXN | NG;
     /// User read-only data
     pub const USER_RODATA: u64 =
         VALID | PAGE | AF | SH_INNER | ATTR_NORMAL | AP_EL0 | UXN | PXN | AP_RO | NG;
@@ -251,8 +250,8 @@ impl Mmu {
 
         // Enable MMU
         let mut sctlr = SCTLR_EL1.get();
-        sctlr |= 1 << 0;  // M bit (MMU enable)
-        sctlr |= 1 << 2;  // C bit (data cache enable)
+        sctlr |= 1 << 0; // M bit (MMU enable)
+        sctlr |= 1 << 2; // C bit (data cache enable)
         sctlr |= 1 << 12; // I bit (instruction cache enable)
         SCTLR_EL1.set(sctlr);
 
@@ -265,12 +264,7 @@ impl Mmu {
     pub fn invalidate_tlb_all(&self) {
         // SAFETY: TLB invalidation is safe
         unsafe {
-            asm!(
-                "tlbi vmalle1",
-                "dsb sy",
-                "isb",
-                options(nostack)
-            );
+            asm!("tlbi vmalle1", "dsb sy", "isb", options(nostack));
         }
     }
 

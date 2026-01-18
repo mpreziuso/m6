@@ -5,8 +5,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use m6_alloc::traits::{AllocatedPages, PagePool, SecretProvider, VmProvider, VmRights};
 use m6_alloc::AllocatorConfig;
+use m6_alloc::traits::{AllocatedPages, PagePool, SecretProvider, VmProvider, VmRights};
 use m6_cap::ObjectType;
 use m6_syscall::error::SyscallError;
 use m6_syscall::invoke::{get_random, map_frame, retype};
@@ -48,7 +48,13 @@ impl VmProvider for M6VmProvider {
         // Note: execute permission is inverted (XN bit)
         let attr = if rights.execute { 0 } else { 1 };
 
-        map_frame(self.vspace_cptr, frame_cptr, vaddr as u64, rights_bits, attr)?;
+        map_frame(
+            self.vspace_cptr,
+            frame_cptr,
+            vaddr as u64,
+            rights_bits,
+            attr,
+        )?;
         Ok(())
     }
 
@@ -111,10 +117,7 @@ impl PagePool for M6PagePool {
             count as u64,
         )?;
 
-        Ok(AllocatedPages {
-            frame_cptr,
-            count,
-        })
+        Ok(AllocatedPages { frame_cptr, count })
     }
 
     fn free_pages(&self, _pages: AllocatedPages) -> Result<(), Self::Error> {

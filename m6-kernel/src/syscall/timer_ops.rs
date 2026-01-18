@@ -7,11 +7,11 @@
 //! - TimerCancel: Cancel an armed timer
 //! - TimerClear: Unbind a timer from its notification
 
-use m6_cap::{Badge, CapRights, CapSlot, ObjectType, SlotFlags};
 use m6_cap::objects::{TimerObject, TimerState};
+use m6_cap::{Badge, CapRights, CapSlot, ObjectType, SlotFlags};
 
-use crate::cap::{cspace, object_table};
 use crate::cap::object_table::KernelObjectType;
+use crate::cap::{cspace, object_table};
 use crate::ipc;
 use crate::sched::timer_queue;
 
@@ -41,11 +41,14 @@ pub fn handle_timer_control_get(args: &SyscallArgs) -> SyscallResult {
 
     log::trace!(
         "timer_control_get: control={:#x} dest_cnode={:#x} dest_index={}",
-        timer_control_cptr, dest_cnode_cptr, dest_index
+        timer_control_cptr,
+        dest_cnode_cptr,
+        dest_index
     );
 
     // Look up TimerControl capability with ALL rights
-    let _control_cap = ipc::lookup_cap(timer_control_cptr, ObjectType::TimerControl, CapRights::ALL)?;
+    let _control_cap =
+        ipc::lookup_cap(timer_control_cptr, ObjectType::TimerControl, CapRights::ALL)?;
 
     // Resolve destination CNode slot
     let dest_loc = cspace::resolve_cnode_slot(dest_cnode_cptr, dest_depth, dest_index)?;
@@ -53,13 +56,15 @@ pub fn handle_timer_control_get(args: &SyscallArgs) -> SyscallResult {
     // Check destination slot is empty
     let slot_empty = cspace::with_slot(&dest_loc, |slot| Ok(slot.is_empty()))?;
     if !slot_empty {
-        log::warn!("timer_control_get: destination slot {} is occupied", dest_index);
+        log::warn!(
+            "timer_control_get: destination slot {} is occupied",
+            dest_index
+        );
         return Err(SyscallError::SlotOccupied);
     }
 
     // Allocate Timer object
-    let timer_ref = object_table::alloc(KernelObjectType::Timer)
-        .ok_or(SyscallError::NoMemory)?;
+    let timer_ref = object_table::alloc(KernelObjectType::Timer).ok_or(SyscallError::NoMemory)?;
 
     // Initialise the Timer object
     object_table::with_table(|table| {
@@ -117,7 +122,11 @@ pub fn handle_timer_bind(args: &SyscallArgs) -> SyscallResult {
     let timer_cap = ipc::lookup_cap(timer_cptr, ObjectType::Timer, CapRights::WRITE)?;
 
     // Look up notification capability with WRITE right
-    let notif_cap = ipc::lookup_cap(notification_cptr, ObjectType::Notification, CapRights::WRITE)?;
+    let notif_cap = ipc::lookup_cap(
+        notification_cptr,
+        ObjectType::Notification,
+        CapRights::WRITE,
+    )?;
 
     // Bind the timer to the notification
     let result = object_table::with_timer_mut(timer_cap.obj_ref, |timer| {

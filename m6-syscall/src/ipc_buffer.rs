@@ -140,12 +140,7 @@ impl IpcBuffer {
 
 impl MintArgs {
     /// Create new mint arguments.
-    pub const fn new(
-        dest_depth: u8,
-        src_depth: u8,
-        new_rights: u8,
-        badge: Option<u64>,
-    ) -> Self {
+    pub const fn new(dest_depth: u8, src_depth: u8, new_rights: u8, badge: Option<u64>) -> Self {
         let (set_badge, badge_value) = match badge {
             Some(b) => (1, b),
             None => (0, 0),

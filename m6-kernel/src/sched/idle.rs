@@ -29,9 +29,28 @@ pub fn create_idle_task(cpu_id: usize) -> Option<ObjectRef> {
 
         // Set name based on CPU ID
         let name = if cpu_id < 10 {
-            [b'i', b'd', b'l', b'e', b'0' + cpu_id as u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            [
+                b'i',
+                b'd',
+                b'l',
+                b'e',
+                b'0' + cpu_id as u8,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+            ]
         } else {
-            [b'i', b'd', b'l', b'e', b'?', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+            [
+                b'i', b'd', b'l', b'e', b'?', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]
         };
         (*tcb_ptr).tcb.name = name;
 
@@ -54,7 +73,11 @@ pub fn create_idle_task(cpu_id: usize) -> Option<ObjectRef> {
         obj.data.tcb_ptr = tcb_ptr;
     });
 
-    log::debug!("Created idle task for CPU {} with ref {:?}", cpu_id, obj_ref);
+    log::debug!(
+        "Created idle task for CPU {} with ref {:?}",
+        cpu_id,
+        obj_ref
+    );
 
     Some(obj_ref)
 }

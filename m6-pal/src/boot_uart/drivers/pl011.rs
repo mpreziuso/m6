@@ -1,5 +1,5 @@
 /// PL011 UART registers
-/// 
+///
 /// Data register offset
 pub const DR: usize = 0x00;
 /// Flag register offset

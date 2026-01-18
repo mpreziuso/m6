@@ -66,7 +66,8 @@ pub trait VmProvider {
     ///
     /// # Returns
     /// Ok(()) on success, Err on failure
-    fn map_frame(&self, vaddr: usize, frame_cptr: u64, rights: VmRights) -> Result<(), Self::Error>;
+    fn map_frame(&self, vaddr: usize, frame_cptr: u64, rights: VmRights)
+    -> Result<(), Self::Error>;
 
     /// Unmap a frame from the given virtual address
     ///

@@ -31,7 +31,7 @@ pub mod traits;
 pub mod arch;
 
 // Re-export commonly used types
-pub use address::{Address, Physical, Virtual, MemKind, PA, VA, TPA, TVA};
+pub use address::{Address, MemKind, PA, Physical, TPA, TVA, VA, Virtual};
 pub use permissions::{MemoryType, PtePermissions};
 pub use region::{MemoryRegion, PhysMemoryRegion, VirtMemoryRegion};
 pub use traits::{MapAttributes, MapError, PageAllocator};
@@ -43,9 +43,15 @@ pub const PAGE_SIZE: usize = 4096;
 pub const ENTRIES_PER_TABLE: usize = 512;
 
 // Compile-time verification of paging constants
-const _: () = assert!(PAGE_SIZE.is_power_of_two(), "PAGE_SIZE must be a power of two");
+const _: () = assert!(
+    PAGE_SIZE.is_power_of_two(),
+    "PAGE_SIZE must be a power of two"
+);
 const _: () = assert!(PAGE_SIZE >= 4096, "PAGE_SIZE must be at least 4KB");
-const _: () = assert!(ENTRIES_PER_TABLE == 512, "4KB granule requires 512 entries per table");
+const _: () = assert!(
+    ENTRIES_PER_TABLE == 512,
+    "4KB granule requires 512 entries per table"
+);
 const _: () = assert!(
     PAGE_SIZE * ENTRIES_PER_TABLE == 2 * 1024 * 1024,
     "L2 block size must be 2MB"

@@ -46,7 +46,7 @@ impl ExceptionContext {
 /// These types are provided for API completeness and future use in
 /// exception classification and filtering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]  // Reserved for future exception filtering API
+#[allow(dead_code)] // Reserved for future exception filtering API
 pub enum ExceptionType {
     /// Synchronous exception
     Sync,
@@ -63,7 +63,7 @@ pub enum ExceptionType {
 /// Identifies which execution level and stack pointer the exception came from.
 /// Provided for future use in exception routing and privilege checking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]  // Reserved for future exception routing API
+#[allow(dead_code)] // Reserved for future exception routing API
 pub enum ExceptionOrigin {
     /// Same exception level, SP_EL0
     CurrentSpEl0,
@@ -222,7 +222,9 @@ macro_rules! exception_stub {
             "str x4, [sp, #(35 * 8)]\n",
             // Branch to continuation handler (1 instruction)
             // Total: 1 + 16 + 5 + 3 + 1 = 26 instructions
-            "b ", stringify!($continuation), "\n",
+            "b ",
+            stringify!($continuation),
+            "\n",
         )
     };
 }
@@ -236,7 +238,9 @@ macro_rules! exception_continuation {
         concat!(
             // Call handler with context pointer
             "mov x0, sp\n",
-            "bl ", stringify!($handler), "\n",
+            "bl ",
+            stringify!($handler),
+            "\n",
             // Restore SP, ELR, SPSR
             "ldp x0, x1, [sp, #(31 * 8)]\n",
             "ldr x2, [sp, #(33 * 8)]\n",
@@ -352,13 +356,12 @@ unsafe extern "C" fn exception_vectors() {
     core::arch::naked_asm!(
         // Align to 2KB
         ".balign 2048",
-
         // =====================================================
         // Current EL with SP_EL0 (not used in M6)
         // =====================================================
         // Synchronous
         ".balign 128",
-        "b .",  // Hang - shouldn't happen
+        "b .", // Hang - shouldn't happen
         // IRQ
         ".balign 128",
         "b .",
@@ -368,7 +371,6 @@ unsafe extern "C" fn exception_vectors() {
         // SError
         ".balign 128",
         "b .",
-
         // =====================================================
         // Current EL with SP_ELx (kernel mode)
         // =====================================================
@@ -384,7 +386,6 @@ unsafe extern "C" fn exception_vectors() {
         // SError
         ".balign 128",
         exception_stub!(__exc_serror_cont),
-
         // =====================================================
         // Lower EL using AArch64 (user mode)
         // =====================================================
@@ -400,7 +401,6 @@ unsafe extern "C" fn exception_vectors() {
         // SError
         ".balign 128",
         exception_stub!(__exc_serror_cont),
-
         // =====================================================
         // Lower EL using AArch32 (not supported)
         // =====================================================

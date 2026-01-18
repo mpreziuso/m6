@@ -15,16 +15,16 @@
 //! ```
 
 use tock_registers::{
-    interfaces::{Readable, ReadWriteable},
+    interfaces::{ReadWriteable, Readable},
     register_bitfields,
     registers::InMemoryRegister,
 };
 
+use crate::VA;
 use crate::address::PA;
 use crate::permissions::{MemoryType, PtePermissions};
 use crate::region::PhysMemoryRegion;
-use crate::VA;
-use m6_common::memory::page::{SHIFT_4K, SHIFT_2M};
+use m6_common::memory::page::{SHIFT_2M, SHIFT_4K};
 
 // Page size constants
 const PAGE_SHIFT: usize = SHIFT_4K;
@@ -293,7 +293,10 @@ impl BlockPageMapper for L1Descriptor {
     const SHIFT: usize = BLOCK_L1_SHIFT;
 
     fn new_mapping(pa: PA, mem_type: MemoryType, perms: PtePermissions) -> Self {
-        debug_assert!(pa.value() & BLOCK_L1_MASK == 0, "L1 block address must be 1GB aligned");
+        debug_assert!(
+            pa.value() & BLOCK_L1_MASK == 0,
+            "L1 block address must be 1GB aligned"
+        );
 
         let mut value = (pa.value() & L1_BLOCK_OUTPUT_MASK) | Self::BLOCK_BITS;
 
@@ -488,7 +491,10 @@ impl BlockPageMapper for L2Descriptor {
     const SHIFT: usize = BLOCK_L2_SHIFT;
 
     fn new_mapping(pa: PA, mem_type: MemoryType, perms: PtePermissions) -> Self {
-        debug_assert!(pa.value() & BLOCK_L2_MASK == 0, "L2 block address must be 2MB aligned");
+        debug_assert!(
+            pa.value() & BLOCK_L2_MASK == 0,
+            "L2 block address must be 2MB aligned"
+        );
 
         let mut value = (pa.value() & L2_BLOCK_OUTPUT_MASK) | Self::BLOCK_BITS;
 

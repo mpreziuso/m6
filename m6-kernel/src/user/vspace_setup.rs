@@ -6,15 +6,15 @@
 use m6_common::PhysAddr;
 use m6_paging::{
     address::{PA, TPA, VA},
-    arch::arm64::{mapping, tables::L0Table},
     arch::PgTable,
+    arch::arm64::{mapping, tables::L0Table},
     permissions::{MemoryType, PtePermissions},
     region::{PhysMemoryRegion, VirtMemoryRegion},
     traits::{MapAttributes, MapError, PageAllocator},
 };
 
 use crate::initrd::elf_loader::{ElfLoadError, PagePerms};
-use crate::memory::asid::{allocate_asid, AllocatedAsid};
+use crate::memory::asid::{AllocatedAsid, allocate_asid};
 use crate::memory::frame::alloc_frame_zeroed;
 use crate::memory::translate::phys_to_virt;
 
@@ -98,8 +98,8 @@ fn elf_perms_to_pte(perms: PagePerms) -> PtePermissions {
         read: perms.read,
         write: perms.write,
         execute: perms.execute,
-        user: true,   // User-accessible
-        cow: false,   // No copy-on-write
+        user: true,    // User-accessible
+        cow: false,    // No copy-on-write
         global: false, // Per-ASID (not global)
     }
 }
@@ -135,39 +135,44 @@ pub fn load_elf_into_vspace(l0_phys: PhysAddr, elf_data: &[u8]) -> Result<u64, V
     let mut l0 = unsafe { get_l0_table(l0_phys) };
     let mut allocator = KernelPageAllocator;
 
-    let loaded = crate::initrd::elf_loader::load_elf(elf_data, |_phys_ignored, va, perms, data| {
-        // Validate address is in user space
-        if !layout::is_user_addr(va) {
-            return Err(ElfLoadError::InvalidSegment);
-        }
-
-        // Allocate a frame for this page
-        let frame_phys = alloc_frame_zeroed().ok_or(ElfLoadError::AllocationFailed)?;
-
-        // Copy data into the frame if any
-        if !data.is_empty() {
-            let frame_virt = phys_to_virt(frame_phys);
-            // SAFETY: We just allocated this frame and it's mapped in the direct map.
-            unsafe {
-                core::ptr::copy_nonoverlapping(data.as_ptr(), frame_virt as *mut u8, data.len());
+    let loaded =
+        crate::initrd::elf_loader::load_elf(elf_data, |_phys_ignored, va, perms, data| {
+            // Validate address is in user space
+            if !layout::is_user_addr(va) {
+                return Err(ElfLoadError::InvalidSegment);
             }
 
-            // ARM64 cache maintenance: Clean D-cache for executable code
-            // This ensures the written data is visible to instruction fetches
-            if perms.execute {
-                m6_arch::cache::cache_clean_range(frame_virt, data.len());
+            // Allocate a frame for this page
+            let frame_phys = alloc_frame_zeroed().ok_or(ElfLoadError::AllocationFailed)?;
+
+            // Copy data into the frame if any
+            if !data.is_empty() {
+                let frame_virt = phys_to_virt(frame_phys);
+                // SAFETY: We just allocated this frame and it's mapped in the direct map.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        data.as_ptr(),
+                        frame_virt as *mut u8,
+                        data.len(),
+                    );
+                }
+
+                // ARM64 cache maintenance: Clean D-cache for executable code
+                // This ensures the written data is visible to instruction fetches
+                if perms.execute {
+                    m6_arch::cache::cache_clean_range(frame_virt, data.len());
+                }
             }
-        }
 
-        // Convert permissions
-        let pte_perms = elf_perms_to_pte(perms);
+            // Convert permissions
+            let pte_perms = elf_perms_to_pte(perms);
 
-        // Map the page
-        map_user_page(&mut l0, &mut allocator, frame_phys, va, pte_perms)
-            .map_err(|_| ElfLoadError::MappingFailed)?;
+            // Map the page
+            map_user_page(&mut l0, &mut allocator, frame_phys, va, pte_perms)
+                .map_err(|_| ElfLoadError::MappingFailed)?;
 
-        Ok(())
-    })?;
+            Ok(())
+        })?;
 
     // ARM64 cache maintenance: Invalidate I-cache globally after loading executable code
     // This ensures all CPUs will fetch fresh instructions from memory, not stale cache lines.

@@ -9,18 +9,18 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-pub mod platform;
+pub mod boot_uart;
+pub mod console;
 pub mod dtb;
 pub mod dtb_platform;
-pub mod console;
-pub mod boot_uart;
-pub mod timer;
-pub mod gic;
-pub mod psci;
-pub mod framebuffer;
 pub mod fb_console;
+pub mod framebuffer;
+pub mod gic;
+pub mod platform;
+pub mod psci;
+pub mod timer;
 
-pub use platform::{Platform, PlatformInfo, current_platform};
 pub use dtb::get_parsed_dtb;
 pub use dtb_platform::{GicVersion, UartType};
 pub use framebuffer::FramebufferConfig;
+pub use platform::{Platform, PlatformInfo, current_platform};

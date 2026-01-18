@@ -7,8 +7,8 @@
 
 extern crate std;
 
-use std::{print, println, thread};
 use core::time::Duration;
+use std::{print, println, thread};
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {

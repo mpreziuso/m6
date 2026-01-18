@@ -9,8 +9,8 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 use m6_arch::exceptions::ExceptionContext;
-use m6_cap::{CapError, CapResult, ObjectRef};
 use m6_cap::objects::TcbObject;
+use m6_cap::{CapError, CapResult, ObjectRef};
 
 use crate::task::TaskContext;
 

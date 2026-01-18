@@ -30,8 +30,8 @@
 
 use m6_arch::exceptions::ExceptionContext;
 use m6_arch::registers::esr;
-use m6_cap::objects::{FaultMessage, FaultType, ThreadState};
 use m6_cap::ObjectRef;
+use m6_cap::objects::{FaultMessage, FaultType, ThreadState};
 
 use crate::cap::object_table::{self, KernelObjectType};
 use crate::ipc::message::IpcMessage;
@@ -127,10 +127,9 @@ pub fn deliver_fault(
     }
 
     // Verify it's actually an endpoint
-    let is_endpoint = object_table::with_object(fault_ep, |obj| {
-        obj.obj_type == KernelObjectType::Endpoint
-    })
-    .unwrap_or(false);
+    let is_endpoint =
+        object_table::with_object(fault_ep, |obj| obj.obj_type == KernelObjectType::Endpoint)
+            .unwrap_or(false);
 
     if !is_endpoint {
         return Err(FaultDeliveryError::InvalidEndpoint);
@@ -153,15 +152,14 @@ pub fn deliver_fault(
 
     // Try to deliver the fault message
     object_table::with_endpoint_mut(fault_ep, |endpoint| {
+        use crate::ipc::queue::{ipc_dequeue, ipc_enqueue};
         use m6_cap::objects::EndpointState;
-        use crate::ipc::queue::{ipc_enqueue, ipc_dequeue};
 
         match endpoint.state {
             EndpointState::RecvQueue => {
                 // Handler is waiting - deliver immediately
-                let handler_ref =
-                    ipc_dequeue(&mut endpoint.queue_head, &mut endpoint.queue_tail)
-                        .expect("RecvQueue but empty queue");
+                let handler_ref = ipc_dequeue(&mut endpoint.queue_head, &mut endpoint.queue_tail)
+                    .expect("RecvQueue but empty queue");
 
                 if endpoint.queue_head.is_null() {
                     endpoint.state = EndpointState::Idle;
@@ -261,7 +259,11 @@ fn wake_handler(handler_ref: ObjectRef) {
 ///
 /// * `true` - Fault was delivered (or thread was terminated)
 /// * `false` - Current thread should continue (shouldn't happen for faults)
-pub fn handle_user_fault(tcb_ref: ObjectRef, ctx: &ExceptionContext, fault_type: FaultType) -> bool {
+pub fn handle_user_fault(
+    tcb_ref: ObjectRef,
+    ctx: &ExceptionContext,
+    fault_type: FaultType,
+) -> bool {
     let fault_msg = build_fault_message(ctx, fault_type);
 
     log::debug!(

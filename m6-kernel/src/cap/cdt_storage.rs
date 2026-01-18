@@ -35,9 +35,7 @@ impl CdtPool {
     /// Create a new CDT pool.
     fn new() -> Self {
         // Allocate on heap to avoid stack overflow
-        let mut nodes: Box<[CdtNode]> = (0..MAX_CDT_NODES)
-            .map(|_| CdtNode::default())
-            .collect();
+        let mut nodes: Box<[CdtNode]> = (0..MAX_CDT_NODES).map(|_| CdtNode::default()).collect();
 
         // Build free list: index 0 is NULL, so start at 1
         // Use next_sibling as free list link when not in use
@@ -266,12 +264,7 @@ pub fn move_cdt_mapping(
 ///
 /// Used by the CapRotate syscall to atomically update mappings for
 /// a three-way capability rotation.
-pub fn rotate_cdt_mappings(
-    cnode: ObjectRef,
-    slot1: u32,
-    slot2: u32,
-    slot3: u32,
-) {
+pub fn rotate_cdt_mappings(cnode: ObjectRef, slot1: u32, slot2: u32, slot3: u32) {
     let mut map = get_slot_map().lock();
     let cnode_idx = cnode.index();
 

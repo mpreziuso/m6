@@ -37,24 +37,24 @@ pub mod virtio_device_ids {
 /// These compatible strings map to known drivers.
 const INTERESTING_COMPATIBLES: &[&str] = &[
     // Serial
-    "ns16550a",        // NS16550 UART (QEMU)
-    "arm,pl011",       // ARM PL011 UART
+    "ns16550a",         // NS16550 UART (QEMU)
+    "arm,pl011",        // ARM PL011 UART
     "snps,dw-apb-uart", // Synopsys DesignWare UART (RK3588)
     // VirtIO
-    "virtio,mmio",     // VirtIO MMIO devices
+    "virtio,mmio", // VirtIO MMIO devices
     // Storage
-    "nvme",            // NVMe controller
+    "nvme", // NVMe controller
     // USB
-    "generic-xhci",    // Generic xHCI USB controller
-    "snps,dwc3",       // Synopsys DWC3 USB controller
+    "generic-xhci", // Generic xHCI USB controller
+    "snps,dwc3",    // Synopsys DWC3 USB controller
     // PCIe
-    "pci-host-generic", // Generic PCIe host
+    "pci-host-generic",      // Generic PCIe host
     "pci-host-ecam-generic", // PCIe ECAM
     // RK3588 specific
     "rockchip,rk3588-dwc3", // RK3588 USB
     "rockchip,rk3588-pcie", // RK3588 PCIe
     // IOMMU
-    "arm,smmu-v3",     // ARM SMMUv3
+    "arm,smmu-v3", // ARM SMMUv3
 ];
 
 /// Enumerate devices from the FDT and populate the registry.

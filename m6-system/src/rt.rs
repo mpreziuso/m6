@@ -68,7 +68,9 @@ fn print_u32(mut n: u32) {
 
 // -- Global allocator
 
-use m6_alloc::{AllocatedPages, AllocatorConfig, M6GlobalAlloc, PagePool, SecretProvider, VmProvider, VmRights};
+use m6_alloc::{
+    AllocatedPages, AllocatorConfig, M6GlobalAlloc, PagePool, SecretProvider, VmProvider, VmRights,
+};
 
 /// CNode radix for capability slots.
 #[allow(dead_code)]
@@ -100,7 +102,12 @@ struct M6VmProvider;
 impl VmProvider for M6VmProvider {
     type Error = M6VmError;
 
-    fn map_frame(&self, vaddr: usize, frame_cptr: u64, _rights: VmRights) -> Result<(), Self::Error> {
+    fn map_frame(
+        &self,
+        vaddr: usize,
+        frame_cptr: u64,
+        _rights: VmRights,
+    ) -> Result<(), Self::Error> {
         let vspace_cptr = ROOT_VSPACE << (CNODE_RADIX as u64 * 6);
 
         // Map with RW permissions, normal memory attributes
@@ -150,10 +157,7 @@ impl PagePool for M6PagePool {
         );
 
         if result.is_ok() {
-            Ok(AllocatedPages {
-                frame_cptr,
-                count,
-            })
+            Ok(AllocatedPages { frame_cptr, count })
         } else {
             Err(M6PoolError)
         }

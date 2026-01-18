@@ -7,9 +7,9 @@
 //!
 //! Reference: ARM DEN0022D - Power State Coordination Interface
 
-use core::arch::asm;
 use crate::dtb_platform::PsciMethod;
 use crate::platform::current_platform;
+use core::arch::asm;
 
 // -- PSCI Function IDs (SMC64 convention for 64-bit calls)
 

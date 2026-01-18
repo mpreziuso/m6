@@ -32,18 +32,17 @@ pub mod translate;
 
 // Re-export public API
 pub use asid::{
-    allocate_asid, current_generation, init_asid_allocator, is_asid_valid,
-    refresh_asid_if_needed, AllocatedAsid,
+    AllocatedAsid, allocate_asid, current_generation, init_asid_allocator, is_asid_valid,
+    refresh_asid_if_needed,
 };
 pub use frame::{
-    alloc_frame, alloc_frame_zeroed, alloc_frames, alloc_frames_zeroed,
-    free_frame, memory_stats,
+    alloc_frame, alloc_frame_zeroed, alloc_frames, alloc_frames_zeroed, free_frame, memory_stats,
 };
 pub use init::init_memory_from_boot_info;
 pub use layout::virt;
 pub use translate::{
-    phys_to_virt, phys_to_virt_checked, virt_to_phys, virt_to_phys_checked,
-    phys_to_ptr, phys_to_ptr_checked,
+    phys_to_ptr, phys_to_ptr_checked, phys_to_virt, phys_to_virt_checked, virt_to_phys,
+    virt_to_phys_checked,
 };
 
 // -- Dynamic Physical Map Size

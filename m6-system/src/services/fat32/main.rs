@@ -316,7 +316,12 @@ fn handle_open(
 }
 
 /// Handle CLOSE request.
-fn handle_close(volume_mgr: &mut VolMgr, handles: &mut HandleTable, badge: u64, msg: &[u64; 4]) -> u64 {
+fn handle_close(
+    volume_mgr: &mut VolMgr,
+    handles: &mut HandleTable,
+    badge: u64,
+    msg: &[u64; 4],
+) -> u64 {
     let handle = msg[0] as u32;
 
     // Try to take file handle

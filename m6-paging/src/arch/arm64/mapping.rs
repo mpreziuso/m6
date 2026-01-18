@@ -10,7 +10,7 @@
 use super::descriptors::{
     BlockPageMapper, L1Descriptor, L2Descriptor, L3Descriptor, PageTableEntry, TableMapper,
 };
-use super::tables::{zero_table, L0Table, L1Table, L2Table, L3Table, PgTable};
+use super::tables::{L0Table, L1Table, L2Table, L3Table, PgTable, zero_table};
 use crate::address::{PA, TPA, VA};
 use crate::region::{PhysMemoryRegion, VirtMemoryRegion};
 use crate::traits::{MapAttributes, MapError, PageAllocator};
@@ -117,7 +117,9 @@ fn get_or_create_l1<A: PageAllocator>(
     }
 
     // Allocate new L1 table
-    let new_pa: TPA<L1Table> = allocator.allocate_table().ok_or(MapError::AllocationFailed)?;
+    let new_pa: TPA<L1Table> = allocator
+        .allocate_table()
+        .ok_or(MapError::AllocationFailed)?;
 
     // Zero the new table
     unsafe { zero_table(new_pa.to_untyped().cast()) };
@@ -148,7 +150,9 @@ fn get_or_create_l2<A: PageAllocator>(
     }
 
     // Allocate new L2 table
-    let new_pa: TPA<L2Table> = allocator.allocate_table().ok_or(MapError::AllocationFailed)?;
+    let new_pa: TPA<L2Table> = allocator
+        .allocate_table()
+        .ok_or(MapError::AllocationFailed)?;
 
     // Zero the new table
     unsafe { zero_table(new_pa.to_untyped().cast()) };
@@ -179,7 +183,9 @@ fn get_or_create_l3<A: PageAllocator>(
     }
 
     // Allocate new L3 table
-    let new_pa: TPA<L3Table> = allocator.allocate_table().ok_or(MapError::AllocationFailed)?;
+    let new_pa: TPA<L3Table> = allocator
+        .allocate_table()
+        .ok_or(MapError::AllocationFailed)?;
 
     // Zero the new table
     unsafe { zero_table(new_pa.to_untyped().cast()) };

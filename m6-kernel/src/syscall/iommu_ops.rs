@@ -33,8 +33,8 @@ use crate::cap::object_table::{self, KernelObjectType};
 use crate::memory::frame::{alloc_frame_zeroed, free_frame};
 use crate::memory::translate::phys_to_virt;
 use crate::smmu::{self, SmmuError};
-use crate::syscall::error::{SyscallError, SyscallResult};
 use crate::syscall::SyscallArgs;
+use crate::syscall::error::{SyscallError, SyscallResult};
 
 // -- I/O page table constants (same as CPU page tables)
 
@@ -394,11 +394,10 @@ pub fn handle_iospace_create(args: &SyscallArgs) -> SyscallResult {
     verify_slot_empty(&dest_loc)?;
 
     // Allocate 4KB from untyped for root page table
-    let root_table_phys = object_table::with_untyped_mut(untyped_ref, |ut| {
-        ut.try_allocate(4096, 4096)
-    })
-    .ok_or(SyscallError::Revoked)?
-    .map_err(|_| SyscallError::NoMemory)?;
+    let root_table_phys =
+        object_table::with_untyped_mut(untyped_ref, |ut| ut.try_allocate(4096, 4096))
+            .ok_or(SyscallError::Revoked)?
+            .map_err(|_| SyscallError::NoMemory)?;
 
     // Zero the page table memory (important for invalid PTEs)
     let root_table_virt = phys_to_virt(root_table_phys.as_u64());
@@ -408,19 +407,19 @@ pub fn handle_iospace_create(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Get SMMU index from SmmuControl
-    let smmu_index = object_table::with_smmu_control_mut(smmu_ref, |smmu_ctrl| smmu_ctrl.smmu_index)
-        .ok_or(SyscallError::Revoked)?;
+    let smmu_index =
+        object_table::with_smmu_control_mut(smmu_ref, |smmu_ctrl| smmu_ctrl.smmu_index)
+            .ok_or(SyscallError::Revoked)?;
 
     // Allocate IOASID from SmmuControl
-    let ioasid = object_table::with_smmu_control_mut(smmu_ref, |smmu_ctrl| {
-        smmu_ctrl.alloc_ioasid()
-    })
-    .ok_or(SyscallError::Revoked)?
-    .ok_or(SyscallError::NoMemory)?;
+    let ioasid =
+        object_table::with_smmu_control_mut(smmu_ref, |smmu_ctrl| smmu_ctrl.alloc_ioasid())
+            .ok_or(SyscallError::Revoked)?
+            .ok_or(SyscallError::NoMemory)?;
 
     // Allocate object table entry for IOSpace
-    let iospace_ref = object_table::alloc(KernelObjectType::IOSpace)
-        .ok_or(SyscallError::NoMemory)?;
+    let iospace_ref =
+        object_table::alloc(KernelObjectType::IOSpace).ok_or(SyscallError::NoMemory)?;
 
     // Create IOSpaceObject with allocated page table and IOASID
     object_table::with_object_mut(iospace_ref, |obj| {
@@ -544,11 +543,9 @@ pub fn handle_iospace_map_frame(args: &SyscallArgs) -> SyscallResult {
     iospace_map_page(root_table, iova, frame_phys, writable)?;
 
     // Invalidate IOTLB for the mapping
-    smmu::with_smmu(smmu_index, |smmu| {
-        smmu.invalidate_va(ioasid, iova)
-    })
-    .map_err(smmu_error_to_syscall)?
-    .map_err(smmu_error_to_syscall)?;
+    smmu::with_smmu(smmu_index, |smmu| smmu.invalidate_va(ioasid, iova))
+        .map_err(smmu_error_to_syscall)?
+        .map_err(smmu_error_to_syscall)?;
 
     // Update mapped frames count (already validated iospace_ref above)
     let _ = object_table::with_iospace_mut(iospace_ref, |iospace| {
@@ -557,7 +554,9 @@ pub fn handle_iospace_map_frame(args: &SyscallArgs) -> SyscallResult {
 
     log::debug!(
         "IOSpace map: iova={:#x} -> frame={:#x} writable={}",
-        iova, frame_phys, writable
+        iova,
+        frame_phys,
+        writable
     );
 
     Ok(0)
@@ -618,11 +617,9 @@ pub fn handle_iospace_unmap_frame(args: &SyscallArgs) -> SyscallResult {
     let _frame_phys = iospace_unmap_page(root_table, iova)?;
 
     // Invalidate IOTLB for the unmapped page
-    smmu::with_smmu(smmu_index, |smmu| {
-        smmu.invalidate_va(ioasid, iova)
-    })
-    .map_err(smmu_error_to_syscall)?
-    .map_err(smmu_error_to_syscall)?;
+    smmu::with_smmu(smmu_index, |smmu| smmu.invalidate_va(ioasid, iova))
+        .map_err(smmu_error_to_syscall)?
+        .map_err(smmu_error_to_syscall)?;
 
     // Update mapped frames count (already validated iospace_ref above)
     let _ = object_table::with_iospace_mut(iospace_ref, |iospace| {
@@ -918,10 +915,9 @@ pub fn handle_iospace_set_fault_handler(args: &SyscallArgs) -> SyscallResult {
         }
 
         // Get SMMU index from IOSpace
-        let smmu_index = object_table::with_iospace_mut(slot.object_ref(), |iospace| {
-            iospace.smmu_index
-        })
-        .ok_or(SyscallError::Revoked)?;
+        let smmu_index =
+            object_table::with_iospace_mut(slot.object_ref(), |iospace| iospace.smmu_index)
+                .ok_or(SyscallError::Revoked)?;
 
         Ok((slot.object_ref(), smmu_index))
     })?;
@@ -1034,16 +1030,12 @@ pub fn handle_dma_pool_create(args: &SyscallArgs) -> SyscallResult {
     verify_slot_empty(&dest_loc)?;
 
     // Allocate object table entry for DmaPool
-    let pool_ref = object_table::alloc(KernelObjectType::DmaPool)
-        .ok_or(SyscallError::NoMemory)?;
+    let pool_ref = object_table::alloc(KernelObjectType::DmaPool).ok_or(SyscallError::NoMemory)?;
 
     // Create DmaPoolObject
     object_table::with_object_mut(pool_ref, |obj| {
-        obj.data.dma_pool = ManuallyDrop::new(DmaPoolObject::new(
-            iospace_ref,
-            iova_base,
-            iova_size,
-        ));
+        obj.data.dma_pool =
+            ManuallyDrop::new(DmaPoolObject::new(iospace_ref, iova_base, iova_size));
     });
 
     // Install capability in destination slot

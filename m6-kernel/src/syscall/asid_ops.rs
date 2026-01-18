@@ -3,12 +3,12 @@
 //! This module implements syscalls for ASID (Address Space Identifier) management:
 //! - AsidPoolAssign: Assign an ASID from a pool to a VSpace
 
-use m6_cap::{CapRights, ObjectType};
 use m6_cap::objects::vspace::Asid;
+use m6_cap::{CapRights, ObjectType};
 
 use crate::cap::object_table;
-use crate::memory::asid::allocate_asid;
 use crate::ipc;
+use crate::memory::asid::allocate_asid;
 
 use super::SyscallArgs;
 use super::error::{SyscallError, SyscallResult};

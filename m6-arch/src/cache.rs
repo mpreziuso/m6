@@ -242,11 +242,6 @@ pub fn cache_clean_all() {
 pub fn icache_invalidate_all() {
     unsafe {
         // IC IALLU: Instruction Cache Invalidate All to PoU
-        asm!(
-            "ic iallu",
-            "dsb sy",
-            "isb",
-            options(nostack)
-        );
+        asm!("ic iallu", "dsb sy", "isb", options(nostack));
     }
 }

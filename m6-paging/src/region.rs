@@ -3,8 +3,8 @@
 //! Provides type-safe memory region handling for both physical and virtual
 //! address spaces, with alignment and iteration helpers.
 
-use crate::address::{Address, MemKind, Physical, Virtual, PA, VA};
 use crate::PAGE_SIZE;
+use crate::address::{Address, MemKind, PA, Physical, VA, Virtual};
 
 /// A contiguous memory region in either physical or virtual address space
 #[derive(Clone, Copy, PartialEq, Eq)]

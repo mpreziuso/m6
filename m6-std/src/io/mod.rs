@@ -23,7 +23,12 @@ pub trait Read {
     fn read_exact(&mut self, mut buf: &mut [u8]) -> Result<()> {
         while !buf.is_empty() {
             match self.read(buf) {
-                Ok(0) => return Err(Error::new(ErrorKind::UnexpectedEof, "unexpected end of file")),
+                Ok(0) => {
+                    return Err(Error::new(
+                        ErrorKind::UnexpectedEof,
+                        "unexpected end of file",
+                    ));
+                }
                 Ok(n) => buf = &mut buf[n..],
                 Err(e) => return Err(e),
             }

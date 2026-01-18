@@ -43,7 +43,9 @@ impl Ord for SleepEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse ordering for min-heap: earliest wakeup first
         // BinaryHeap is a max-heap, so we reverse the comparison
-        other.wakeup_ticks.cmp(&self.wakeup_ticks)
+        other
+            .wakeup_ticks
+            .cmp(&self.wakeup_ticks)
             .then_with(|| other.tcb_ref.index().cmp(&self.tcb_ref.index()))
     }
 }

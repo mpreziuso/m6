@@ -67,9 +67,7 @@ pub fn start_secondary_cpus(boot_info: &'static BootInfo) {
 /// Start a single secondary CPU.
 fn start_cpu(cpu: usize, boot_info: &'static BootInfo) -> Result<(), psci::PsciError> {
     // Get stack info for this CPU
-    let stack_info = boot_info
-        .cpu_stack(cpu)
-        .expect("CPU stack info not found");
+    let stack_info = boot_info.cpu_stack(cpu).expect("CPU stack info not found");
 
     if !stack_info.is_valid() {
         log::error!("CPU {} has invalid stack info", cpu);
@@ -127,9 +125,9 @@ fn encode_secondary_context(cpu: usize, boot_info: &BootInfo) -> u64 {
 
 // Constants for secondary_entry_stub (must be outside the naked function)
 use m6_common::boot::{
-    BOOTINFO_PAGE_TABLE_BASE_OFFSET, BOOTINFO_PER_CPU_STACKS_OFFSET,
-    BOOTINFO_TTBR0_OFFSET, BOOTINFO_TCR_OFFSET, PER_CPU_STACK_INFO_SIZE,
-    PER_CPU_STACK_VIRT_TOP_OFFSET, MAIR_VALUE, KERNEL_PHYS_MAP_BASE,
+    BOOTINFO_PAGE_TABLE_BASE_OFFSET, BOOTINFO_PER_CPU_STACKS_OFFSET, BOOTINFO_TCR_OFFSET,
+    BOOTINFO_TTBR0_OFFSET, KERNEL_PHYS_MAP_BASE, MAIR_VALUE, PER_CPU_STACK_INFO_SIZE,
+    PER_CPU_STACK_VIRT_TOP_OFFSET,
 };
 
 /// Secondary CPU entry stub (called by PSCI after CPU_ON).

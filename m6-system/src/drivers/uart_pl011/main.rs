@@ -263,8 +263,7 @@ fn service_loop(uart: &Pl011, irq_enabled: bool) -> ! {
                 let label = ipc_result.label;
 
                 // Handle the request and store response for next reply_recv
-                last_response =
-                    handle_request(uart, &mut rx_buffer, badge, label, &ipc_result.msg);
+                last_response = handle_request(uart, &mut rx_buffer, badge, label, &ipc_result.msg);
             }
             Err(err) => {
                 io::puts("[drv-uart] recv/reply_recv error: ");

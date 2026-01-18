@@ -78,8 +78,8 @@ pub unsafe fn init_memory_from_boot_info(boot_info: &BootInfo) {
 
     // Allocate frames for initial heap
     let heap_frames = INITIAL_HEAP_SIZE / page::SIZE_4K;
-    let heap_phys = frame::alloc_frames_zeroed(heap_frames)
-        .expect("Failed to allocate initial kernel heap");
+    let heap_phys =
+        frame::alloc_frames_zeroed(heap_frames).expect("Failed to allocate initial kernel heap");
 
     log::info!(
         "Allocated {} KB for initial heap at phys {:#x}",

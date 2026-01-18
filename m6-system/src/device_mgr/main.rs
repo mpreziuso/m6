@@ -34,7 +34,7 @@ mod spawn;
 #[path = "../io.rs"]
 mod io;
 
-use m6_syscall::invoke::{recv, reply_recv, sched_yield, signal, ipc_set_send_caps};
+use m6_syscall::invoke::{ipc_set_send_caps, recv, reply_recv, sched_yield, signal};
 use m6_syscall::slot_to_cptr;
 
 use boot_info::DevMgrBootInfo;
@@ -163,7 +163,8 @@ fn spawn_platform_drivers(registry: &mut Registry) {
             }
 
             // Check if binary exists in initrd
-            let has_binary = archive.entries()
+            let has_binary = archive
+                .entries()
                 .any(|e| e.filename().as_str() == Ok(manifest.binary_name));
 
             if has_binary {
@@ -199,8 +200,8 @@ fn init_dtb(registry: &mut Registry, boot_info: &DevMgrBootInfo) -> Result<usize
 /// VirtIO MMIO is only present on QEMU virt; on real hardware (e.g. Rock 5B+)
 /// this function returns early.
 fn probe_virtio_devices(registry: &mut Registry) {
-    use m6_syscall::invoke::{map_frame, map_page_table, unmap_frame, retype};
     use m6_cap::ObjectType;
+    use m6_syscall::invoke::{map_frame, map_page_table, retype, unmap_frame};
 
     // SAFETY: _start has initialised BOOT_INFO
     let boot_info = unsafe { get_boot_info() };
@@ -244,7 +245,16 @@ fn probe_virtio_devices(registry: &mut Registry) {
 
     // Create page tables for probe address region
     // L1 table (covers 512GB)
-    if retype(cptr(slots::RAM_UNTYPED), 5, 0, cptr(slots::ROOT_CNODE), l1_slot, 1).is_err() {
+    if retype(
+        cptr(slots::RAM_UNTYPED),
+        5,
+        0,
+        cptr(slots::ROOT_CNODE),
+        l1_slot,
+        1,
+    )
+    .is_err()
+    {
         io::puts("[device-mgr] Failed to create L1 table for probe\n");
         return;
     }
@@ -252,7 +262,16 @@ fn probe_virtio_devices(registry: &mut Registry) {
     let _ = map_page_table(cptr(slots::ROOT_VSPACE), cptr(l1_slot), l1_base, 1);
 
     // L2 table (covers 1GB)
-    if retype(cptr(slots::RAM_UNTYPED), 6, 0, cptr(slots::ROOT_CNODE), l2_slot, 1).is_err() {
+    if retype(
+        cptr(slots::RAM_UNTYPED),
+        6,
+        0,
+        cptr(slots::ROOT_CNODE),
+        l2_slot,
+        1,
+    )
+    .is_err()
+    {
         io::puts("[device-mgr] Failed to create L2 table for probe\n");
         return;
     }
@@ -260,7 +279,16 @@ fn probe_virtio_devices(registry: &mut Registry) {
     let _ = map_page_table(cptr(slots::ROOT_VSPACE), cptr(l2_slot), l2_base, 2);
 
     // L3 table (covers 2MB)
-    if retype(cptr(slots::RAM_UNTYPED), 7, 0, cptr(slots::ROOT_CNODE), l3_slot, 1).is_err() {
+    if retype(
+        cptr(slots::RAM_UNTYPED),
+        7,
+        0,
+        cptr(slots::ROOT_CNODE),
+        l3_slot,
+        1,
+    )
+    .is_err()
+    {
         io::puts("[device-mgr] Failed to create L3 table for probe\n");
         return;
     }
@@ -275,7 +303,9 @@ fn probe_virtio_devices(registry: &mut Registry) {
         cptr(slots::ROOT_CNODE),
         frame_slots[0],
         NUM_FRAMES as u64,
-    ).is_err() {
+    )
+    .is_err()
+    {
         io::puts("[device-mgr] Failed to retype device untyped for VirtIO probe\n");
         return;
     }
@@ -460,7 +490,9 @@ fn handle_ensure(registry: &mut Registry, _badge: u64) -> u64 {
                 let endpoint_cptr = slot_to_cptr(driver.endpoint_slot, boot_info.cnode_radix);
 
                 // SAFETY: IPC buffer is mapped for device-mgr
-                unsafe { ipc_set_send_caps(&[endpoint_cptr]); }
+                unsafe {
+                    ipc_set_send_caps(&[endpoint_cptr]);
+                }
 
                 return ipc::response::OK;
             }
@@ -493,7 +525,8 @@ fn find_first_unbound_device(registry: &Registry) -> Option<usize> {
             let virtio_id = registry.devices[i].virtio_device_id;
             if let Some(entry) = manifest::find_driver(compat, virtio_id) {
                 // Check if binary exists in initrd
-                let has_binary = archive.entries()
+                let has_binary = archive
+                    .entries()
                     .any(|e| e.filename().as_str() == Ok(entry.binary_name));
                 if has_binary {
                     return Some(i);
@@ -612,7 +645,9 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
             let endpoint_cptr = slot_to_cptr(result.endpoint_slot, boot_info.cnode_radix);
 
             // SAFETY: IPC buffer is mapped for device-mgr
-            unsafe { ipc_set_send_caps(&[endpoint_cptr]); }
+            unsafe {
+                ipc_set_send_caps(&[endpoint_cptr]);
+            }
 
             ipc::response::OK
         }

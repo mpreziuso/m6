@@ -2,8 +2,8 @@
 //!
 //! Handles syscalls that don't fit into other categories.
 
-use crate::syscall::error::{SyscallError, SyscallResult};
 use crate::syscall::SyscallArgs;
+use crate::syscall::error::{SyscallError, SyscallResult};
 
 /// Maximum buffer size for GetRandom
 const MAX_RANDOM_BYTES: usize = 256;

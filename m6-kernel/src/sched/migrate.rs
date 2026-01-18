@@ -5,7 +5,7 @@
 
 use m6_cap::ObjectRef;
 
-use super::{MAX_CPUS, eevdf, get_sched_state, current_cpu_id, request_reschedule_on};
+use super::{MAX_CPUS, current_cpu_id, eevdf, get_sched_state, request_reschedule_on};
 
 /// Find which CPU a task is currently on.
 ///
@@ -105,7 +105,11 @@ fn migrate_between_cpus(tcb_ref: ObjectRef, source_cpu: usize, target_cpu: usize
 
     // Remove from source run queue
     if !source_sched.run_queue().contains(tcb_ref) && !is_current {
-        log::debug!("Task {:?} not in source CPU {} run queue", tcb_ref, source_cpu);
+        log::debug!(
+            "Task {:?} not in source CPU {} run queue",
+            tcb_ref,
+            source_cpu
+        );
         return false;
     }
 

@@ -19,8 +19,7 @@ const LOAD_IMBALANCE_THRESHOLD: u32 = 2;
 const MIN_TASKS_TO_MIGRATE: u32 = 2;
 
 /// Counter for balance interval tracking.
-static BALANCE_TICK_COUNTER: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static BALANCE_TICK_COUNTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Per-CPU load information.
 #[derive(Debug, Clone, Copy, Default)]
@@ -137,7 +136,8 @@ fn find_migratable_task(cpu: usize) -> Option<ObjectRef> {
         let can_migrate = run_queue::with_tcb(current, |tcb| {
             // Only migrate tasks without affinity
             tcb.tcb.affinity < 0
-        }).unwrap_or(false);
+        })
+        .unwrap_or(false);
 
         if can_migrate {
             return Some(current);

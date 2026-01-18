@@ -174,13 +174,18 @@ impl VirtioBlkDevice {
         // 4. Read and negotiate features
         let host_features = self.dev.host_features(0) as u64;
         // Accept basic features we understand
-        let accepted = host_features & (features::SIZE_MAX | features::SEG_MAX |
-                                         features::BLK_SIZE | features::FLUSH | features::RO);
+        let accepted = host_features
+            & (features::SIZE_MAX
+                | features::SEG_MAX
+                | features::BLK_SIZE
+                | features::FLUSH
+                | features::RO);
         self.features = accepted;
         self.dev.set_guest_features(0, accepted as u32);
 
         // 5. Set FEATURES_OK
-        self.dev.set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
+        self.dev
+            .set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
 
         // 6. Check FEATURES_OK was accepted
         if self.dev.status() & status::FEATURES_OK == 0 {
@@ -226,7 +231,9 @@ impl VirtioBlkDevice {
         self.vq = Some(vq);
 
         // 9. Set DRIVER_OK
-        self.dev.set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK);
+        self.dev.set_status(
+            status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK,
+        );
 
         Ok(())
     }

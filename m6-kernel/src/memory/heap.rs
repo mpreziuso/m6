@@ -9,8 +9,8 @@ use m6_common::memory::page;
 use m6_paging::arch::arm64::mapping::map_page;
 use m6_paging::arch::arm64::tables::{L0Table, PgTable};
 use m6_paging::{
-    MapAttributes, MemoryType, PageAllocator, PtePermissions, TPA, PA, VA,
-    PhysMemoryRegion, VirtMemoryRegion,
+    MapAttributes, MemoryType, PA, PageAllocator, PhysMemoryRegion, PtePermissions, TPA, VA,
+    VirtMemoryRegion,
 };
 
 use super::frame::{alloc_frame_zeroed, free_frame};
@@ -118,7 +118,9 @@ impl KernelHeap {
 
         // Check if we'd exceed max size
         let current = self.committed_size.load(Ordering::Acquire);
-        let new_size = current.checked_add(additional_aligned).ok_or(HeapError::HeapFull)?;
+        let new_size = current
+            .checked_add(additional_aligned)
+            .ok_or(HeapError::HeapFull)?;
         if new_size > self.max_size {
             return Err(HeapError::HeapFull);
         }
@@ -149,7 +151,13 @@ impl KernelHeap {
             );
 
             // Map the page
-            if let Err(_e) = map_page(&mut l0, PA::new(phys), VA::new(virt), &attrs, &mut allocator) {
+            if let Err(_e) = map_page(
+                &mut l0,
+                PA::new(phys),
+                VA::new(virt),
+                &attrs,
+                &mut allocator,
+            ) {
                 // Failed to map - free the frame we just allocated
                 free_frame(phys);
                 return Err(HeapError::MappingFailed);
@@ -168,7 +176,10 @@ impl KernelHeap {
         // Add the new region to the buddy allocator
         // SAFETY: We just mapped this memory
         unsafe {
-            ALLOCATOR.lock().add_to_heap(heap_region_start as usize, heap_region_start as usize + additional_aligned);
+            ALLOCATOR.lock().add_to_heap(
+                heap_region_start as usize,
+                heap_region_start as usize + additional_aligned,
+            );
         }
 
         log::info!(
@@ -183,10 +194,8 @@ impl KernelHeap {
 }
 
 /// Global kernel heap instance
-pub(super) static KERNEL_HEAP: KernelHeap = KernelHeap::new(
-    virt::KERNEL_HEAP_START,
-    virt::KERNEL_HEAP_VA_SIZE,
-);
+pub(super) static KERNEL_HEAP: KernelHeap =
+    KernelHeap::new(virt::KERNEL_HEAP_START, virt::KERNEL_HEAP_VA_SIZE);
 
 /// Page allocator that uses the kernel frame allocator
 struct KernelPageAllocator;

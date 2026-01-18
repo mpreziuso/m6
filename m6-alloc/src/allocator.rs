@@ -20,7 +20,6 @@ use crate::stats::AllocatorStats;
 #[cfg(feature = "quarantine")]
 use crate::quarantine::QuarantineQueue;
 
-
 /// Allocator configuration
 pub struct AllocatorConfig {
     /// Base virtual address for the heap
@@ -382,12 +381,10 @@ where
         let class_idx = span.size_class();
 
         // Validate the address
-        let slot_idx = span
-            .addr_to_slot(addr)
-            .ok_or_else(|| {
-                self.poison();
-                AllocError::Poisoned
-            })?;
+        let slot_idx = span.addr_to_slot(addr).ok_or_else(|| {
+            self.poison();
+            AllocError::Poisoned
+        })?;
 
         // Check bitmap for double-free
         #[cfg(any(debug_assertions, feature = "release-double-free"))]

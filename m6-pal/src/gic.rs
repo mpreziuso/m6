@@ -24,8 +24,7 @@ type UserspaceDispatcher = Option<fn(u32) -> bool>;
 
 /// Static storage for registered interrupt handlers
 /// Index is the interrupt ID (INTID)
-static IRQ_HANDLERS: Mutex<[Option<IrqHandler>; MAX_HANDLERS]> =
-    Mutex::new([None; MAX_HANDLERS]);
+static IRQ_HANDLERS: Mutex<[Option<IrqHandler>; MAX_HANDLERS]> = Mutex::new([None; MAX_HANDLERS]);
 
 /// Callback for userspace IRQ dispatch.
 ///
@@ -122,10 +121,9 @@ unsafe fn init_gicv2(gicd_virt: u64, gicc_virt: u64) -> GicV2<'static> {
 unsafe fn init_gicv3(gicd_virt: u64, gicr_virt: u64) -> GicV3<'static> {
     use arm_gic::gicv3::registers::{Gicd, GicrSgi};
 
-    let gicd_ptr = NonNull::new(gicd_virt as *mut Gicd)
-        .expect("GIC distributor address is null");
-    let gicr_ptr = NonNull::new(gicr_virt as *mut GicrSgi)
-        .expect("GIC redistributor address is null");
+    let gicd_ptr = NonNull::new(gicd_virt as *mut Gicd).expect("GIC distributor address is null");
+    let gicr_ptr =
+        NonNull::new(gicr_virt as *mut GicrSgi).expect("GIC redistributor address is null");
 
     // SAFETY: Pointers are to kernel-mapped device memory.
     // Caller guarantees exclusive access and valid mapping.

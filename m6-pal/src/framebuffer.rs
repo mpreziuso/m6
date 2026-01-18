@@ -4,10 +4,10 @@
 //! graphics primitives to the GOP framebuffer.
 
 use embedded_graphics::{
+    Pixel,
     draw_target::DrawTarget,
     geometry::{OriginDimensions, Size},
     pixelcolor::Rgb888,
-    Pixel,
 };
 
 /// Framebuffer configuration from BootInfo

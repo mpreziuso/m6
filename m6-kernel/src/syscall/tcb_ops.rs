@@ -10,8 +10,8 @@
 //! - TcbBindNotification: Bind a notification to a TCB
 
 use m6_arch::exceptions::ExceptionContext;
-use m6_cap::{CapRights, ObjectType};
 use m6_cap::objects::ThreadState;
+use m6_cap::{CapRights, ObjectType};
 use m6_common::{PhysAddr, VirtAddr};
 
 use crate::cap::object_table;
@@ -97,8 +97,7 @@ pub fn handle_tcb_configure(args: &SyscallArgs) -> SyscallResult {
     // Extract IPC buffer physical address BEFORE taking the TCB lock
     // (to avoid deadlock with nested object table locks)
     let ipc_buffer_phys = if let Some(ref buf_ref) = ipc_buffer_ref {
-        object_table::with_frame_mut(*buf_ref, |frame| frame.phys_addr)
-            .unwrap_or(PhysAddr::new(0))
+        object_table::with_frame_mut(*buf_ref, |frame| frame.phys_addr).unwrap_or(PhysAddr::new(0))
     } else {
         PhysAddr::new(0)
     };

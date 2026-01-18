@@ -10,11 +10,11 @@ use m6_cap::ObjectRef;
 use m6_cap::objects::ThreadState;
 use m6_pal::timer;
 
-use super::{PerCpuSched, VT_FIXED_SHIFT, VCLOCK_EPSILON};
 use super::run_queue::{with_tcb, with_tcb_mut};
+use super::{PerCpuSched, VCLOCK_EPSILON, VT_FIXED_SHIFT};
 use crate::cap::object_table::{self, KernelObjectType};
 use crate::cap::tcb_storage::TcbFull;
-use crate::task::{priority_to_weight, DEFAULT_TIME_SLICE_MS};
+use crate::task::{DEFAULT_TIME_SLICE_MS, priority_to_weight};
 
 // -- Virtual Clock Management
 
@@ -75,7 +75,8 @@ pub fn has_budget(tcb: &TcbFull) -> bool {
         } else {
             true
         }
-    }).unwrap_or(true)
+    })
+    .unwrap_or(true)
 }
 
 /// Check if a task's state allows it to be scheduled.
@@ -94,8 +95,12 @@ pub fn add_to_run_queue(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
     advance_vclock(sched);
 
     let (weight, is_idle) = with_tcb(tcb_ref, |tcb| {
-        (priority_to_weight(tcb.tcb.priority as i8), tcb.tcb.priority == 0 && tcb_ref == sched.idle_thread)
-    }).unwrap_or((1, false));
+        (
+            priority_to_weight(tcb.tcb.priority as i8),
+            tcb.tcb.priority == 0 && tcb_ref == sched.idle_thread,
+        )
+    })
+    .unwrap_or((1, false));
 
     // Set initial eligibility to now
     with_tcb_mut(tcb_ref, |tcb| {
@@ -125,8 +130,12 @@ pub fn add_to_run_queue(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
 /// Remove a task from the run queue.
 pub fn remove_from_run_queue(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
     let (weight, is_idle) = with_tcb(tcb_ref, |tcb| {
-        (priority_to_weight(tcb.tcb.priority as i8), tcb_ref == sched.idle_thread)
-    }).unwrap_or((1, false));
+        (
+            priority_to_weight(tcb.tcb.priority as i8),
+            tcb_ref == sched.idle_thread,
+        )
+    })
+    .unwrap_or((1, false));
 
     // Remove from run queue
     sched.run_queue.remove(tcb_ref);
@@ -153,7 +162,8 @@ pub fn find_next_runnable(sched: &PerCpuSched) -> Option<ObjectRef> {
             let e = is_eligible(tcb, vclock);
             let b = has_budget(tcb);
             r && e && b
-        }).unwrap_or(false);
+        })
+        .unwrap_or(false);
 
         if is_candidate {
             return Some(current);
@@ -240,9 +250,7 @@ pub fn yield_task(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
     sched.run_queue_mut().remove(tcb_ref);
 
     // Update weight tracking (temporarily decrement)
-    let weight = with_tcb(tcb_ref, |tcb| {
-        priority_to_weight(tcb.tcb.priority as i8)
-    }).unwrap_or(1);
+    let weight = with_tcb(tcb_ref, |tcb| priority_to_weight(tcb.tcb.priority as i8)).unwrap_or(1);
     sched.total_weight = sched.total_weight.saturating_sub(weight as u64);
 
     // Update EEVDF times
@@ -270,7 +278,8 @@ pub fn yield_task(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
         let v_delta = (q_ns << VT_FIXED_SHIFT) / w;
         tcb.v_deadline = sched.vclock.saturating_add(v_delta);
         tcb.v_deadline
-    }).unwrap_or(0);
+    })
+    .unwrap_or(0);
 
     // Re-insert with new deadline (this will place it in correct position)
     sched.run_queue_mut().insert(tcb_ref, new_deadline);

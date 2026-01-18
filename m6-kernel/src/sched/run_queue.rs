@@ -73,7 +73,8 @@ impl RunQueue {
             } else {
                 false
             }
-        }).unwrap_or(false);
+        })
+        .unwrap_or(false);
 
         if already_in_queue {
             return;
@@ -92,7 +93,8 @@ impl RunQueue {
                 } else {
                     None
                 }
-            }).flatten();
+            })
+            .flatten();
 
             match current_deadline {
                 Some(current_vd) if current_vd <= v_deadline => {
@@ -105,7 +107,8 @@ impl RunQueue {
                         } else {
                             ObjectRef::NULL
                         }
-                    }).unwrap_or(ObjectRef::NULL);
+                    })
+                    .unwrap_or(ObjectRef::NULL);
                 }
                 _ => break,
             }
@@ -198,7 +201,8 @@ impl RunQueue {
             } else {
                 ObjectRef::NULL
             }
-        }).unwrap_or(ObjectRef::NULL);
+        })
+        .unwrap_or(ObjectRef::NULL);
 
         // Update new task's links
         object_table::with_object_mut(tcb_ref, |obj| {
@@ -253,7 +257,9 @@ impl RunQueue {
             } else {
                 None
             }
-        }).flatten().unwrap_or((ObjectRef::NULL, ObjectRef::NULL));
+        })
+        .flatten()
+        .unwrap_or((ObjectRef::NULL, ObjectRef::NULL));
 
         // Check if task was in queue
         let was_in_queue = object_table::with_object(tcb_ref, |obj| {
@@ -264,7 +270,8 @@ impl RunQueue {
             } else {
                 false
             }
-        }).unwrap_or(false);
+        })
+        .unwrap_or(false);
 
         if !was_in_queue {
             return;
@@ -336,14 +343,16 @@ impl RunQueue {
                             } else {
                                 ObjectRef::NULL
                             }
-                        }).unwrap_or(ObjectRef::NULL);
+                        })
+                        .unwrap_or(ObjectRef::NULL);
                     }
                 }
                 false
             } else {
                 false
             }
-        }).unwrap_or(false)
+        })
+        .unwrap_or(false)
     }
 
     /// Get the first (earliest deadline) task without removing it.
@@ -386,7 +395,8 @@ where
         } else {
             None
         }
-    }).flatten()
+    })
+    .flatten()
 }
 
 /// Helper function to mutably access a TCB from the object table.
@@ -401,5 +411,6 @@ where
         } else {
             None
         }
-    }).flatten()
+    })
+    .flatten()
 }

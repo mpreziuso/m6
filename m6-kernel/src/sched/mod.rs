@@ -26,6 +26,7 @@ use crate::cap::tcb_storage::TcbFull;
 use crate::task::TaskId;
 
 pub mod balance;
+mod context;
 pub mod dispatch;
 pub mod eevdf;
 pub mod idle;
@@ -33,9 +34,8 @@ pub mod migrate;
 pub mod run_queue;
 pub mod sleep;
 pub mod timer_queue;
-mod context;
 
-pub use context::{timer_context_switch, enter_userspace};
+pub use context::{enter_userspace, timer_context_switch};
 pub use dispatch::dispatch_task;
 pub use run_queue::RunQueue;
 
@@ -185,9 +185,7 @@ static SCHED_STATE: Once<[IrqSpinMutex<PerCpuSched>; MAX_CPUS]> = Once::new();
 
 /// Get the per-CPU scheduler state array, initialising if necessary.
 pub fn get_sched_state() -> &'static [IrqSpinMutex<PerCpuSched>; MAX_CPUS] {
-    SCHED_STATE.call_once(|| {
-        core::array::from_fn(|i| IrqSpinMutex::new(PerCpuSched::new(i)))
-    })
+    SCHED_STATE.call_once(|| core::array::from_fn(|i| IrqSpinMutex::new(PerCpuSched::new(i))))
 }
 
 /// Get the current CPU ID.
@@ -332,7 +330,8 @@ pub fn schedule() {
     let mut sched = sched_state[cpu_id].lock();
 
     // Get previous task's VSpace for comparison
-    let prev_vspace = sched.current_thread
+    let prev_vspace = sched
+        .current_thread
         .and_then(|tcb_ref| run_queue::with_tcb(tcb_ref, |tcb| tcb.tcb.vspace));
 
     // Mark current task as runnable (if it was running)
@@ -351,8 +350,12 @@ pub fn schedule() {
     let next_option = eevdf::find_next_runnable(&sched);
     let next = next_option.unwrap_or(sched.idle_thread);
 
-    log::trace!("schedule: next={:?} (from {:?}), run_queue len={}",
-        next, sched.current_thread, sched.run_queue.len());
+    log::trace!(
+        "schedule: next={:?} (from {:?}), run_queue len={}",
+        next,
+        sched.current_thread,
+        sched.run_queue.len()
+    );
 
     if !next.is_valid() {
         log::error!("No runnable task and no idle task!");

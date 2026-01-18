@@ -6,11 +6,11 @@
 //! - IrqClearHandler: Unbind an IRQ from its notification
 //! - IrqControlGet: Claim an IRQ from IRQControl and create IRQHandler
 
-use m6_cap::{Badge, CapRights, CapSlot, ObjectType, SlotFlags};
 use m6_cap::objects::{IrqHandlerObject, IrqState, MAX_IRQ};
+use m6_cap::{Badge, CapRights, CapSlot, ObjectType, SlotFlags};
 
-use crate::cap::{cspace, object_table};
 use crate::cap::object_table::KernelObjectType;
+use crate::cap::{cspace, object_table};
 use crate::ipc;
 
 use super::SyscallArgs;
@@ -80,7 +80,11 @@ pub fn handle_irq_set_handler(args: &SyscallArgs) -> SyscallResult {
     let handler_cap = ipc::lookup_cap(irq_handler_cptr, ObjectType::IRQHandler, CapRights::WRITE)?;
 
     // Look up notification capability with WRITE right
-    let notif_cap = ipc::lookup_cap(notification_cptr, ObjectType::Notification, CapRights::WRITE)?;
+    let notif_cap = ipc::lookup_cap(
+        notification_cptr,
+        ObjectType::Notification,
+        CapRights::WRITE,
+    )?;
 
     // Bind the handler to the notification
     let result = object_table::with_irq_handler_mut(handler_cap.obj_ref, |handler| {
@@ -171,7 +175,10 @@ pub fn handle_irq_control_get(args: &SyscallArgs) -> SyscallResult {
 
     log::trace!(
         "irq_control_get: control={:#x} irq={} dest_cnode={:#x} dest_index={}",
-        irq_control_cptr, irq, dest_cnode_cptr, dest_index
+        irq_control_cptr,
+        irq,
+        dest_cnode_cptr,
+        dest_index
     );
 
     // Validate IRQ number
@@ -192,31 +199,38 @@ pub fn handle_irq_control_get(args: &SyscallArgs) -> SyscallResult {
 
     log::trace!(
         "irq_control_get: dest resolved to cnode={:?} slot={}",
-        dest_loc.cnode_ref, dest_loc.slot_index
+        dest_loc.cnode_ref,
+        dest_loc.slot_index
     );
 
     // Check destination slot is empty
     let slot_empty = cspace::with_slot(&dest_loc, |slot| Ok(slot.is_empty()))?;
     if !slot_empty {
-        log::warn!("irq_control_get: destination slot {} is occupied", dest_index);
+        log::warn!(
+            "irq_control_get: destination slot {} is occupied",
+            dest_index
+        );
         return Err(SyscallError::SlotOccupied);
     }
 
-    log::trace!("irq_control_get: dest slot {} is empty, claiming IRQ {}", dest_index, irq);
+    log::trace!(
+        "irq_control_get: dest slot {} is empty, claiming IRQ {}",
+        dest_index,
+        irq
+    );
 
     // Try to claim the IRQ from IRQControl
-    let claimed = object_table::with_irq_control_mut(control_cap.obj_ref, |control| {
-        control.claim(irq)
-    });
+    let claimed =
+        object_table::with_irq_control_mut(control_cap.obj_ref, |control| control.claim(irq));
 
     if claimed.is_none() {
         // Debug why with_irq_control_mut failed
-        let obj_info = object_table::with_object(control_cap.obj_ref, |obj| {
-            (obj.obj_type, obj.is_free())
-        });
+        let obj_info =
+            object_table::with_object(control_cap.obj_ref, |obj| (obj.obj_type, obj.is_free()));
         log::warn!(
             "irq_control_get: with_irq_control_mut returned None for obj_ref={:?}, obj_info={:?}",
-            control_cap.obj_ref, obj_info
+            control_cap.obj_ref,
+            obj_info
         );
         return Err(SyscallError::InvalidCap);
     }
@@ -228,14 +242,13 @@ pub fn handle_irq_control_get(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Allocate IRQHandler object
-    let handler_ref = object_table::alloc(KernelObjectType::IrqHandler)
-        .ok_or_else(|| {
-            // Release the IRQ if allocation fails
-            let _ = object_table::with_irq_control_mut(control_cap.obj_ref, |control| {
-                control.release(irq);
-            });
-            SyscallError::NoMemory
-        })?;
+    let handler_ref = object_table::alloc(KernelObjectType::IrqHandler).ok_or_else(|| {
+        // Release the IRQ if allocation fails
+        let _ = object_table::with_irq_control_mut(control_cap.obj_ref, |control| {
+            control.release(irq);
+        });
+        SyscallError::NoMemory
+    })?;
 
     // Initialise the IRQHandler object
     object_table::with_table(|table| {
@@ -269,6 +282,10 @@ pub fn handle_irq_control_get(args: &SyscallArgs) -> SyscallResult {
     // Increment reference count
     object_table::with_table(|table| table.inc_ref(handler_ref));
 
-    log::trace!("irq_control_get: created IRQHandler for IRQ {} at slot {}", irq, dest_index);
+    log::trace!(
+        "irq_control_get: created IRQHandler for IRQ {} at slot {}",
+        irq,
+        dest_index
+    );
     Ok(0)
 }

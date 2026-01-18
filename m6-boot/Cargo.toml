@@ -15,3 +15,4 @@ log = { workspace = true }
 uefi = { version = "0.36", features = ["alloc", "logger", "global_allocator"] }
 uefi-raw = "0.10"
 elf_rs = { version = "0.3", default-features = false }
+fdt = "0.1"

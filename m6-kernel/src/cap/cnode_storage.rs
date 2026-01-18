@@ -11,8 +11,8 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 use m6_cap::{
-    CapSlot, CNodeGuard, CNodeMeta, CNodeOps, CNodeRadix, CapError, CapResult,
-    MAX_CNODE_RADIX, MIN_CNODE_RADIX,
+    CNodeGuard, CNodeMeta, CNodeOps, CNodeRadix, CapError, CapResult, CapSlot, MAX_CNODE_RADIX,
+    MIN_CNODE_RADIX,
 };
 
 /// CNode kernel storage.

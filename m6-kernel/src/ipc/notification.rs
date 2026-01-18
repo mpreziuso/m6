@@ -5,8 +5,8 @@
 //! - Wait: Block until signalled, return accumulated word
 //! - Poll: Non-blocking check of signal word
 
-use m6_cap::objects::ThreadState;
 use m6_cap::ObjectRef;
+use m6_cap::objects::ThreadState;
 
 use crate::cap::object_table;
 use crate::syscall::error::SyscallError;
@@ -70,10 +70,7 @@ pub fn do_signal(notif_ref: ObjectRef, badge: u64) -> Result<(), SyscallError> {
 /// * `Ok(Some(word))` - Signals received immediately
 /// * `Ok(None)` - Thread blocked, will be woken when signalled
 /// * `Err(InvalidCap)` - Invalid notification reference
-pub fn do_wait(
-    waiter_ref: ObjectRef,
-    notif_ref: ObjectRef,
-) -> Result<Option<u64>, SyscallError> {
+pub fn do_wait(waiter_ref: ObjectRef, notif_ref: ObjectRef) -> Result<Option<u64>, SyscallError> {
     object_table::with_notification_mut(notif_ref, |notif| {
         if notif.has_signals() {
             // Signals pending - return immediately

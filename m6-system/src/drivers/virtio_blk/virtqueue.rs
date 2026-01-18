@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use core::sync::atomic::{fence, Ordering};
+use core::sync::atomic::{Ordering, fence};
 
 /// Descriptor flags
 pub mod desc_flags {
@@ -105,7 +105,12 @@ impl Virtqueue {
         let avail_aligned = (avail_size + Self::ALIGN - 1) & !(Self::ALIGN - 1);
         let used_aligned = (used_size + Self::ALIGN - 1) & !(Self::ALIGN - 1);
 
-        (desc_aligned, avail_aligned, used_aligned, desc_aligned + avail_aligned + used_aligned)
+        (
+            desc_aligned,
+            avail_aligned,
+            used_aligned,
+            desc_aligned + avail_aligned + used_aligned,
+        )
     }
 
     /// Create a new virtqueue.
@@ -148,7 +153,11 @@ impl Virtqueue {
     pub fn addresses(&self) -> (u64, u64, u64) {
         let base = self.desc as u64;
         let (desc_size, avail_size, _used_size, _total) = Self::memory_layout(self.queue_size);
-        (base, base + desc_size as u64, base + desc_size as u64 + avail_size as u64)
+        (
+            base,
+            base + desc_size as u64,
+            base + desc_size as u64 + avail_size as u64,
+        )
     }
 
     /// Get queue size.

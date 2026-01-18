@@ -88,7 +88,8 @@ impl PlatformInfo {
         let _ = DTB_PLATFORM_STORAGE.set(dtb_platform);
 
         // Get the stored reference
-        let platform_ref = DTB_PLATFORM_STORAGE.get()
+        let platform_ref = DTB_PLATFORM_STORAGE
+            .get()
             .expect("DTB platform should be initialised");
 
         Self {
@@ -114,8 +115,8 @@ pub fn init(boot_info: &'static BootInfo) {
     }
 
     // Parse DTB and create platform configuration
-    let dtb_platform = dtb::parse_dtb(boot_info)
-        .expect("Failed to parse DTB - cannot initialise platform");
+    let dtb_platform =
+        dtb::parse_dtb(boot_info).expect("Failed to parse DTB - cannot initialise platform");
 
     let info = PlatformInfo::from_dtb(dtb_platform);
     CURRENT_PLATFORM.set(info).ok();

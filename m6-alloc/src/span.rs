@@ -102,7 +102,13 @@ impl SpanMeta {
     }
 
     /// Initialise a span with the given parameters
-    pub fn init(&mut self, base_addr: usize, size_class: usize, page_count: usize, frame_cptr: u64) {
+    pub fn init(
+        &mut self,
+        base_addr: usize,
+        size_class: usize,
+        page_count: usize,
+        frame_cptr: u64,
+    ) {
         let class = &SIZE_CLASSES[size_class];
         let total_slots = (page_count * PAGE_SIZE) / class.size;
 

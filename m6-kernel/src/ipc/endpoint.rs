@@ -5,8 +5,8 @@
 //! - Call/ReplyRecv: RPC pattern with reply capabilities
 //! - NBSend/NBRecv: Non-blocking variants
 
-use m6_cap::objects::{EndpointState, ThreadState};
 use m6_cap::ObjectRef;
+use m6_cap::objects::{EndpointState, ThreadState};
 
 use crate::cap::object_table::{self, KernelObjectType};
 use crate::syscall::error::SyscallError;
@@ -91,7 +91,9 @@ pub fn do_send(
             }
 
             // Transfer capabilities if Grant right present
-            if let Err(e) = super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant) {
+            if let Err(e) =
+                super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant)
+            {
                 log::debug!("Capability transfer failed during send: {:?}", e);
             }
 
@@ -112,9 +114,8 @@ pub fn do_send(
             block_thread(sender_ref, ep_ref, ThreadState::BlockedOnSend);
 
             // Get current queue tail
-            let old_tail = object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                endpoint.queue_tail
-            }).ok_or(SyscallError::InvalidCap)?;
+            let old_tail = object_table::with_endpoint_mut(ep_ref, |endpoint| endpoint.queue_tail)
+                .ok_or(SyscallError::InvalidCap)?;
 
             // Set up sender's queue links
             let _: () = object_table::with_tcb_mut(sender_ref, |tcb| {
@@ -224,7 +225,9 @@ pub fn do_recv(
             }
 
             // Transfer capabilities if Grant right present
-            if let Err(e) = super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant) {
+            if let Err(e) =
+                super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant)
+            {
                 // If capability transfer fails, we still deliver the message
                 log::debug!("Capability transfer failed during recv: {:?}", e);
             }
@@ -233,15 +236,16 @@ pub fn do_recv(
             let (msg, badge) = get_pending_message(sender_ref);
 
             // Check if sender was a Call operation (has reply_slot set)
-            let sender_reply_slot: ObjectRef = object_table::with_tcb(sender_ref, |tcb| {
-                tcb.tcb.reply_slot
-            });
+            let sender_reply_slot: ObjectRef =
+                object_table::with_tcb(sender_ref, |tcb| tcb.tcb.reply_slot);
 
             if sender_reply_slot.is_valid() {
                 // This was a Call - transfer reply capability to receiver and keep sender blocked
                 log::trace!(
                     "do_recv: sender {:?} was Call, reply_slot={:?}, transferring to receiver {:?}",
-                    sender_ref, sender_reply_slot, receiver_ref
+                    sender_ref,
+                    sender_reply_slot,
+                    receiver_ref
                 );
 
                 // Grant reply capability to receiver
@@ -355,9 +359,7 @@ pub fn do_call(
                 }
                 Action::DeliverTo(receiver_ref)
             }
-            EndpointState::Idle | EndpointState::SendQueue => {
-                Action::BlockInSendQueue
-            }
+            EndpointState::Idle | EndpointState::SendQueue => Action::BlockInSendQueue,
         }
     })
     .ok_or(SyscallError::InvalidCap)?;
@@ -389,7 +391,9 @@ pub fn do_call(
             }
 
             // Transfer capabilities if Grant right present
-            if let Err(e) = super::cap_transfer::transfer_capabilities(caller_ref, receiver_ref, has_grant) {
+            if let Err(e) =
+                super::cap_transfer::transfer_capabilities(caller_ref, receiver_ref, has_grant)
+            {
                 log::debug!("Capability transfer failed during call: {:?}", e);
             }
 
@@ -418,9 +422,8 @@ pub fn do_call(
             block_thread(caller_ref, ep_ref, ThreadState::BlockedOnSend);
 
             // Get current queue tail
-            let old_tail = object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                endpoint.queue_tail
-            }).ok_or(SyscallError::InvalidCap)?;
+            let old_tail = object_table::with_endpoint_mut(ep_ref, |endpoint| endpoint.queue_tail)
+                .ok_or(SyscallError::InvalidCap)?;
 
             // Set up caller's queue links
             let _: () = object_table::with_tcb_mut(caller_ref, |tcb| {
@@ -478,7 +481,9 @@ pub fn do_reply_recv(
 
     log::trace!(
         "do_reply_recv: server={:?}, reply_ref={:?}, reply_msg[0]={:#x}",
-        server_ref, reply_ref, reply_msg.regs[0]
+        server_ref,
+        reply_ref,
+        reply_msg.regs[0]
     );
 
     if reply_ref.is_valid() {
@@ -505,7 +510,8 @@ fn do_reply_internal(
 ) -> Result<(), SyscallError> {
     log::trace!(
         "do_reply_internal: reply_ref={:?}, msg[0]={:#x}",
-        reply_ref, msg.regs[0]
+        reply_ref,
+        msg.regs[0]
     );
 
     let caller_ref = object_table::with_reply_mut(reply_ref, |reply| {
@@ -550,8 +556,7 @@ fn create_reply_object(caller_ref: ObjectRef) -> Result<ObjectRef, SyscallError>
     use core::mem::ManuallyDrop;
     use m6_cap::objects::ReplyObject;
 
-    let reply_ref =
-        object_table::alloc(KernelObjectType::Reply).ok_or(SyscallError::NoMemory)?;
+    let reply_ref = object_table::alloc(KernelObjectType::Reply).ok_or(SyscallError::NoMemory)?;
 
     object_table::with_object_mut(reply_ref, |obj| {
         obj.data.reply = ManuallyDrop::new(ReplyObject::new(caller_ref));
@@ -580,7 +585,8 @@ fn transfer_message(receiver_ref: ObjectRef, msg: &IpcMessage, badge: u64) {
     let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
         log::trace!(
             "transfer_message: before x0={:#x}, writing msg[0]={:#x}",
-            tcb.context.gpr[0], msg.regs[0]
+            tcb.context.gpr[0],
+            msg.regs[0]
         );
         // Write message to receiver's saved register context
         msg.to_context(&mut tcb.context);

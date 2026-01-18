@@ -101,9 +101,9 @@ mod tests {
     #[test]
     fn test_intermediate_sizes() {
         // Test sizes between classes
-        assert_eq!(find_size_class(9), Some(1));   // 9 -> 16
-        assert_eq!(find_size_class(17), Some(2));  // 17 -> 32
-        assert_eq!(find_size_class(33), Some(3));  // 33 -> 48
+        assert_eq!(find_size_class(9), Some(1)); // 9 -> 16
+        assert_eq!(find_size_class(17), Some(2)); // 17 -> 32
+        assert_eq!(find_size_class(33), Some(3)); // 33 -> 48
     }
 
     #[test]

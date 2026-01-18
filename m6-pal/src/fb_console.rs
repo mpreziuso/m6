@@ -10,12 +10,12 @@
 use core::fmt::{self, Write};
 
 use embedded_graphics::{
+    Drawable,
     draw_target::DrawTarget,
     geometry::Point,
-    mono_font::{ascii::FONT_8X13, MonoTextStyle, MonoTextStyleBuilder},
+    mono_font::{MonoTextStyle, MonoTextStyleBuilder, ascii::FONT_8X13},
     pixelcolor::Rgb888,
     text::Text,
-    Drawable,
 };
 use spin::mutex::SpinMutex;
 
@@ -140,8 +140,7 @@ impl FbConsoleInner {
                 let s = core::str::from_utf8(&char_buf).unwrap_or("?");
 
                 // Draw the character with background (clears the cell)
-                let _ = Text::new(s, Point::new(x as i32, y as i32), self.text_style)
-                    .draw(display);
+                let _ = Text::new(s, Point::new(x as i32, y as i32), self.text_style).draw(display);
 
                 self.cursor_col += 1;
                 if self.cursor_col >= self.cols {
@@ -196,7 +195,7 @@ impl FbConsoleInner {
 
         // Step 2: Clear all rows (cell + descender area)
         // Do this in one pass before drawing to avoid clear/draw overlap issues
-        let row_width_bytes = (cols as usize) * (CHAR_WIDTH as usize) * bytes_per_pixel;
+        let row_width_bytes = cols * (CHAR_WIDTH as usize) * bytes_per_pixel;
         for row in 0..rows {
             let text_y_start = PADDING_Y + (row as u32) * CHAR_HEIGHT;
             let text_y_end = text_y_start + CHAR_HEIGHT;
@@ -205,8 +204,8 @@ impl FbConsoleInner {
             // SAFETY: We're writing within framebuffer bounds
             unsafe {
                 for py in text_y_start..clear_y_end {
-                    let row_ptr =
-                        base.add((py as usize) * stride_bytes + (PADDING_X as usize) * bytes_per_pixel);
+                    let row_ptr = base
+                        .add((py as usize) * stride_bytes + (PADDING_X as usize) * bytes_per_pixel);
                     core::ptr::write_bytes(row_ptr, 0, row_width_bytes);
                 }
             }
@@ -228,8 +227,8 @@ impl FbConsoleInner {
                 let y = PADDING_Y + (row as u32) * CHAR_HEIGHT + CHAR_HEIGHT;
 
                 if let Ok(s) = core::str::from_utf8(&row_data[..last_char]) {
-                    let _ = Text::new(s, Point::new(x as i32, y as i32), self.text_style)
-                        .draw(display);
+                    let _ =
+                        Text::new(s, Point::new(x as i32, y as i32), self.text_style).draw(display);
                 }
             }
         }

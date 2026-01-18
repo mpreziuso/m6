@@ -19,19 +19,19 @@
 pub mod boot_info;
 pub mod cptr;
 pub mod error;
-pub mod ipc_buffer;
 #[cfg(feature = "userspace")]
 pub mod invoke;
+pub mod ipc_buffer;
 pub mod numbers;
 
 // Re-export commonly used items
 pub use boot_info::{
-    UserBootInfo, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION,
+    USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION, UserBootInfo,
 };
-pub use cptr::{slot_to_cptr, cptr_to_slot, CptrContext};
+pub use cptr::{CptrContext, cptr_to_slot, slot_to_cptr};
 pub use error::SyscallError;
-pub use ipc_buffer::{IpcBuffer, MintArgs, IPC_BUFFER_ADDR, IPC_BUFFER_SIZE};
-pub use m6_cap::root_slots;
-pub use numbers::Syscall;
 #[cfg(feature = "userspace")]
 pub use invoke::IpcRecvResult;
+pub use ipc_buffer::{IPC_BUFFER_ADDR, IPC_BUFFER_SIZE, IpcBuffer, MintArgs};
+pub use m6_cap::root_slots;
+pub use numbers::Syscall;

@@ -5,10 +5,10 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use uefi::CStr16;
 use uefi::boot::{self};
 use uefi::fs::FileSystem;
 use uefi::proto::media::fs::SimpleFileSystem;
-use uefi::CStr16;
 
 /// Reads a file from the EFI system partition.
 /// Returns None if the file is not found or invalid.

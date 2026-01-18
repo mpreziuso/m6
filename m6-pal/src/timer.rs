@@ -256,11 +256,7 @@ impl Instant {
 
     pub fn try_now() -> Option<Self> {
         let freq = TIMER_FREQ.load(Ordering::Relaxed);
-        if freq == 0 {
-            None
-        } else {
-            Some(Self::now())
-        }
+        if freq == 0 { None } else { Some(Self::now()) }
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -327,6 +323,7 @@ impl core::ops::Sub for Instant {
     type Output = Duration;
 
     fn sub(self, other: Instant) -> Self::Output {
-        self.checked_duration_since(other).unwrap_or(Duration::from_nanos(0))
+        self.checked_duration_since(other)
+            .unwrap_or(Duration::from_nanos(0))
     }
 }

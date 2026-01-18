@@ -19,8 +19,9 @@ use m6_syscall::IpcBuffer;
 /// kernel's direct map, since user virtual addresses aren't accessible
 /// from kernel mode.
 fn read_ipc_buffer(tcb_ref: ObjectRef) -> Result<&'static IpcBuffer, SyscallError> {
-    let ipc_buf_phys = object_table::with_tcb(tcb_ref, |tcb| Some(tcb.tcb.ipc_buffer_phys.as_u64()))
-        .ok_or(SyscallError::InvalidState)?;
+    let ipc_buf_phys =
+        object_table::with_tcb(tcb_ref, |tcb| Some(tcb.tcb.ipc_buffer_phys.as_u64()))
+            .ok_or(SyscallError::InvalidState)?;
 
     if ipc_buf_phys == 0 {
         return Err(SyscallError::InvalidState);
@@ -41,8 +42,9 @@ fn read_ipc_buffer(tcb_ref: ObjectRef) -> Result<&'static IpcBuffer, SyscallErro
 /// kernel's direct map, since user virtual addresses aren't accessible
 /// from kernel mode.
 fn write_ipc_buffer(tcb_ref: ObjectRef) -> Result<&'static mut IpcBuffer, SyscallError> {
-    let ipc_buf_phys = object_table::with_tcb(tcb_ref, |tcb| Some(tcb.tcb.ipc_buffer_phys.as_u64()))
-        .ok_or(SyscallError::InvalidState)?;
+    let ipc_buf_phys =
+        object_table::with_tcb(tcb_ref, |tcb| Some(tcb.tcb.ipc_buffer_phys.as_u64()))
+            .ok_or(SyscallError::InvalidState)?;
 
     if ipc_buf_phys == 0 {
         return Err(SyscallError::InvalidState);
@@ -169,10 +171,9 @@ pub fn transfer_capabilities(
         let dest_slot_index = find_empty_slot_in_cspace(receiver_cspace, hint)?;
 
         // Look up source CDT node (if capability is tracked in CDT)
-        let src_cdt_node = cdt_storage::lookup_cdt_node(
-            src_loc.cnode_ref,
-            src_loc.slot_index as u32,
-        ).unwrap_or(m6_cap::CdtNodeId::NULL);
+        let src_cdt_node =
+            cdt_storage::lookup_cdt_node(src_loc.cnode_ref, src_loc.slot_index as u32)
+                .unwrap_or(m6_cap::CdtNodeId::NULL);
 
         // Copy capability with CDT tracking using with_two_cnodes
         let new_cdt_node = cspace::with_two_cnodes(
@@ -190,19 +191,16 @@ pub fn transfer_capabilities(
                         cdt,
                         src_cdt_node,
                         receiver_cspace,
-                    ).map_err(|_| SyscallError::InvalidCap)?;
+                    )
+                    .map_err(|_| SyscallError::InvalidCap)?;
 
                     Ok(new_node)
                 })
-            }
+            },
         )?;
 
         // Register the new CDT node in the slot map
-        cdt_storage::register_cdt_node(
-            receiver_cspace,
-            dest_slot_index as u32,
-            new_cdt_node,
-        );
+        cdt_storage::register_cdt_node(receiver_cspace, dest_slot_index as u32, new_cdt_node);
 
         placed_slots[i] = dest_slot_index as u64;
         transferred += 1;
@@ -275,10 +273,8 @@ pub fn unwrap_capability(
     let dest_slot_index = find_empty_slot_in_cspace(receiver_cspace, hint)?;
 
     // Look up source CDT node (if capability is tracked in CDT)
-    let src_cdt_node = cdt_storage::lookup_cdt_node(
-        src_loc.cnode_ref,
-        src_loc.slot_index as u32,
-    ).unwrap_or(m6_cap::CdtNodeId::NULL);
+    let src_cdt_node = cdt_storage::lookup_cdt_node(src_loc.cnode_ref, src_loc.slot_index as u32)
+        .unwrap_or(m6_cap::CdtNodeId::NULL);
 
     // Move capability (no new CDT node created, just transfer ownership)
     cspace::with_two_cnodes(
@@ -286,14 +282,10 @@ pub fn unwrap_capability(
         receiver_cspace,
         |src_cnode, dst_cnode, _same_cnode| {
             // Use cap_move from m6_cap::ops
-            m6_cap::ops::cap_move(
-                src_cnode,
-                src_loc.slot_index,
-                dst_cnode,
-                dest_slot_index,
-            ).map_err(|_| SyscallError::InvalidCap)?;
+            m6_cap::ops::cap_move(src_cnode, src_loc.slot_index, dst_cnode, dest_slot_index)
+                .map_err(|_| SyscallError::InvalidCap)?;
             Ok(())
-        }
+        },
     )?;
 
     // Update CDT slot map: unregister from sender, register with receiver

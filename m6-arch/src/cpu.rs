@@ -91,7 +91,9 @@ pub fn enable_fp_simd() {
     // FPEN bits [21:20] = 0b11
     CPACR_EL1.modify(CPACR_EL1::FPEN::TrapNothing);
     // SAFETY: ISB is always safe
-    unsafe { asm!("isb", options(nostack)); }
+    unsafe {
+        asm!("isb", options(nostack));
+    }
 }
 
 /// Data memory barrier
@@ -345,7 +347,9 @@ pub mod el2 {
         // Both fields use raw values as aarch64-cpu doesn't define named variants
         ICC_SRE_EL2.write(ICC_SRE_EL2::SRE.val(1) + ICC_SRE_EL2::ENABLE.val(1));
         // SAFETY: ISB is always safe
-        unsafe { asm!("isb", options(nostack)); }
+        unsafe {
+            asm!("isb", options(nostack));
+        }
     }
 
     /// Set SPSR_EL2 for return to EL1h with interrupts masked
@@ -410,10 +414,7 @@ pub mod el2 {
         // SAFETY: Caller guarantees we're at EL2
         // Note: HSTR_EL2 is not yet available in aarch64-cpu crate
         unsafe {
-            asm!(
-                "msr hstr_el2, xzr",
-                options(nomem, nostack)
-            );
+            asm!("msr hstr_el2, xzr", options(nomem, nostack));
         }
     }
 

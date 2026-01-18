@@ -9,21 +9,26 @@
 extern crate alloc;
 
 mod mmu_jump;
-use mmu_jump::enable_mmu_and_jump;
 use m6_boot::config::{
     KERNEL_GIC_VIRT, KERNEL_UART_VIRT, KERNEL_VIRT_BASE, MAX_CPUS, PAGE_TABLE_ALLOC_SIZE,
     PER_CPU_STACK_SIZE,
 };
+use m6_boot::dtb_devices::{self, RamRegionList};
 use m6_boot::gop::init_gop;
 use m6_boot::initrd_loader::load_initrd;
 use m6_boot::kernel_loader::load_kernel;
 use m6_boot::memory::{mark_region, translate_memory_map};
 use m6_boot::page_table::{
-    setup_initial_page_tables, tcr_value, BootPageAllocator, FramebufferMapping, MmioConfig, RamRegions,
+    BootPageAllocator, FramebufferMapping, MmioConfig, RamRegions, setup_initial_page_tables,
+    tcr_value,
 };
-use m6_common::boot::{BootInfo, FramebufferInfo, PerCpuStackInfo, BOOT_INFO_MAGIC, BOOT_INFO_VERSION};
-use m6_common::{PhysAddr, VirtAddr};
+use m6_common::boot::{
+    BOOT_INFO_MAGIC, BOOT_INFO_VERSION, BootInfo, DeviceRegion, FramebufferInfo,
+    MAX_DEVICE_REGIONS, PerCpuStackInfo,
+};
 use m6_common::memory::MemoryType as M6MemoryType;
+use m6_common::{PhysAddr, VirtAddr};
+use mmu_jump::enable_mmu_and_jump;
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::mem::memory_map::MemoryMap;
 use uefi::prelude::*;
@@ -41,7 +46,6 @@ const SMBIOS3_GUID: uefi::Guid = uefi::guid!("f2fd1544-9794-4a2c-992e-e5bbcf20e3
 #[allow(dead_code)]
 const SMBIOS_GUID: uefi::Guid = uefi::guid!("eb9d2d31-2d88-11d3-9a16-0090273fc14f");
 
-
 #[entry]
 fn efi_main() -> Status {
     // Initialise UEFI services
@@ -52,10 +56,7 @@ fn efi_main() -> Status {
 
     log::info!("M6 Bootloader starting at EL{}...", current_el);
     log::info!("UEFI Firmware Vendor: {}", system::firmware_vendor());
-    log::info!(
-        "UEFI Firmware Revision: {:#x}",
-        system::firmware_revision()
-    );
+    log::info!("UEFI Firmware Revision: {:#x}", system::firmware_revision());
 
     // Find device tree blob (DTB) from UEFI config table (needed early for CPU count)
     let dtb_address = find_dtb();
@@ -102,17 +103,14 @@ fn efi_main() -> Status {
 
     // Allocate memory for page tables
     let pt_pages = PAGE_TABLE_ALLOC_SIZE.div_ceil(4096);
-    let pt_phys = match boot::allocate_pages(
-        AllocateType::AnyPages,
-        MemoryType::LOADER_DATA,
-        pt_pages,
-    ) {
-        Ok(ptr) => ptr.as_ptr() as u64,
-        Err(e) => {
-            log::error!("Failed to allocate page tables: {:?}", e);
-            return Status::OUT_OF_RESOURCES;
-        }
-    };
+    let pt_phys =
+        match boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, pt_pages) {
+            Ok(ptr) => ptr.as_ptr() as u64,
+            Err(e) => {
+                log::error!("Failed to allocate page tables: {:?}", e);
+                return Status::OUT_OF_RESOURCES;
+            }
+        };
 
     log::info!(
         "Page tables allocated at {:#x} ({} pages)",
@@ -183,7 +181,11 @@ fn efi_main() -> Status {
     // DTB is typically small (<2MB), add it with some margin
     const DTB_REGION_SIZE: u64 = 2 * 1024 * 1024; // 2MB
     ram_regions.add(dtb_address, dtb_address + DTB_REGION_SIZE);
-    log::debug!("Added DTB region to physmap: {:#x} - {:#x}", dtb_address, dtb_address + DTB_REGION_SIZE);
+    log::debug!(
+        "Added DTB region to physmap: {:#x} - {:#x}",
+        dtb_address,
+        dtb_address + DTB_REGION_SIZE
+    );
 
     let max_phys_addr = ram_regions.max_addr();
     log::info!(
@@ -204,6 +206,26 @@ fn efi_main() -> Status {
             (r.end - r.start) / (1024 * 1024)
         );
     }
+
+    // Build RAM region list for device region overlap checking
+    let mut device_ram_regions = RamRegionList::new();
+    for i in 0..ram_regions.count {
+        let r = &ram_regions.regions[i];
+        device_ram_regions.add(r.start, r.end);
+    }
+
+    // Parse device regions from DTB
+    // SAFETY: DTB address comes from UEFI config table
+    let dtb_slice = unsafe { dtb_slice_from_phys(dtb_address) };
+    let device_regions = dtb_devices::parse_device_regions(dtb_slice, &device_ram_regions)
+        .unwrap_or_else(|| {
+            log::warn!("Failed to parse device regions from DTB, using empty list");
+            dtb_devices::DeviceRegionResult {
+                regions: [DeviceRegion::empty(); MAX_DEVICE_REGIONS],
+                count: 0,
+            }
+        });
+    log::info!("Parsed {} device regions from DTB", device_regions.count);
 
     // Calculate and allocate frame allocator bitmap
     // Each bit represents one 4KB frame
@@ -306,7 +328,12 @@ fn efi_main() -> Status {
     if let Some(ref rd) = initrd {
         // Round up to page-aligned size
         let aligned_size = ((rd.size as usize).div_ceil(4096) * 4096) as u64;
-        mark_region(&mut m6_mmap, rd.phys_base, aligned_size, M6MemoryType::InitRD);
+        mark_region(
+            &mut m6_mmap,
+            rd.phys_base,
+            aligned_size,
+            M6MemoryType::InitRD,
+        );
     }
 
     // Mark frame bitmap in memory map (so kernel doesn't reclaim it)
@@ -366,6 +393,10 @@ fn efi_main() -> Status {
         (*ptr).ttbr0_el1 = pt_result.tables.ttbr0;
         // TCR value with correct IPS for this CPU's physical address capability
         (*ptr).tcr_el1 = tcr_value();
+        // Device regions discovered from DTB
+        (*ptr).device_region_count = device_regions.count as u32;
+        (*ptr)._device_region_pad = 0;
+        (*ptr).device_regions = device_regions.regions;
     }
 
     // Clean all bootloader-written memory from cache to Point of Coherency.

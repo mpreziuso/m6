@@ -3,7 +3,7 @@
 //! Additional register definitions and helpers not covered by aarch64-cpu.
 
 use aarch64_cpu::registers::{
-    VBAR_EL1, SP_EL0, TPIDR_EL0, TPIDR_EL1, ESR_EL1, ELR_EL1, FAR_EL1, SPSR_EL1, TTBR1_EL1
+    ELR_EL1, ESR_EL1, FAR_EL1, SP_EL0, SPSR_EL1, TPIDR_EL0, TPIDR_EL1, TTBR1_EL1, VBAR_EL1,
 };
 use tock_registers::interfaces::{Readable, Writeable};
 

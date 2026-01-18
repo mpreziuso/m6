@@ -30,7 +30,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
     DriverManifest {
         compatible: "arm,smmu-v3",
         binary_name: "drv-smmu",
-        needs_irq: true,  // Event queue interrupt
+        needs_irq: true,    // Event queue interrupt
         needs_iommu: false, // SMMU doesn't use itself
         is_platform: true,
         virtio_device_id: 0,
@@ -65,7 +65,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "virtio,mmio",
         binary_name: "drv-virtio-blk",
         needs_irq: true,
-        needs_iommu: true,  // Block devices perform DMA
+        needs_iommu: true, // Block devices perform DMA
         is_platform: true,
         virtio_device_id: 2, // VirtIO block device
     },

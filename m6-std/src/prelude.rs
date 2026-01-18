@@ -6,17 +6,17 @@
 // Edition-agnostic prelude
 pub mod v1 {
     // Re-export from core
+    pub use core::clone::Clone;
     pub use core::cmp::{Eq, Ord, PartialEq, PartialOrd};
     pub use core::convert::{AsMut, AsRef, From, Into, TryFrom, TryInto};
     pub use core::default::Default;
+    pub use core::fmt::Debug;
     pub use core::iter::{DoubleEndedIterator, ExactSizeIterator, Extend, IntoIterator, Iterator};
     pub use core::marker::{Copy, Send, Sized, Sync, Unpin};
     pub use core::mem::drop;
     pub use core::ops::{Drop, Fn, FnMut, FnOnce};
     pub use core::option::Option::{self, None, Some};
     pub use core::result::Result::{self, Err, Ok};
-    pub use core::clone::Clone;
-    pub use core::fmt::Debug;
 
     // Re-export from alloc when enabled
     #[cfg(feature = "alloc")]
@@ -33,7 +33,7 @@ pub mod v1 {
     pub use crate::io::{Read, Write};
 
     // Re-export print macros
-    pub use crate::{print, println, eprint, eprintln};
+    pub use crate::{eprint, eprintln, print, println};
 }
 
 // Edition-specific preludes (all re-export v1 for now)

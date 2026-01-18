@@ -15,8 +15,8 @@
 //! 6. Userspace driver receives notification, processes interrupt
 //! 7. Driver calls IrqAck to unmask and re-enable
 
-use m6_cap::objects::IrqState;
 use m6_cap::ObjectRef;
+use m6_cap::objects::IrqState;
 
 use crate::cap::object_table::{self, KernelObjectType, MAX_OBJECTS};
 use crate::ipc::notification::do_signal;

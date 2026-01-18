@@ -145,8 +145,7 @@ pub fn find_file<'a>(archive: &'a [u8], target_name: &str) -> Option<&'a [u8]> {
 
         // SAFETY: TarHeader is repr(C), exactly 512 bytes, and all fields
         // are arrays of u8, so any bit pattern is valid.
-        let header: &TarHeader =
-            unsafe { &*(header_bytes.as_ptr() as *const TarHeader) };
+        let header: &TarHeader = unsafe { &*(header_bytes.as_ptr() as *const TarHeader) };
 
         // Verify USTAR magic (some archives may use old-style tar)
         if !is_ustar_header(header) {
@@ -170,18 +169,15 @@ pub fn find_file<'a>(archive: &'a [u8], target_name: &str) -> Option<&'a [u8]> {
 
         // Check if this is the file we're looking for
         if let Some(name) = name {
-            let is_regular = header.typeflag == typeflag::REGULAR
-                || header.typeflag == typeflag::REGULAR_ALT;
+            let is_regular =
+                header.typeflag == typeflag::REGULAR || header.typeflag == typeflag::REGULAR_ALT;
 
             if is_regular && name == target_name {
                 // Found it - return the data slice
                 if data_offset + size <= archive.len() {
                     return Some(&archive[data_offset..data_offset + size]);
                 } else {
-                    log::warn!(
-                        "File '{}' data extends beyond archive bounds",
-                        target_name
-                    );
+                    log::warn!("File '{}' data extends beyond archive bounds", target_name);
                     return None;
                 }
             }
@@ -207,8 +203,7 @@ pub fn list_files(archive: &[u8]) {
         }
 
         // SAFETY: Same as in find_file
-        let header: &TarHeader =
-            unsafe { &*(header_bytes.as_ptr() as *const TarHeader) };
+        let header: &TarHeader = unsafe { &*(header_bytes.as_ptr() as *const TarHeader) };
 
         if !is_ustar_header(header) && header.name[0] == 0 {
             break;

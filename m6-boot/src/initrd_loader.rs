@@ -40,17 +40,14 @@ pub fn load_initrd() -> Option<LoadedInitRD> {
 
     // Allocate physical memory for the initrd
     let num_pages = initrd_data.len().div_ceil(4096);
-    let initrd_phys = match boot::allocate_pages(
-        AllocateType::AnyPages,
-        MemoryType::LOADER_DATA,
-        num_pages,
-    ) {
-        Ok(ptr) => ptr,
-        Err(e) => {
-            log::error!("Failed to allocate memory for initrd: {:?}", e);
-            return None;
-        }
-    };
+    let initrd_phys =
+        match boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, num_pages) {
+            Ok(ptr) => ptr,
+            Err(e) => {
+                log::error!("Failed to allocate memory for initrd: {:?}", e);
+                return None;
+            }
+        };
 
     log::info!(
         "Allocated {} pages for initrd at physical {:#x}",

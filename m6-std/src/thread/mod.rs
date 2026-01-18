@@ -335,8 +335,13 @@ where
     // - PC = thread_entry trampoline
     // - SP = stack_top
     // - x0 = wrapper_ptr (closure pointer)
-    tcb_write_registers(tcb_cptr, thread_entry as *const () as u64, stack_top as u64, wrapper_ptr)
-        .map_err(|_| ThreadError::ConfigurationFailed)?;
+    tcb_write_registers(
+        tcb_cptr,
+        thread_entry as *const () as u64,
+        stack_top as u64,
+        wrapper_ptr,
+    )
+    .map_err(|_| ThreadError::ConfigurationFailed)?;
 
     // Resume the thread
     tcb_resume(tcb_cptr).map_err(|_| ThreadError::StartFailed)?;

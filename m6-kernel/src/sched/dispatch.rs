@@ -18,10 +18,10 @@ use core::task::{Context, Poll};
 
 use m6_cap::ObjectRef;
 
-use super::{current_task, schedule, remove_task};
 use super::run_queue::with_tcb_mut;
-use crate::task::{TaskId, UserCtx, KernelWork, SignalWork};
+use super::{current_task, remove_task, schedule};
 use crate::task::waker::create_waker;
+use crate::task::{KernelWork, SignalWork, TaskId, UserCtx};
 
 /// State machine for the dispatch loop.
 enum State {
@@ -69,9 +69,8 @@ pub fn dispatch_task(ctx: &mut UserCtx) {
                 };
 
                 // Check if this is the idle task (priority 0)
-                let is_idle = super::run_queue::with_tcb(tcb_ref, |tcb| {
-                    tcb.tcb.priority == 0
-                }).unwrap_or(false);
+                let is_idle = super::run_queue::with_tcb(tcb_ref, |tcb| tcb.tcb.priority == 0)
+                    .unwrap_or(false);
 
                 if is_idle {
                     // Idle task doesn't have async work
@@ -250,9 +249,8 @@ fn mark_finished(tcb_ref: ObjectRef) {
 fn is_finished(tcb_ref: ObjectRef) -> bool {
     use m6_cap::objects::ThreadState;
 
-    super::run_queue::with_tcb(tcb_ref, |tcb| {
-        tcb.tcb.state == ThreadState::Inactive
-    }).unwrap_or(false)
+    super::run_queue::with_tcb(tcb_ref, |tcb| tcb.tcb.state == ThreadState::Inactive)
+        .unwrap_or(false)
 }
 
 /// Restore user context from TCB to exception frame.

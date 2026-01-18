@@ -226,13 +226,7 @@ mod tests {
 
     #[test]
     fn test_fault_message_regs() {
-        let msg = FaultMessage::new(
-            FaultType::PageFault,
-            0x1000,
-            0x2000,
-            0x3000,
-            flags::WNR,
-        );
+        let msg = FaultMessage::new(FaultType::PageFault, 0x1000, 0x2000, 0x3000, flags::WNR);
         let regs = msg.to_regs();
         let msg2 = FaultMessage::from_regs(regs);
         assert_eq!(msg.fault_type, msg2.fault_type);

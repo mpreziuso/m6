@@ -5,10 +5,10 @@
 //! The parsed DTB is kept in static storage for later access by other modules
 //! (e.g., device manager service).
 
+use crate::dtb_platform::{DtbPlatform, GicVersion, PsciMethod, SmmuConfig, UartType};
 use fdt::Fdt;
 use m6_common::boot::{BootInfo, KERNEL_PHYS_MAP_BASE};
 use once_cell_no_std::OnceCell;
-use crate::dtb_platform::{DtbPlatform, GicVersion, PsciMethod, SmmuConfig, UartType};
 
 /// Maximum DTB size (2MB should accommodate most device trees)
 const DTB_MAX_SIZE: usize = 2 * 1024 * 1024;
@@ -52,9 +52,7 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
 
     // SAFETY: DTB virtual address is within kernel's direct physical map,
     // which is set up by the bootloader to map all physical memory.
-    let dtb_slice = unsafe {
-        core::slice::from_raw_parts(dtb_virt, DTB_MAX_SIZE)
-    };
+    let dtb_slice = unsafe { core::slice::from_raw_parts(dtb_virt, DTB_MAX_SIZE) };
 
     // Parse DTB with fdt crate
     let fdt = Fdt::new(dtb_slice).map_err(|_| DtbError::InvalidDtb)?;
@@ -151,9 +149,10 @@ fn parse_gic(fdt: &Fdt) -> Result<(u64, u64, u64, GicVersion), DtbError> {
             }
 
             // Check for GICv2
-            if compatible.all().any(|c| {
-                c.contains("cortex") && c.contains("gic") && !c.contains("gic-v3")
-            }) {
+            if compatible
+                .all()
+                .any(|c| c.contains("cortex") && c.contains("gic") && !c.contains("gic-v3"))
+            {
                 let mut reg = node.reg().ok_or(DtbError::MissingProperty("reg"))?;
                 let dist = reg.next().ok_or(DtbError::InvalidData)?;
                 let cpu = reg.next().ok_or(DtbError::InvalidData)?;
@@ -200,7 +199,7 @@ fn parse_uart(fdt: &Fdt) -> Result<(u64, UartType), DtbError> {
                 _ => continue,
             }
         } else {
-            continue
+            continue;
         };
         if let Some(uart) = find_uart_via_alias(fdt, alias) {
             return Ok(uart);
@@ -212,7 +211,8 @@ fn parse_uart(fdt: &Fdt) -> Result<(u64, UartType), DtbError> {
         if let Some(compatible) = node.compatible() {
             // Check for ARM PL011 UART
             if compatible.all().any(|c| c == "arm,pl011") {
-                let reg = node.reg()
+                let reg = node
+                    .reg()
                     .ok_or(DtbError::MissingProperty("reg"))?
                     .next()
                     .ok_or(DtbError::InvalidData)?;
@@ -223,7 +223,8 @@ fn parse_uart(fdt: &Fdt) -> Result<(u64, UartType), DtbError> {
             if compatible.all().any(|c| {
                 c == "snps,dw-apb-uart" || c.starts_with("rockchip,rk") && c.contains("uart")
             }) {
-                let reg = node.reg()
+                let reg = node
+                    .reg()
                     .ok_or(DtbError::MissingProperty("reg"))?
                     .next()
                     .ok_or(DtbError::InvalidData)?;
@@ -250,9 +251,10 @@ fn find_uart_via_alias(fdt: &Fdt, alias_name: &str) -> Option<(u64, UartType)> {
         return Some((addr, UartType::Pl011));
     }
 
-    if compatible.all().any(|c| {
-        c == "snps,dw-apb-uart" || c.starts_with("rockchip,rk") && c.contains("uart")
-    }) {
+    if compatible
+        .all()
+        .any(|c| c == "snps,dw-apb-uart" || c.starts_with("rockchip,rk") && c.contains("uart"))
+    {
         return Some((addr, UartType::Dw8250));
     }
 
@@ -268,7 +270,8 @@ fn parse_memory(fdt: &Fdt) -> (u64, u64) {
     for node in fdt.all_nodes() {
         // Check for memory node by name OR by device_type property
         let is_memory = node.name.starts_with("memory")
-            || node.property("device_type")
+            || node
+                .property("device_type")
                 .and_then(|p| p.as_str())
                 .is_some_and(|s| s == "memory");
 
@@ -293,8 +296,7 @@ fn parse_timer(fdt: &Fdt) -> Result<u32, DtbError> {
             // We typically want the virtual timer (index 2)
             if let Some(mut interrupts) = node.interrupts() {
                 // Skip to virtual timer interrupt (3rd entry, index 2)
-                let virt_irq = interrupts.nth(2)
-                    .ok_or(DtbError::InvalidData)? as u32;
+                let virt_irq = interrupts.nth(2).ok_or(DtbError::InvalidData)? as u32;
                 return Ok(virt_irq);
             }
         }
@@ -322,8 +324,7 @@ fn parse_platform_name(fdt: &Fdt) -> Result<&'static str, DtbError> {
 
         // Return reference to static storage
         if let (Some(stored), Some(len)) = (DTB_PLATFORM_NAME.get(), DTB_PLATFORM_NAME_LEN.get()) {
-            let s = core::str::from_utf8(&stored[..*len])
-                .unwrap_or("Unknown DTB Platform");
+            let s = core::str::from_utf8(&stored[..*len]).unwrap_or("Unknown DTB Platform");
             // SAFETY: This is pointing to static storage that lives for 'static
             return Ok(unsafe { core::mem::transmute::<&str, &str>(s) });
         }
@@ -342,9 +343,10 @@ fn parse_platform_name(fdt: &Fdt) -> Result<&'static str, DtbError> {
         let _ = DTB_COMPATIBLE_NAME_LEN.set(len);
 
         // Return reference to static storage
-        if let (Some(stored), Some(len)) = (DTB_COMPATIBLE_NAME.get(), DTB_COMPATIBLE_NAME_LEN.get()) {
-            let s = core::str::from_utf8(&stored[..*len])
-                .unwrap_or("Unknown DTB Platform");
+        if let (Some(stored), Some(len)) =
+            (DTB_COMPATIBLE_NAME.get(), DTB_COMPATIBLE_NAME_LEN.get())
+        {
+            let s = core::str::from_utf8(&stored[..*len]).unwrap_or("Unknown DTB Platform");
             // SAFETY: This is pointing to static storage that lives for 'static
             return Ok(unsafe { core::mem::transmute::<&str, &str>(s) });
         }

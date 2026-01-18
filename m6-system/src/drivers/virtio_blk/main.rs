@@ -29,9 +29,8 @@ mod virtqueue;
 mod io;
 
 use m6_syscall::invoke::{
-    dma_pool_alloc, ipc_get_recv_caps, ipc_set_recv_slots, iospace_map_frame,
-    iospace_unmap_frame, irq_set_handler, map_frame, recv, reply_recv,
-    sched_yield,
+    dma_pool_alloc, iospace_map_frame, iospace_unmap_frame, ipc_get_recv_caps, ipc_set_recv_slots,
+    irq_set_handler, map_frame, recv, reply_recv, sched_yield,
 };
 
 use blk::VirtioBlkDevice;

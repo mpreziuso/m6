@@ -8,9 +8,9 @@
 
 use core::mem::ManuallyDrop;
 
-use m6_cap::{Badge, CapRights, CapSlot, ObjectRef, ObjectType, SlotFlags};
-use m6_cap::objects::{FrameObject, PageTableLevel, UntypedObject, VSpaceObject};
 use m6_cap::objects::untyped::{object_alignment, object_size};
+use m6_cap::objects::{FrameObject, PageTableLevel, UntypedObject, VSpaceObject};
+use m6_cap::{Badge, CapRights, CapSlot, ObjectRef, ObjectType, SlotFlags};
 use m6_common::PhysAddr;
 use m6_paging::{
     address::{PA, TPA, VA},
@@ -24,8 +24,8 @@ use m6_paging::{
     permissions::{MemoryType, PtePermissions},
 };
 
-use crate::cap::{cspace, object_table};
 use crate::cap::object_table::KernelObjectType;
+use crate::cap::{cspace, object_table};
 use crate::ipc;
 
 use super::SyscallArgs;
@@ -44,9 +44,9 @@ fn rights_to_pte_perms(rights: u64) -> PtePermissions {
         read: true,
         write: rights & 2 != 0,
         execute: rights & 4 != 0,
-        user: true,          // Always user-accessible for syscall mappings
+        user: true, // Always user-accessible for syscall mappings
         cow: false,
-        global: false,       // User mappings are per-ASID
+        global: false, // User mappings are per-ASID
     }
 }
 
@@ -86,7 +86,12 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
 
     log::trace!(
         "Retype: untyped={} type={} size_bits={} dest_cnode={} dest_idx={} count={}",
-        untyped_cptr, target_type_raw, size_bits, dest_cnode_cptr, dest_index, count
+        untyped_cptr,
+        target_type_raw,
+        size_bits,
+        dest_cnode_cptr,
+        dest_index,
+        count
     );
 
     // Validate count
@@ -96,11 +101,10 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Parse target object type
-    let target_type = object_type_from_raw(target_type_raw as u8)
-        .ok_or_else(|| {
-            log::debug!("Retype: invalid target type {}", target_type_raw);
-            SyscallError::InvalidArg
-        })?;
+    let target_type = object_type_from_raw(target_type_raw as u8).ok_or_else(|| {
+        log::debug!("Retype: invalid target type {}", target_type_raw);
+        SyscallError::InvalidArg
+    })?;
 
     // Can't retype to Empty
     if target_type == ObjectType::Empty {
@@ -123,11 +127,10 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
     log::trace!("Retype: capabilities looked up successfully");
 
     // Get object size and alignment
-    let obj_size = object_size(target_type, size_bits)
-        .map_err(|e| {
-            log::debug!("Retype: invalid object size: {:?}", e);
-            SyscallError::InvalidArg
-        })?;
+    let obj_size = object_size(target_type, size_bits).map_err(|e| {
+        log::debug!("Retype: invalid object size: {:?}", e);
+        SyscallError::InvalidArg
+    })?;
     let obj_align = object_alignment(target_type, size_bits);
 
     // Map target type to kernel object type
@@ -143,9 +146,7 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
         // Check destination slot is empty
         let slot_loc = cspace::resolve_cnode_slot(dest_cnode_cptr, 0, slot_index)?;
 
-        let slot_empty = cspace::with_slot(&slot_loc, |slot| {
-            Ok(slot.is_empty())
-        })?;
+        let slot_empty = cspace::with_slot(&slot_loc, |slot| Ok(slot.is_empty()))?;
 
         if !slot_empty {
             if created == 0 {
@@ -156,16 +157,18 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
 
         // Allocate from untyped
         let phys_addr = object_table::with_untyped_mut(untyped_cap.obj_ref, |untyped| {
-            untyped.try_allocate(obj_size, obj_align)
+            untyped
+                .try_allocate(obj_size, obj_align)
                 .map_err(|_| SyscallError::NoMemory)
-        }).ok_or(SyscallError::InvalidCap)??;
+        })
+        .ok_or(SyscallError::InvalidCap)??;
 
         // Allocate object table entry
-        let obj_ref = object_table::alloc(kernel_type)
-            .ok_or(SyscallError::NoMemory)?;
+        let obj_ref = object_table::alloc(kernel_type).ok_or(SyscallError::NoMemory)?;
 
         // Initialise object-specific data
-        let init_result = init_kernel_object(obj_ref, kernel_type, phys_addr, size_bits, target_type);
+        let init_result =
+            init_kernel_object(obj_ref, kernel_type, phys_addr, size_bits, target_type);
         if let Err(e) = init_result {
             // Free the allocated object table entry
             // SAFETY: We just allocated this and haven't stored any pointers yet.
@@ -241,8 +244,8 @@ pub fn handle_map_frame(args: &SyscallArgs) -> SyscallResult {
     };
 
     // Look up frame capability - accept both Frame and DeviceFrame
-    let frame_cap = ipc::lookup_cap(frame_cptr, ObjectType::Frame, required_rights)
-        .or_else(|e| {
+    let frame_cap =
+        ipc::lookup_cap(frame_cptr, ObjectType::Frame, required_rights).or_else(|e| {
             if matches!(e, SyscallError::TypeMismatch) {
                 ipc::lookup_cap(frame_cptr, ObjectType::DeviceFrame, required_rights)
             } else {
@@ -251,10 +254,11 @@ pub fn handle_map_frame(args: &SyscallArgs) -> SyscallResult {
         })?;
 
     // Get frame info
-    let (frame_phys, frame_size_bits, is_device) = object_table::with_frame_mut(
-        frame_cap.obj_ref,
-        |frame| (frame.phys_addr, frame.size_bits, frame.is_device),
-    ).ok_or(SyscallError::InvalidCap)?;
+    let (frame_phys, frame_size_bits, is_device) =
+        object_table::with_frame_mut(frame_cap.obj_ref, |frame| {
+            (frame.phys_addr, frame.size_bits, frame.is_device)
+        })
+        .ok_or(SyscallError::InvalidCap)?;
 
     let frame_size = 1usize << frame_size_bits;
 
@@ -270,9 +274,8 @@ pub fn handle_map_frame(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Get VSpace root table address
-    let root_table = object_table::with_vspace(vspace_cap.obj_ref, |vspace| {
-        vspace.root_table
-    }).ok_or(SyscallError::InvalidCap)?;
+    let root_table = object_table::with_vspace(vspace_cap.obj_ref, |vspace| vspace.root_table)
+        .ok_or(SyscallError::InvalidCap)?;
 
     // Walk page tables and install mapping
     // This is a simplified implementation - full implementation would need
@@ -332,10 +335,10 @@ pub fn handle_unmap_frame(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Get VSpace info
-    let (root_table, asid, is_active) = object_table::with_vspace(
-        vspace_cap.obj_ref,
-        |vspace| (vspace.root_table, vspace.asid, vspace.is_active),
-    ).ok_or(SyscallError::InvalidCap)?;
+    let (root_table, asid, is_active) = object_table::with_vspace(vspace_cap.obj_ref, |vspace| {
+        (vspace.root_table, vspace.asid, vspace.is_active)
+    })
+    .ok_or(SyscallError::InvalidCap)?;
 
     // Walk page tables and clear mapping
     clear_mapping(root_table, vaddr)?;
@@ -409,14 +412,12 @@ pub fn handle_map_page_table(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Get VSpace root table
-    let root_table = object_table::with_vspace(vspace_cap.obj_ref, |vspace| {
-        vspace.root_table
-    }).ok_or(SyscallError::InvalidCap)?;
+    let root_table = object_table::with_vspace(vspace_cap.obj_ref, |vspace| vspace.root_table)
+        .ok_or(SyscallError::InvalidCap)?;
 
     // Get page table physical address
-    let pt_phys = object_table::with_page_table(pt_cap.obj_ref, |pt| {
-        pt.phys_addr
-    }).ok_or(SyscallError::InvalidCap)?;
+    let pt_phys = object_table::with_page_table(pt_cap.obj_ref, |pt| pt.phys_addr)
+        .ok_or(SyscallError::InvalidCap)?;
 
     // Install the page table in the parent level
     install_page_table(root_table, vaddr, pt_phys, level)?;
@@ -437,8 +438,10 @@ fn object_type_to_kernel_type(obj_type: ObjectType) -> Result<KernelObjectType, 
         ObjectType::Untyped => Ok(KernelObjectType::Untyped),
         ObjectType::Frame => Ok(KernelObjectType::Frame),
         ObjectType::DeviceFrame => Ok(KernelObjectType::DeviceFrame),
-        ObjectType::PageTableL0 | ObjectType::PageTableL1 |
-        ObjectType::PageTableL2 | ObjectType::PageTableL3 => Ok(KernelObjectType::PageTable),
+        ObjectType::PageTableL0
+        | ObjectType::PageTableL1
+        | ObjectType::PageTableL2
+        | ObjectType::PageTableL3 => Ok(KernelObjectType::PageTable),
         ObjectType::VSpace => Ok(KernelObjectType::VSpace),
         ObjectType::ASIDPool => Ok(KernelObjectType::AsidPool),
         ObjectType::Endpoint => Ok(KernelObjectType::Endpoint),
@@ -481,16 +484,15 @@ fn init_kernel_object(
             // or they need special handling (TCB, CNode need heap allocation)
             KernelObjectType::Tcb => {
                 // TCB needs heap allocation
-                let tcb_ptr = crate::cap::tcb_storage::create_tcb()
-                    .map_err(|_| SyscallError::NoMemory)?;
+                let tcb_ptr =
+                    crate::cap::tcb_storage::create_tcb().map_err(|_| SyscallError::NoMemory)?;
                 obj.data.tcb_ptr = tcb_ptr;
             }
             KernelObjectType::CNode => {
                 // CNode needs heap allocation based on size_bits (radix)
-                let cnode_ptr = crate::cap::cnode_storage::create_cnode(
-                    size_bits,
-                    m6_cap::CNodeGuard::NONE,
-                ).map_err(|_| SyscallError::NoMemory)?;
+                let cnode_ptr =
+                    crate::cap::cnode_storage::create_cnode(size_bits, m6_cap::CNodeGuard::NONE)
+                        .map_err(|_| SyscallError::NoMemory)?;
                 obj.data.cnode_ptr = cnode_ptr;
             }
             KernelObjectType::PageTable => {
@@ -511,7 +513,8 @@ fn init_kernel_object(
             }
         }
         Ok(())
-    }).ok_or(SyscallError::InvalidCap)?
+    })
+    .ok_or(SyscallError::InvalidCap)?
 }
 
 /// Install a memory mapping in the page tables.
@@ -791,10 +794,10 @@ fn invalidate_tlb_entry(_vaddr: u64, _asid: u16) {
     // For now, use a full TLB invalidation
     unsafe {
         core::arch::asm!(
-            "dsb ishst",       // Ensure stores complete
-            "tlbi vmalle1is",  // Invalidate all EL1 TLB entries (inner shareable)
-            "dsb ish",         // Ensure TLB invalidation completes
-            "isb",             // Synchronisation barrier
+            "dsb ishst",      // Ensure stores complete
+            "tlbi vmalle1is", // Invalidate all EL1 TLB entries (inner shareable)
+            "dsb ish",        // Ensure TLB invalidation completes
+            "isb",            // Synchronisation barrier
             options(nostack, preserves_flags)
         );
     }
@@ -831,10 +834,10 @@ pub fn handle_frame_write(args: &SyscallArgs) -> SyscallResult {
     let frame_cap = ipc::lookup_cap(frame_cptr, ObjectType::Frame, CapRights::WRITE)?;
 
     // Get frame info
-    let (frame_phys, frame_size_bits) = object_table::with_frame_mut(
-        frame_cap.obj_ref,
-        |frame| (frame.phys_addr, frame.size_bits),
-    ).ok_or(SyscallError::InvalidCap)?;
+    let (frame_phys, frame_size_bits) = object_table::with_frame_mut(frame_cap.obj_ref, |frame| {
+        (frame.phys_addr, frame.size_bits)
+    })
+    .ok_or(SyscallError::InvalidCap)?;
 
     let frame_size = 1usize << frame_size_bits;
 

@@ -2,9 +2,11 @@
 //!
 //! Translates UEFI memory map to M6 BootInfo format.
 
-use m6_common::memory::{MemoryMap, MemoryRegion, MemoryType};
 use m6_common::boot::MAX_MEMORY_REGIONS;
-use uefi::mem::memory_map::{MemoryMap as UefiMemoryMap, MemoryMapOwned, MemoryType as UefiMemoryType};
+use m6_common::memory::{MemoryMap, MemoryRegion, MemoryType};
+use uefi::mem::memory_map::{
+    MemoryMap as UefiMemoryMap, MemoryMapOwned, MemoryType as UefiMemoryType,
+};
 
 /// Translate UEFI memory type to M6 memory type
 fn translate_memory_type(uefi_type: UefiMemoryType) -> MemoryType {
@@ -185,7 +187,12 @@ pub fn mark_region(map: &mut MemoryMap, base: u64, size: u64, new_type: MemoryTy
             _reserved: 0,
         };
         map.entry_count += 1;
-        log::debug!("Added memory region: base={:#x} size={:#x} type={:?}", base, size, new_type);
+        log::debug!(
+            "Added memory region: base={:#x} size={:#x} type={:?}",
+            base,
+            size,
+            new_type
+        );
     } else {
         log::warn!("Cannot add region: memory map full");
     }

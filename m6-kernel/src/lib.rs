@@ -25,7 +25,6 @@
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
-
 #![feature(alloc_error_handler)]
 
 pub mod cap;
@@ -35,8 +34,8 @@ pub mod irq;
 pub mod logging;
 pub mod memory;
 pub mod sched;
-pub mod smp;
 pub mod smmu;
+pub mod smp;
 pub mod syscall;
 pub mod task;
 pub mod user;

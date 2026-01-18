@@ -24,11 +24,11 @@ pub mod object_table;
 pub mod tcb_storage;
 
 // Re-export commonly used types
-pub use bootstrap::{bootstrap_root_task, RootTask};
+pub use bootstrap::{RootTask, bootstrap_root_task};
 pub use cdt_storage::CdtPool;
 pub use cnode_storage::CNodeStorage;
-pub use cspace::{resolve_cptr, resolve_cnode_slot, SlotLocation};
-pub use object_table::{KernelObject, KernelObjectType, ObjectTable, MAX_OBJECTS};
+pub use cspace::{SlotLocation, resolve_cnode_slot, resolve_cptr};
+pub use object_table::{KernelObject, KernelObjectType, MAX_OBJECTS, ObjectTable};
 pub use tcb_storage::TcbFull;
 
 /// Initialise the capability subsystem.

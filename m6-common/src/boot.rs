@@ -19,10 +19,73 @@ pub const MAX_CPUS: usize = 8;
 /// Version 5: Added ttbr0_el1 for secondary CPU MMU setup
 /// Version 6: Added framebuffer virt_base for GOP support
 /// Version 7: Added tcr_el1 with dynamic IPS for secondary CPU MMU setup
-pub const BOOT_INFO_VERSION: u32 = 7;
+/// Version 8: Added device_regions for DTB-based device discovery
+pub const BOOT_INFO_VERSION: u32 = 8;
 
 /// Maximum number of memory regions supported
 pub const MAX_MEMORY_REGIONS: usize = 64;
+
+/// Maximum number of device regions supported
+pub const MAX_DEVICE_REGIONS: usize = 32;
+
+/// Device type classification for MMIO regions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum DeviceType {
+    /// Unknown or unclassified device
+    #[default]
+    Unknown = 0,
+    /// UART serial port
+    Uart = 1,
+    /// Generic Interrupt Controller
+    Gic = 2,
+    /// Timer
+    Timer = 3,
+    /// System MMU (SMMU)
+    Smmu = 4,
+    /// PCIe controller
+    Pcie = 5,
+    /// USB controller
+    Usb = 6,
+    /// VirtIO MMIO device
+    VirtioMmio = 7,
+}
+
+/// Device memory region discovered from DTB
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub struct DeviceRegion {
+    /// Physical base address (page-aligned)
+    pub phys_base: PhysAddr,
+    /// Size in bytes (page-aligned)
+    pub size: u64,
+    /// Size as power of 2 (log2), minimum 12 for 4KB pages
+    pub size_bits: u8,
+    /// Device type classification
+    pub device_type: DeviceType,
+    /// Reserved for future use
+    pub _reserved: [u8; 6],
+}
+
+impl DeviceRegion {
+    /// Create an empty/uninitialised device region.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            phys_base: PhysAddr::new(0),
+            size: 0,
+            size_bits: 0,
+            device_type: DeviceType::Unknown,
+            _reserved: [0; 6],
+        }
+    }
+
+    /// Check if this device region is valid (non-zero address).
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.phys_base.as_u64() != 0 && self.size != 0
+    }
+}
 
 /// Virtual base address of kernel direct physical map in TTBR1
 /// All physical memory is mapped at KERNEL_PHYS_MAP_BASE + phys_addr
@@ -114,7 +177,11 @@ impl FramebufferInfo {
     /// Check if framebuffer information is valid (has both physical and virtual addresses).
     #[must_use]
     pub const fn is_valid(&self) -> bool {
-        self.base != 0 && self.virt_base != 0 && self.size != 0 && self.width != 0 && self.height != 0
+        self.base != 0
+            && self.virt_base != 0
+            && self.size != 0
+            && self.width != 0
+            && self.height != 0
     }
 
     /// Check if the framebuffer uses BGR pixel format (blue at position 0).
@@ -178,6 +245,12 @@ pub struct BootInfo {
     pub ttbr0_el1: u64,
     /// TCR_EL1 value for secondary CPU MMU setup (with correct IPS for this CPU)
     pub tcr_el1: u64,
+    /// Number of device regions discovered from DTB
+    pub device_region_count: u32,
+    /// Padding to maintain alignment
+    pub _device_region_pad: u32,
+    /// Device memory regions discovered from DTB
+    pub device_regions: [DeviceRegion; MAX_DEVICE_REGIONS],
 }
 
 impl BootInfo {
@@ -197,7 +270,13 @@ impl BootInfo {
     #[must_use]
     pub const fn cpu_count(&self) -> usize {
         let count = self.cpu_count as usize;
-        if count > MAX_CPUS { MAX_CPUS } else if count == 0 { 1 } else { count }
+        if count > MAX_CPUS {
+            MAX_CPUS
+        } else if count == 0 {
+            1
+        } else {
+            count
+        }
     }
 
     /// Get stack info for a specific CPU.
@@ -233,7 +312,7 @@ pub const TCR_VALUE: u64 = 16            // T0SZ = 16 (48-bit VA for TTBR0)
     | (0b01 << 10)                       // ORGN0 = WB-RWA
     | (0b01 << 26)                       // ORGN1 = WB-RWA
     | (0b01 << 8)                        // IRGN0 = WB-RWA
-    | (0b01 << 24);                      // IRGN1 = WB-RWA
+    | (0b01 << 24); // IRGN1 = WB-RWA
 
 // -- BootInfo field offsets for assembly code (secondary CPU entry)
 // These must be kept in sync with the struct layout above.
