@@ -195,12 +195,24 @@ fn init_dtb(registry: &mut Registry, boot_info: &DevMgrBootInfo) -> Result<usize
 ///
 /// This maps the VirtIO MMIO region once and probes each device by reading
 /// the DeviceID register at its offset within the region.
+///
+/// VirtIO MMIO is only present on QEMU virt; on real hardware (e.g. Rock 5B+)
+/// this function returns early.
 fn probe_virtio_devices(registry: &mut Registry) {
     use m6_syscall::invoke::{map_frame, map_page_table, unmap_frame, retype};
     use m6_cap::ObjectType;
 
     // SAFETY: _start has initialised BOOT_INFO
     let boot_info = unsafe { get_boot_info() };
+
+    // Check if any VirtIO devices were enumerated from DTB.
+    // If not, skip probing entirely - this is the case on real hardware.
+    let has_virtio_devices = (0..registry.device_count)
+        .any(|i| dtb::is_virtio_mmio(registry.devices[i].compatible_str()));
+    if !has_virtio_devices {
+        return;
+    }
+
     let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, boot_info.cnode_radix);
 
     // Virtual address for temporary MMIO mapping
@@ -214,7 +226,9 @@ fn probe_virtio_devices(registry: &mut Registry) {
     let (device_untyped, _untyped_size) = match boot_info.find_device_untyped(VIRTIO_MMIO_BASE) {
         Some((slot, size)) => (slot, size),
         None => {
-            io::puts("[device-mgr] No device untyped for VirtIO MMIO region\n");
+            // VirtIO devices in DTB but no device untyped - this shouldn't happen
+            // on a properly configured system, but handle gracefully.
+            io::puts("[device-mgr] WARN: VirtIO devices in DTB but no device untyped\n");
             return;
         }
     };
