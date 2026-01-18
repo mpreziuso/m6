@@ -283,15 +283,18 @@ pub fn map_ipc_buffer(l0_phys: PhysAddr) -> Result<(u64, PhysAddr), VSpaceSetupE
 
 /// Map the DTB into the user VSpace (read-only).
 ///
+/// Handles non-page-aligned physical addresses by mapping from the aligned
+/// base and returning the virtual address with the correct offset.
+///
 /// # Arguments
 ///
 /// * `l0_phys` - Physical address of the L0 page table
-/// * `dtb_phys` - Physical address of the DTB
+/// * `dtb_phys` - Physical address of the DTB (may not be page-aligned)
 /// * `dtb_size` - Size of the DTB in bytes
 ///
 /// # Returns
 ///
-/// The virtual address and size of the mapped DTB.
+/// The virtual address (including offset) and size of the mapped DTB.
 pub fn map_dtb(
     l0_phys: PhysAddr,
     dtb_phys: PhysAddr,
@@ -308,36 +311,51 @@ pub fn map_dtb(
     // Map as read-only for user
     let perms = PtePermissions::ro(true);
 
-    // Map all pages covering the DTB
-    let num_pages = dtb_size.div_ceil(0x1000) as usize;
+    // Handle non-page-aligned physical addresses
+    let page_offset = dtb_phys.0 & 0xFFF;
+    let aligned_phys = dtb_phys.0 & !0xFFF;
+
+    // Calculate how many pages we need to cover the entire DTB
+    // (accounting for the offset within the first page)
+    let total_bytes = page_offset + dtb_size;
+    let num_pages = total_bytes.div_ceil(0x1000) as usize;
+
     for i in 0..num_pages {
-        let phys = dtb_phys.0 + (i * 0x1000) as u64;
+        let phys = aligned_phys + (i * 0x1000) as u64;
         let virt = layout::DTB_MAP_ADDR + (i * 0x1000) as u64;
         map_user_page(&mut l0, &mut allocator, phys, virt, perms)?;
     }
 
+    // Return virtual address with offset so userspace can find the actual DTB
+    let dtb_vaddr = layout::DTB_MAP_ADDR + page_offset;
+
     log::debug!(
-        "Mapped DTB: phys={:#x} -> virt={:#x} ({} bytes, {} pages)",
+        "Mapped DTB: phys={:#x} (aligned={:#x}, offset={:#x}) -> virt={:#x} ({} bytes, {} pages)",
         dtb_phys.0,
-        layout::DTB_MAP_ADDR,
+        aligned_phys,
+        page_offset,
+        dtb_vaddr,
         dtb_size,
         num_pages
     );
 
-    Ok((layout::DTB_MAP_ADDR, dtb_size))
+    Ok((dtb_vaddr, dtb_size))
 }
 
 /// Map the initrd into the user VSpace (read-only).
 ///
+/// Handles non-page-aligned physical addresses by mapping from the aligned
+/// base and returning the virtual address with the correct offset.
+///
 /// # Arguments
 ///
 /// * `l0_phys` - Physical address of the L0 page table
-/// * `initrd_phys` - Physical address of the initrd
+/// * `initrd_phys` - Physical address of the initrd (may not be page-aligned)
 /// * `initrd_size` - Size of the initrd in bytes
 ///
 /// # Returns
 ///
-/// The virtual address and size of the mapped initrd.
+/// The virtual address (including offset) and size of the mapped initrd.
 pub fn map_initrd(
     l0_phys: PhysAddr,
     initrd_phys: PhysAddr,
@@ -354,23 +372,35 @@ pub fn map_initrd(
     // Map as read-only for user
     let perms = PtePermissions::ro(true);
 
-    // Map all pages covering the initrd
-    let num_pages = initrd_size.div_ceil(0x1000) as usize;
+    // Handle non-page-aligned physical addresses
+    let page_offset = initrd_phys.0 & 0xFFF;
+    let aligned_phys = initrd_phys.0 & !0xFFF;
+
+    // Calculate how many pages we need to cover the entire initrd
+    // (accounting for the offset within the first page)
+    let total_bytes = page_offset + initrd_size;
+    let num_pages = total_bytes.div_ceil(0x1000) as usize;
+
     for i in 0..num_pages {
-        let phys = initrd_phys.0 + (i * 0x1000) as u64;
+        let phys = aligned_phys + (i * 0x1000) as u64;
         let virt = layout::INITRD_MAP_ADDR + (i * 0x1000) as u64;
         map_user_page(&mut l0, &mut allocator, phys, virt, perms)?;
     }
 
+    // Return virtual address with offset so userspace can find the actual initrd
+    let initrd_vaddr = layout::INITRD_MAP_ADDR + page_offset;
+
     log::debug!(
-        "Mapped initrd: phys={:#x} -> virt={:#x} ({} bytes, {} pages)",
+        "Mapped initrd: phys={:#x} (aligned={:#x}, offset={:#x}) -> virt={:#x} ({} bytes, {} pages)",
         initrd_phys.0,
-        layout::INITRD_MAP_ADDR,
+        aligned_phys,
+        page_offset,
+        initrd_vaddr,
         initrd_size,
         num_pages
     );
 
-    Ok((layout::INITRD_MAP_ADDR, initrd_size))
+    Ok((initrd_vaddr, initrd_size))
 }
 
 /// Result of setting up the root VSpace.
