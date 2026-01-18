@@ -63,7 +63,9 @@ register_bitfields![u64,
             /// Normal memory (index 0 in MAIR)
             Normal = 0,
             /// Device memory (index 1 in MAIR)
-            Device = 1
+            Device = 1,
+            /// Normal non-cacheable memory (index 2 in MAIR)
+            NormalNonCacheable = 2
         ],
 
         /// Non-secure bit
@@ -312,6 +314,12 @@ impl BlockPageMapper for L1Descriptor {
                     DescriptorFields::ATTR_INDEX::Device + DescriptorFields::SH::NonShareable,
                 );
             }
+            MemoryType::NormalNonCacheable => {
+                reg.modify(
+                    DescriptorFields::ATTR_INDEX::NormalNonCacheable
+                        + DescriptorFields::SH::OuterShareable,
+                );
+            }
         }
 
         let mut value = reg.get();
@@ -323,10 +331,8 @@ impl BlockPageMapper for L1Descriptor {
             } else {
                 value |= 0b11 << 6; // AP = RO_EL0
             }
-        } else {
-            if !perms.write {
-                value |= 0b10 << 6; // AP = RO_EL1
-            }
+        } else if !perms.write {
+            value |= 0b10 << 6; // AP = RO_EL1
             // else AP = 0b00 = RW_EL1 (default)
         }
 
@@ -399,6 +405,7 @@ impl BlockPageMapper for L1Descriptor {
         match reg.read(DescriptorFields::ATTR_INDEX) {
             0 => Some(MemoryType::Normal),
             1 => Some(MemoryType::Device),
+            2 => Some(MemoryType::NormalNonCacheable),
             _ => None,
         }
     }
@@ -498,6 +505,10 @@ impl BlockPageMapper for L2Descriptor {
                 value |= 1 << 2; // ATTR_INDEX = 1 (Device)
                 // SH = Non-shareable (default)
             }
+            MemoryType::NormalNonCacheable => {
+                value |= 2 << 2; // ATTR_INDEX = 2 (NormalNonCacheable)
+                value |= 0b10 << 8; // SH = Outer Shareable
+            }
         }
 
         // Set permissions
@@ -578,6 +589,7 @@ impl BlockPageMapper for L2Descriptor {
         match reg.read(DescriptorFields::ATTR_INDEX) {
             0 => Some(MemoryType::Normal),
             1 => Some(MemoryType::Device),
+            2 => Some(MemoryType::NormalNonCacheable),
             _ => None,
         }
     }
@@ -649,6 +661,10 @@ impl BlockPageMapper for L3Descriptor {
             }
             MemoryType::Device => {
                 value |= 1 << 2; // ATTR_INDEX = 1 (Device)
+            }
+            MemoryType::NormalNonCacheable => {
+                value |= 2 << 2; // ATTR_INDEX = 2 (NormalNonCacheable)
+                value |= 0b10 << 8; // SH = Outer Shareable
             }
         }
 
@@ -730,6 +746,7 @@ impl BlockPageMapper for L3Descriptor {
         match reg.read(DescriptorFields::ATTR_INDEX) {
             0 => Some(MemoryType::Normal),
             1 => Some(MemoryType::Device),
+            2 => Some(MemoryType::NormalNonCacheable),
             _ => None,
         }
     }

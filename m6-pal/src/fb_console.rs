@@ -2,14 +2,18 @@
 //!
 //! Text console implementation using embedded-graphics for rendering
 //! monospace text to the framebuffer.
+//!
+//! Uses a text buffer approach: characters are stored in RAM and the
+//! framebuffer is write-only. This avoids slow framebuffer reads during
+//! scrolling.
 
 use core::fmt::{self, Write};
 
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::Point,
-    mono_font::{ascii::FONT_8X13, MonoTextStyle},
-    pixelcolor::{Rgb888, RgbColor},
+    mono_font::{ascii::FONT_8X13, MonoTextStyle, MonoTextStyleBuilder},
+    pixelcolor::Rgb888,
     text::Text,
     Drawable,
 };
@@ -25,6 +29,10 @@ const CHAR_HEIGHT: u32 = 13;
 const PADDING_X: u32 = 4;
 const PADDING_Y: u32 = 4;
 
+/// Maximum console dimensions
+const MAX_COLS: usize = 240;
+const MAX_ROWS: usize = 90;
+
 /// Default text colour (white)
 const TEXT_COLOR: Rgb888 = Rgb888::new(255, 255, 255);
 /// Default background colour (black)
@@ -37,7 +45,10 @@ struct FbConsoleInner {
     cursor_row: u32,
     cols: u32,
     rows: u32,
+    /// Text style with background for drawing characters that clear their cell
     text_style: MonoTextStyle<'static, Rgb888>,
+    /// Text buffer in RAM - avoids reading from framebuffer during scroll
+    text_buffer: [[u8; MAX_COLS]; MAX_ROWS],
 }
 
 impl FbConsoleInner {
@@ -48,7 +59,12 @@ impl FbConsoleInner {
             cursor_row: 0,
             cols: 0,
             rows: 0,
-            text_style: MonoTextStyle::new(&FONT_8X13, TEXT_COLOR),
+            text_style: MonoTextStyleBuilder::new()
+                .font(&FONT_8X13)
+                .text_color(TEXT_COLOR)
+                .background_color(BG_COLOR)
+                .build(),
+            text_buffer: [[b' '; MAX_COLS]; MAX_ROWS],
         }
     }
 
@@ -61,8 +77,8 @@ impl FbConsoleInner {
         let usable_width = config.width.saturating_sub(PADDING_X * 2);
         let usable_height = config.height.saturating_sub(PADDING_Y * 2);
 
-        self.cols = usable_width / CHAR_WIDTH;
-        self.rows = usable_height / CHAR_HEIGHT;
+        self.cols = (usable_width / CHAR_WIDTH).min(MAX_COLS as u32);
+        self.rows = (usable_height / CHAR_HEIGHT).min(MAX_ROWS as u32);
 
         // SAFETY: Config has been validated as having a valid base address
         // and the framebuffer is mapped by the bootloader
@@ -74,6 +90,11 @@ impl FbConsoleInner {
         self.display = Some(display);
         self.cursor_col = 0;
         self.cursor_row = 0;
+
+        // Clear text buffer
+        for row in self.text_buffer.iter_mut() {
+            row.fill(b' ');
+        }
     }
 
     fn is_available(&self) -> bool {
@@ -103,7 +124,14 @@ impl FbConsoleInner {
                 self.cursor_col = next_tab.min(self.cols - 1);
             }
             c if (0x20..0x7F).contains(&c) => {
-                // Printable ASCII
+                // Store in text buffer
+                let row = self.cursor_row as usize;
+                let col = self.cursor_col as usize;
+                if row < MAX_ROWS && col < MAX_COLS {
+                    self.text_buffer[row][col] = c;
+                }
+
+                // Printable ASCII - draw with background to clear cell
                 let x = PADDING_X + self.cursor_col * CHAR_WIDTH;
                 let y = PADDING_Y + self.cursor_row * CHAR_HEIGHT + CHAR_HEIGHT;
 
@@ -111,7 +139,7 @@ impl FbConsoleInner {
                 let char_buf = [c];
                 let s = core::str::from_utf8(&char_buf).unwrap_or("?");
 
-                // Draw the character
+                // Draw the character with background (clears the cell)
                 let _ = Text::new(s, Point::new(x as i32, y as i32), self.text_style)
                     .draw(display);
 
@@ -142,45 +170,66 @@ impl FbConsoleInner {
             None => return,
         };
 
+        let rows = self.rows as usize;
+        let cols = self.cols as usize;
+
+        // Step 1: Shift text buffer up in RAM (fast memory operation)
+        for row in 1..rows {
+            if row < MAX_ROWS {
+                // Copy row data up
+                let src_row = self.text_buffer[row];
+                self.text_buffer[row - 1] = src_row;
+            }
+        }
+
+        // Clear the last row in the text buffer
+        if rows > 0 && rows <= MAX_ROWS {
+            self.text_buffer[rows - 1].fill(b' ');
+        }
+
+        // Get framebuffer info for clearing trailing areas
         let config = display.config();
-        let base = config.base as *mut u32;
-        let stride_pixels = config.stride / 4;
+        let base = config.base as *mut u8;
+        let stride_bytes = config.stride as usize;
+        let bytes_per_pixel = 4usize; // 32bpp
+        let fb_height = config.height;
 
-        // Move all rows up by one character height
-        let scroll_pixels = CHAR_HEIGHT;
-        let copy_height = config.height - PADDING_Y * 2 - scroll_pixels;
+        // Step 2: Clear all rows (cell + descender area)
+        // Do this in one pass before drawing to avoid clear/draw overlap issues
+        let row_width_bytes = (cols as usize) * (CHAR_WIDTH as usize) * bytes_per_pixel;
+        for row in 0..rows {
+            let text_y_start = PADDING_Y + (row as u32) * CHAR_HEIGHT;
+            let text_y_end = text_y_start + CHAR_HEIGHT;
+            let clear_y_end = (text_y_end + 3).min(fb_height);
 
-        // Copy pixels up
-        for y in 0..copy_height {
-            let src_y = PADDING_Y + scroll_pixels + y;
-            let dst_y = PADDING_Y + y;
-
-            for x in 0..config.width {
-                let src_offset = (src_y * stride_pixels + x) as usize;
-                let dst_offset = (dst_y * stride_pixels + x) as usize;
-
-                // SAFETY: We're within bounds of the framebuffer
-                unsafe {
-                    let pixel = base.add(src_offset).read_volatile();
-                    base.add(dst_offset).write_volatile(pixel);
+            // SAFETY: We're writing within framebuffer bounds
+            unsafe {
+                for py in text_y_start..clear_y_end {
+                    let row_ptr =
+                        base.add((py as usize) * stride_bytes + (PADDING_X as usize) * bytes_per_pixel);
+                    core::ptr::write_bytes(row_ptr, 0, row_width_bytes);
                 }
             }
         }
 
-        // Clear the last row
-        let clear_start_y = PADDING_Y + copy_height;
-        let bg_pixel = if config.is_bgr {
-            (BG_COLOR.b() as u32) | ((BG_COLOR.g() as u32) << 8) | ((BG_COLOR.r() as u32) << 16)
-        } else {
-            (BG_COLOR.r() as u32) | ((BG_COLOR.g() as u32) << 8) | ((BG_COLOR.b() as u32) << 16)
-        };
+        // Step 3: Draw all text
+        for row in 0..rows {
+            let row_data = &self.text_buffer[row][..cols.min(MAX_COLS)];
 
-        for y in clear_start_y..config.height - PADDING_Y {
-            for x in 0..config.width {
-                let offset = (y * stride_pixels + x) as usize;
-                // SAFETY: We're within bounds of the framebuffer
-                unsafe {
-                    base.add(offset).write_volatile(bg_pixel);
+            // Find last non-space character
+            let last_char = row_data
+                .iter()
+                .rposition(|&c| c != b' ')
+                .map(|pos| pos + 1)
+                .unwrap_or(0);
+
+            if last_char > 0 {
+                let x = PADDING_X;
+                let y = PADDING_Y + (row as u32) * CHAR_HEIGHT + CHAR_HEIGHT;
+
+                if let Ok(s) = core::str::from_utf8(&row_data[..last_char]) {
+                    let _ = Text::new(s, Point::new(x as i32, y as i32), self.text_style)
+                        .draw(display);
                 }
             }
         }

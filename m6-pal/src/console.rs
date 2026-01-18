@@ -129,10 +129,11 @@ pub fn init_framebuffer(config: FramebufferConfig) {
 ///
 /// Outputs to framebuffer (if available) and UART (always).
 pub fn puts(s: &str) {
-    // Output to framebuffer first (primary) if available
+    // Output to framebuffer (primary, when available)
     if fb_console::is_available() {
         fb_console::puts(s);
     }
+
     // Always output to UART (secondary/debug)
     let console = CONSOLE.lock();
     console.puts(s);
@@ -142,10 +143,11 @@ pub fn puts(s: &str) {
 ///
 /// Outputs to framebuffer (if available) and UART (always).
 pub fn putc(c: u8) {
-    // Output to framebuffer first (primary) if available
+    // Output to framebuffer (primary, when available)
     if fb_console::is_available() {
         fb_console::putc(c);
     }
+
     // Always output to UART (secondary/debug)
     let console = CONSOLE.lock();
     console.putc(c);

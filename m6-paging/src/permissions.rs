@@ -6,8 +6,14 @@ pub enum MemoryType {
     /// Normal memory (cacheable, speculative access allowed)
     #[default]
     Normal,
-    /// Device memory (non-cacheable, no speculation, ordered access)
+    /// Device memory (non-cacheable, no speculation, strictly ordered)
     Device,
+    /// Normal non-cacheable memory (write-combining, suitable for framebuffers)
+    ///
+    /// This allows write-combining and reordering but bypasses the cache.
+    /// Ideal for framebuffers where you want efficient burst writes without
+    /// cache pollution or explicit cache maintenance.
+    NormalNonCacheable,
 }
 
 /// Page table entry permissions

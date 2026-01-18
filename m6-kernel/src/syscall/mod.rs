@@ -229,13 +229,9 @@ fn dispatch_syscall(
             let user_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
             kbuf[..len].copy_from_slice(user_slice);
 
-            // Now output from kernel memory
+            // Output to console (framebuffer + UART)
             if let Ok(s) = core::str::from_utf8(&kbuf[..len]) {
                 console::puts(s);
-            } else {
-                for &byte in &kbuf[..len] {
-                    console::putc(byte);
-                }
             }
 
             Ok(0)

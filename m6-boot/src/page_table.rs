@@ -285,13 +285,13 @@ fn map_mmio_regions(
     Some(())
 }
 
-/// Map framebuffer into TTBR1 as device memory
+/// Map framebuffer into TTBR1 as non-cacheable memory
 ///
 /// Maps the GOP framebuffer physical address into kernel virtual space.
 /// Returns the virtual address where the framebuffer is mapped.
 ///
-/// Uses Device memory type which is safe for framebuffers. Write-combining
-/// would be more performant but requires extending MemoryType enum.
+/// Uses NormalNonCacheable memory type which allows write-combining for
+/// efficient burst writes to the framebuffer without cache pollution.
 ///
 /// Parameters:
 /// - `ttbr1_l0`: L0 page table for TTBR1
@@ -331,7 +331,7 @@ pub fn map_framebuffer(
     let fb_virt_region = VirtMemoryRegion::from_raw(KERNEL_FB_VIRT, fb_size_aligned as usize);
 
     log::debug!(
-        "Mapping Framebuffer: VA {:#x}..{:#x} -> PA {:#x} (Device, {} bytes)",
+        "Mapping Framebuffer: VA {:#x}..{:#x} -> PA {:#x} (NormalNonCacheable, {} bytes)",
         KERNEL_FB_VIRT,
         KERNEL_FB_VIRT + fb_size_aligned,
         fb_phys_aligned,
@@ -343,7 +343,7 @@ pub fn map_framebuffer(
         MapAttributes::new(
             fb_phys_region,
             fb_virt_region,
-            MemoryType::Device, // Device memory is safe for framebuffers
+            MemoryType::NormalNonCacheable, // Write-combining for efficient framebuffer access
             PtePermissions::rw(false), // Kernel-only, RW, no execute
         ),
         allocator,
