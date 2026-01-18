@@ -151,6 +151,12 @@ pub fn load_elf_into_vspace(l0_phys: PhysAddr, elf_data: &[u8]) -> Result<u64, V
             unsafe {
                 core::ptr::copy_nonoverlapping(data.as_ptr(), frame_virt as *mut u8, data.len());
             }
+
+            // ARM64 cache maintenance: Clean D-cache for executable code
+            // This ensures the written data is visible to instruction fetches
+            if perms.execute {
+                m6_arch::cache::cache_clean_range(frame_virt, data.len());
+            }
         }
 
         // Convert permissions
@@ -162,6 +168,11 @@ pub fn load_elf_into_vspace(l0_phys: PhysAddr, elf_data: &[u8]) -> Result<u64, V
 
         Ok(())
     })?;
+
+    // ARM64 cache maintenance: Invalidate I-cache globally after loading executable code
+    // This ensures all CPUs will fetch fresh instructions from memory, not stale cache lines.
+    // CRITICAL for SMP systems to prevent instruction faults on first userspace entry.
+    m6_arch::cache::icache_invalidate_all();
 
     Ok(loaded.entry)
 }
