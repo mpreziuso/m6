@@ -102,7 +102,7 @@ impl FbConsoleInner {
                 let next_tab = ((self.cursor_col / 8) + 1) * 8;
                 self.cursor_col = next_tab.min(self.cols - 1);
             }
-            c if c >= 0x20 && c < 0x7F => {
+            c if (0x20..0x7F).contains(&c) => {
                 // Printable ASCII
                 let x = PADDING_X + self.cursor_col * CHAR_WIDTH;
                 let y = PADDING_Y + self.cursor_row * CHAR_HEIGHT + CHAR_HEIGHT;

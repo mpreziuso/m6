@@ -516,6 +516,7 @@ pub struct RamRegions {
 
 impl RamRegions {
     /// Create empty RAM regions
+    #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {
         Self {
             regions: [RamRegion { start: 0, end: 0 }; MAX_RAM_REGIONS],

@@ -71,23 +71,30 @@ fn print_u32(mut n: u32) {
 use m6_alloc::{AllocatedPages, AllocatorConfig, M6GlobalAlloc, PagePool, SecretProvider, VmProvider, VmRights};
 
 /// CNode radix for capability slots.
+#[allow(dead_code)]
 const CNODE_RADIX: u8 = 10;
 
 /// Root CNode slot.
+#[allow(dead_code)]
 const ROOT_CNODE: u64 = 0;
 
 /// Root VSpace slot.
+#[allow(dead_code)]
 const ROOT_VSPACE: u64 = 2;
 
 /// Untyped memory slot.
+#[allow(dead_code)]
 const UNTYPED_SLOT: u64 = 15;
 
 /// First slot for heap frame allocations.
+#[allow(dead_code)]
 static NEXT_FRAME_SLOT: AtomicU64 = AtomicU64::new(128);
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct M6VmError;
 
+#[allow(dead_code)]
 struct M6VmProvider;
 
 impl VmProvider for M6VmProvider {
@@ -114,8 +121,10 @@ impl VmProvider for M6VmProvider {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct M6PoolError;
 
+#[allow(dead_code)]
 struct M6PagePool;
 
 impl PagePool for M6PagePool {
@@ -164,11 +173,13 @@ impl PagePool for M6PagePool {
     }
 }
 
+#[allow(dead_code)]
 struct M6SecretProvider {
     secret: u64,
 }
 
 impl M6SecretProvider {
+    #[allow(dead_code)]
     fn new() -> Self {
         let mut buf = [0u8; 8];
         let _ = m6_syscall::invoke::get_random(&mut buf);
@@ -188,6 +199,7 @@ impl SecretProvider for M6SecretProvider {
 static ALLOCATOR: M6GlobalAlloc = M6GlobalAlloc;
 
 /// Initialise the allocator. Call this early in _start before any heap allocations.
+#[allow(dead_code)]
 pub fn init_allocator() {
     const HEAP_BASE: usize = 0x4000_0000;
     const HEAP_SIZE: usize = 128 * 1024 * 1024;

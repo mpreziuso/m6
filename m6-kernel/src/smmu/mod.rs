@@ -80,18 +80,18 @@ struct QueueState {
 /// including the fault handler notification for delivering SMMU
 /// events to userspace.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct StreamBindingEntry {
+pub struct StreamBindingEntry {
     /// Physical address of Context Descriptor table for this stream.
     /// Used for cleanup on unbind.
-    pub(crate) cd_table_phys: u64,
+    pub cd_table_phys: u64,
     /// Bound IOSpace reference.
-    pub(crate) iospace_ref: ObjectRef,
+    pub iospace_ref: ObjectRef,
     /// Notification to signal on fault.
-    pub(crate) fault_notification: ObjectRef,
+    pub fault_notification: ObjectRef,
     /// Badge to OR with fault info when signalling.
-    pub(crate) fault_badge: u64,
+    pub fault_badge: u64,
     /// Whether this stream is currently bound.
-    pub(crate) is_bound: bool,
+    pub is_bound: bool,
 }
 
 impl Default for StreamBindingEntry {
@@ -372,31 +372,31 @@ impl SmmuInstance {
         );
 
         // Look up stream binding for fault delivery
-        if let Some(binding) = stream_bindings.get(stream_id as usize) {
-            if binding.is_bound && binding.fault_notification.is_valid() {
-                // Encode fault info into badge
-                // Bits [63:48]: stream_id, Bits [47:40]: event_type
-                let fault_info = ((stream_id as u64) << 48) | ((event_type as u64) << 40);
-                let combined_badge = binding.fault_badge | fault_info;
+        if let Some(binding) = stream_bindings.get(stream_id as usize)
+            && binding.is_bound && binding.fault_notification.is_valid()
+        {
+            // Encode fault info into badge
+            // Bits [63:48]: stream_id, Bits [47:40]: event_type
+            let fault_info = ((stream_id as u64) << 48) | ((event_type as u64) << 40);
+            let combined_badge = binding.fault_badge | fault_info;
 
-                // Signal fault notification
-                use crate::ipc::notification::do_signal;
-                match do_signal(binding.fault_notification, combined_badge) {
-                    Ok(()) => {
-                        log::trace!(
-                            "Delivered SMMU fault to userspace: stream={:#x} badge={:#x}",
-                            stream_id,
-                            combined_badge
-                        );
-                        return;
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "Failed to deliver SMMU fault to userspace: stream={:#x} error={:?}",
-                            stream_id,
-                            e
-                        );
-                    }
+            // Signal fault notification
+            use crate::ipc::notification::do_signal;
+            match do_signal(binding.fault_notification, combined_badge) {
+                Ok(()) => {
+                    log::trace!(
+                        "Delivered SMMU fault to userspace: stream={:#x} badge={:#x}",
+                        stream_id,
+                        combined_badge
+                    );
+                    return;
+                }
+                Err(e) => {
+                    log::error!(
+                        "Failed to deliver SMMU fault to userspace: stream={:#x} error={:?}",
+                        stream_id,
+                        e
+                    );
                 }
             }
         }

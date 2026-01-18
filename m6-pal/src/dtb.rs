@@ -272,11 +272,9 @@ fn parse_memory(fdt: &Fdt) -> (u64, u64) {
                 .and_then(|p| p.as_str())
                 .is_some_and(|s| s == "memory");
 
-        if is_memory {
-            if let Some(reg) = node.reg().and_then(|mut r| r.next()) {
-                let size = reg.size.unwrap_or(0) as u64;
-                return (reg.starting_address as u64, size);
-            }
+        if is_memory && let Some(reg) = node.reg().and_then(|mut r| r.next()) {
+            let size = reg.size.unwrap_or(0) as u64;
+            return (reg.starting_address as u64, size);
         }
     }
 
@@ -439,16 +437,15 @@ fn parse_smmu(fdt: &Fdt) -> Option<SmmuConfig> {
 /// The DTB /psci node has a "method" property that specifies either "smc" or "hvc".
 /// Defaults to HVC if not specified or not found.
 fn parse_psci_method(fdt: &Fdt) -> PsciMethod {
-    if let Some(psci_node) = fdt.find_node("/psci") {
-        if let Some(method_prop) = psci_node.property("method") {
-            if let Some(method_str) = method_prop.as_str() {
-                return match method_str {
-                    "smc" => PsciMethod::Smc,
-                    "hvc" => PsciMethod::Hvc,
-                    _ => PsciMethod::Hvc, // Default to HVC for unknown values
-                };
-            }
-        }
+    if let Some(psci_node) = fdt.find_node("/psci")
+        && let Some(method_prop) = psci_node.property("method")
+        && let Some(method_str) = method_prop.as_str()
+    {
+        return match method_str {
+            "smc" => PsciMethod::Smc,
+            "hvc" => PsciMethod::Hvc,
+            _ => PsciMethod::Hvc, // Default to HVC for unknown values
+        };
     }
     // Default to HVC (QEMU uses HVC)
     PsciMethod::Hvc
