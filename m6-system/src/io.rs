@@ -4,7 +4,7 @@
 //! falling back to debug syscalls for early boot.
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use m6_syscall::invoke::{debug_putc, send};
+use m6_syscall::invoke::{debug_puts, send};
 
 /// UART driver endpoint slot (0 = not initialised, use debug syscall fallback)
 static UART_ENDPOINT: AtomicU64 = AtomicU64::new(0);
@@ -27,15 +27,13 @@ pub fn has_ipc_console() -> bool {
 
 /// Print a string.
 ///
-/// Uses IPC to UART driver if available, otherwise falls back to debug syscall.
+/// Uses IPC to UART driver if available, otherwise uses debug syscall.
 pub fn puts(s: &str) {
     let ep = UART_ENDPOINT.load(Ordering::Acquire);
     if ep != 0 {
         ipc_write_string(ep, s);
     } else {
-        for byte in s.bytes() {
-            debug_putc(byte);
-        }
+        debug_puts(s);
     }
 }
 
@@ -68,12 +66,7 @@ fn ipc_write_string(ep: u64, s: &str) {
 /// Print a decimal number.
 pub fn put_u64(mut n: u64) {
     if n == 0 {
-        let ep = UART_ENDPOINT.load(Ordering::Acquire);
-        if ep != 0 {
-            ipc_write_string(ep, "0");
-        } else {
-            debug_putc(b'0');
-        }
+        puts("0");
         return;
     }
 
@@ -94,16 +87,9 @@ pub fn put_u64(mut n: u64) {
         reversed[j] = buf[len - 1 - j];
     }
 
-    let ep = UART_ENDPOINT.load(Ordering::Acquire);
-    if ep != 0 {
-        // SAFETY: We just filled this with ASCII digits
-        let s = unsafe { core::str::from_utf8_unchecked(&reversed[..len]) };
-        ipc_write_string(ep, s);
-    } else {
-        for &byte in reversed.iter().take(len) {
-            debug_putc(byte);
-        }
-    }
+    // SAFETY: We just filled this with ASCII digits
+    let s = unsafe { core::str::from_utf8_unchecked(&reversed[..len]) };
+    puts(s);
 }
 
 /// Print a hexadecimal number with 0x prefix.
@@ -113,12 +99,7 @@ pub fn put_hex(n: u64) {
     puts("0x");
 
     if n == 0 {
-        let ep = UART_ENDPOINT.load(Ordering::Acquire);
-        if ep != 0 {
-            ipc_write_string(ep, "0");
-        } else {
-            debug_putc(b'0');
-        }
+        puts("0");
         return;
     }
 
@@ -136,16 +117,9 @@ pub fn put_hex(n: u64) {
         }
     }
 
-    let ep = UART_ENDPOINT.load(Ordering::Acquire);
-    if ep != 0 {
-        // SAFETY: We just filled this with hex chars
-        let s = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
-        ipc_write_string(ep, s);
-    } else {
-        for &byte in buf.iter().take(len) {
-            debug_putc(byte);
-        }
-    }
+    // SAFETY: We just filled this with hex chars
+    let s = unsafe { core::str::from_utf8_unchecked(&buf[..len]) };
+    puts(s);
 }
 
 /// Print a newline.

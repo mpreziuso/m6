@@ -137,6 +137,8 @@ pub enum Syscall {
     GetRandom = 112,
 
     // === Debug (development only) ===
+    /// Debug print string (pointer + length).
+    DebugPuts = 254,
     /// Debug print character.
     DebugPutChar = 255,
 }
@@ -197,6 +199,7 @@ impl Syscall {
             105 => Some(Self::DmaPoolAlloc),
             106 => Some(Self::DmaPoolFree),
             112 => Some(Self::GetRandom),
+            254 => Some(Self::DebugPuts),
             255 => Some(Self::DebugPutChar),
             _ => None,
         }
@@ -257,6 +260,7 @@ impl Syscall {
             Self::DmaPoolAlloc => "DmaPoolAlloc",
             Self::DmaPoolFree => "DmaPoolFree",
             Self::GetRandom => "GetRandom",
+            Self::DebugPuts => "DebugPuts",
             Self::DebugPutChar => "DebugPutChar",
         }
     }

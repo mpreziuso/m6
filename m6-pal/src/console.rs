@@ -37,7 +37,8 @@ impl Console {
         self.initialised = true;
     }
 
-    fn putc(&self, c: u8) {
+    /// Write a raw byte to UART without any conversion.
+    fn putc_raw(&self, c: u8) {
         if !self.initialised || self.base == 0 {
             return;
         }
@@ -77,11 +78,16 @@ impl Console {
         }
     }
 
+    /// Write a byte to UART, converting LF to CRLF for serial terminals.
+    fn putc(&self, c: u8) {
+        if c == b'\n' {
+            self.putc_raw(b'\r');
+        }
+        self.putc_raw(c);
+    }
+
     fn puts(&self, s: &str) {
         for c in s.bytes() {
-            if c == b'\n' {
-                self.putc(b'\r');
-            }
             self.putc(c);
         }
     }

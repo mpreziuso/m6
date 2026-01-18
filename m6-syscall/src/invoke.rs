@@ -190,6 +190,15 @@ pub fn debug_putc(c: u8) {
     syscall1(Syscall::DebugPutChar, c as u64);
 }
 
+/// Debug: print a string to console.
+///
+/// This is a debug-only syscall that prints a string to the kernel console.
+/// More efficient than `debug_putc` in a loop as it requires only one syscall.
+#[inline]
+pub fn debug_puts(s: &str) {
+    syscall2(Syscall::DebugPuts, s.as_ptr() as u64, s.len() as u64);
+}
+
 /// Yield CPU time slice.
 ///
 /// Voluntarily gives up the current time slice, allowing other tasks to run.

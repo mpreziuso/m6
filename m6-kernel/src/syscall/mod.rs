@@ -207,7 +207,39 @@ fn dispatch_syscall(
         // Miscellaneous operations
         Syscall::GetRandom => misc_ops::handle_get_random(args),
 
-        // Debug syscall
+        // Debug syscalls
+        Syscall::DebugPuts => {
+            let ptr = args.arg0 as *const u8;
+            let len = args.arg1 as usize;
+
+            // Basic validation - limit to 256 bytes for stack buffer
+            if len > 256 {
+                return Err(SyscallError::InvalidArg);
+            }
+
+            // Validate pointer is in userspace range (TTBR0)
+            let addr = ptr as u64;
+            if addr >= 0x0001_0000_0000_0000 {
+                return Err(SyscallError::Range);
+            }
+
+            // Copy userspace data to kernel stack buffer
+            let mut kbuf = [0u8; 256];
+            // SAFETY: We've validated the pointer is in userspace range.
+            let user_slice = unsafe { core::slice::from_raw_parts(ptr, len) };
+            kbuf[..len].copy_from_slice(user_slice);
+
+            // Now output from kernel memory
+            if let Ok(s) = core::str::from_utf8(&kbuf[..len]) {
+                console::puts(s);
+            } else {
+                for &byte in &kbuf[..len] {
+                    console::putc(byte);
+                }
+            }
+
+            Ok(0)
+        }
         Syscall::DebugPutChar => {
             let c = args.arg0 as u8;
             console::putc(c);
