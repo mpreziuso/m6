@@ -68,6 +68,11 @@ pub trait Platform: Send + Sync {
     fn uart_type(&self) -> crate::dtb_platform::UartType {
         crate::dtb_platform::UartType::Unknown
     }
+
+    /// Get the PSCI invocation method (SMC or HVC).
+    fn psci_method(&self) -> crate::dtb_platform::PsciMethod {
+        crate::dtb_platform::PsciMethod::Hvc
+    }
 }
 
 pub struct PlatformInfo {
@@ -113,7 +118,6 @@ pub fn init(boot_info: &'static BootInfo) {
         .expect("Failed to parse DTB - cannot initialise platform");
 
     let info = PlatformInfo::from_dtb(dtb_platform);
-
     CURRENT_PLATFORM.set(info).ok();
 
     if let Some(info) = CURRENT_PLATFORM.get() {

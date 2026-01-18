@@ -24,8 +24,6 @@ mod tcr_config {
     pub const TG0_4KB: u64 = 0b00;
     /// TG1: Granule size for TTBR1 (0b10 = 4KB)
     pub const TG1_4KB: u64 = 0b10 << 30;
-    /// IPS: Intermediate Physical Address Size (0b101 = 48-bit)
-    pub const IPS_48BIT: u64 = 0b101 << 32;
     /// SH0: Shareability for TTBR0 (0b11 = Inner Shareable)
     pub const SH0_INNER: u64 = 0b11 << 12;
     /// SH1: Shareability for TTBR1 (0b11 = Inner Shareable)
@@ -38,6 +36,12 @@ mod tcr_config {
     pub const IRGN0_WBRWA: u64 = 0b01 << 8;
     /// IRGN1: Inner cacheability for TTBR1 (0b01 = WB-RWA)
     pub const IRGN1_WBRWA: u64 = 0b01 << 24;
+
+    /// Get the IPS value from the CPU's physical address range capability.
+    /// Returns the value already shifted to the correct bit position (bits [34:32]).
+    pub fn ips_value() -> u64 {
+        crate::cpu::pa_range::tcr_ips() << 32
+    }
 }
 
 /// Page table entry flags
@@ -221,10 +225,11 @@ impl Mmu {
 
         // Set TCR (Translation Control Register)
         // Configure for 48-bit virtual addresses with 4KB pages
+        // IPS is read from the CPU's physical address range capability at runtime
         let tcr: u64 = tcr_config::T0SZ
             | (tcr_config::T1SZ << 16)
             | tcr_config::TG1_4KB
-            | tcr_config::IPS_48BIT
+            | tcr_config::ips_value()
             | tcr_config::SH0_INNER
             | tcr_config::SH1_INNER
             | tcr_config::ORGN0_WBRWA

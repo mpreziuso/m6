@@ -18,7 +18,8 @@ pub const MAX_CPUS: usize = 8;
 /// Version 4: Added SMP support (cpu_count, per_cpu_stacks)
 /// Version 5: Added ttbr0_el1 for secondary CPU MMU setup
 /// Version 6: Added framebuffer virt_base for GOP support
-pub const BOOT_INFO_VERSION: u32 = 6;
+/// Version 7: Added tcr_el1 with dynamic IPS for secondary CPU MMU setup
+pub const BOOT_INFO_VERSION: u32 = 7;
 
 /// Maximum number of memory regions supported
 pub const MAX_MEMORY_REGIONS: usize = 64;
@@ -175,6 +176,8 @@ pub struct BootInfo {
     pub per_cpu_stacks: [PerCpuStackInfo; MAX_CPUS],
     /// TTBR0_EL1 value for secondary CPU MMU setup (identity mapping)
     pub ttbr0_el1: u64,
+    /// TCR_EL1 value for secondary CPU MMU setup (with correct IPS for this CPU)
+    pub tcr_el1: u64,
 }
 
 impl BootInfo {
@@ -244,6 +247,9 @@ pub const BOOTINFO_PER_CPU_STACKS_OFFSET: usize = 1728;
 /// Offset of `ttbr0_el1` in BootInfo
 pub const BOOTINFO_TTBR0_OFFSET: usize = 1856;
 
+/// Offset of `tcr_el1` in BootInfo
+pub const BOOTINFO_TCR_OFFSET: usize = 1864;
+
 /// Size of PerCpuStackInfo (phys_base: u64, virt_top: u64)
 pub const PER_CPU_STACK_INFO_SIZE: usize = 16;
 
@@ -263,6 +269,10 @@ const _: () = {
     assert!(
         core::mem::offset_of!(BootInfo, ttbr0_el1) == BOOTINFO_TTBR0_OFFSET,
         "BOOTINFO_TTBR0_OFFSET mismatch"
+    );
+    assert!(
+        core::mem::offset_of!(BootInfo, tcr_el1) == BOOTINFO_TCR_OFFSET,
+        "BOOTINFO_TCR_OFFSET mismatch"
     );
     assert!(
         core::mem::size_of::<PerCpuStackInfo>() == PER_CPU_STACK_INFO_SIZE,

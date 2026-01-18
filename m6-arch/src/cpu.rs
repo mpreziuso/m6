@@ -88,17 +88,10 @@ pub fn isb() {
 /// This must be called on each CPU before any FP/SIMD code runs.
 #[inline]
 pub fn enable_fp_simd() {
-    // SAFETY: Enabling FP/SIMD access is safe in kernel mode
-    unsafe {
-        asm!(
-            "mrs {tmp}, cpacr_el1",
-            "orr {tmp}, {tmp}, #(3 << 20)", // FPEN bits [21:20] = 0b11
-            "msr cpacr_el1, {tmp}",
-            "isb",
-            tmp = out(reg) _,
-            options(nomem, nostack)
-        );
-    }
+    // FPEN bits [21:20] = 0b11
+    CPACR_EL1.modify(CPACR_EL1::FPEN::TrapNothing);
+    // SAFETY: ISB is always safe
+    unsafe { asm!("isb", options(nostack)); }
 }
 
 /// Data memory barrier
@@ -198,6 +191,50 @@ pub fn read_random() -> Option<u64> {
     if success != 0 { Some(val) } else { None }
 }
 
+/// Physical Address Range detection
+pub mod pa_range {
+    use aarch64_cpu::registers::{ID_AA64MMFR0_EL1, Readable};
+
+    /// Get the physical address range supported by this CPU.
+    ///
+    /// Returns the PARange value from ID_AA64MMFR0_EL1 (bits 3:0):
+    /// - 0 = 32-bit (4 GB)
+    /// - 1 = 36-bit (64 GB)
+    /// - 2 = 40-bit (1 TB)
+    /// - 3 = 42-bit (4 TB)
+    /// - 4 = 44-bit (16 TB)
+    /// - 5 = 48-bit (256 TB)
+    /// - 6 = 52-bit (4 PB, requires LPA)
+    #[must_use]
+    pub fn pa_range() -> u64 {
+        ID_AA64MMFR0_EL1.read(ID_AA64MMFR0_EL1::PARange)
+    }
+
+    /// Get the TCR IPS field value for the CPU's physical address capability.
+    ///
+    /// The PARange value maps directly to TCR.IPS encoding.
+    /// Clamps to 48-bit maximum (we don't support 52-bit LPA yet).
+    #[must_use]
+    pub fn tcr_ips() -> u64 {
+        pa_range().min(5)
+    }
+
+    /// Get the number of physical address bits supported.
+    #[must_use]
+    pub fn pa_bits() -> u8 {
+        match pa_range() {
+            0 => 32,
+            1 => 36,
+            2 => 40,
+            3 => 42,
+            4 => 44,
+            5 => 48,
+            6 => 52,
+            _ => 32, // Conservative fallback
+        }
+    }
+}
+
 /// CPU feature detection
 pub mod features {
     use aarch64_cpu::registers::Readable;
@@ -271,14 +308,8 @@ pub mod el2 {
     /// Must be called from EL2. Calling from other ELs will fault.
     #[inline]
     pub unsafe fn configure_hcr_for_el1() {
-        // SAFETY: Caller guarantees we're at EL2
-        unsafe {
-            asm!(
-                "msr hcr_el2, {val}",
-                val = in(reg) hcr::RW | hcr::SWIO,
-                options(nomem, nostack)
-            );
-        }
+        use aarch64_cpu::registers::{HCR_EL2, Writeable};
+        HCR_EL2.write(HCR_EL2::RW::EL1IsAarch64 + HCR_EL2::SWIO::SET);
     }
 
     /// Enable EL1 access to physical timer and counter
@@ -290,17 +321,13 @@ pub mod el2 {
     /// Must be called from EL2. Calling from other ELs will fault.
     #[inline]
     pub unsafe fn enable_el1_timer_access() {
-        // SAFETY: Caller guarantees we're at EL2
+        use aarch64_cpu::registers::{CNTHCTL_EL2, Writeable};
+        // EL1PCEN=1, EL1PCTEN=1 (bits 1:0)
+        CNTHCTL_EL2.write(CNTHCTL_EL2::EL1PCTEN::SET + CNTHCTL_EL2::EL1PCEN::SET);
+        // CNTVOFF_EL2: No offset between physical and virtual counters
+        // Note: CNTVOFF_EL2 is not yet available in aarch64-cpu crate
         unsafe {
-            asm!(
-                // CNTHCTL_EL2: EL1PCEN=1, EL1PCTEN=1 (bits 1:0)
-                "mov {tmp}, #3",
-                "msr cnthctl_el2, {tmp}",
-                // CNTVOFF_EL2: No offset between physical and virtual counters
-                "msr cntvoff_el2, xzr",
-                tmp = out(reg) _,
-                options(nomem, nostack)
-            );
+            asm!("msr cntvoff_el2, xzr", options(nomem, nostack));
         }
     }
 
@@ -313,17 +340,12 @@ pub mod el2 {
     /// Must be called from EL2 on a system with GICv3.
     #[inline]
     pub unsafe fn enable_el1_gic_access() {
-        // SAFETY: Caller guarantees we're at EL2 with GICv3
-        unsafe {
-            asm!(
-                // ICC_SRE_EL2: SRE=1 (enable), Enable=1 (allow EL1 access)
-                "mov {tmp}, #0xf",
-                "msr icc_sre_el2, {tmp}",
-                "isb",
-                tmp = out(reg) _,
-                options(nomem, nostack)
-            );
-        }
+        use aarch64_cpu::registers::{ICC_SRE_EL2, Writeable};
+        // SRE=1 (enable), ENABLE=1 (allow EL1 access)
+        // Both fields use raw values as aarch64-cpu doesn't define named variants
+        ICC_SRE_EL2.write(ICC_SRE_EL2::SRE.val(1) + ICC_SRE_EL2::ENABLE.val(1));
+        // SAFETY: ISB is always safe
+        unsafe { asm!("isb", options(nostack)); }
     }
 
     /// Set SPSR_EL2 for return to EL1h with interrupts masked
@@ -348,14 +370,8 @@ pub mod el2 {
     /// Must be called from EL2 with a valid code address.
     #[inline]
     pub unsafe fn set_elr(addr: u64) {
-        // SAFETY: Caller guarantees we're at EL2 and addr is valid code
-        unsafe {
-            asm!(
-                "msr elr_el2, {addr}",
-                addr = in(reg) addr,
-                options(nomem, nostack)
-            );
-        }
+        use aarch64_cpu::registers::{ELR_EL2, Writeable};
+        ELR_EL2.set(addr);
     }
 
     /// Set SP_EL1 (stack pointer for EL1)
@@ -364,13 +380,53 @@ pub mod el2 {
     /// Must be called from EL2 with a valid, aligned stack address.
     #[inline]
     pub unsafe fn set_sp_el1(sp: u64) {
-        // SAFETY: Caller guarantees we're at EL2 and sp is valid stack
+        use aarch64_cpu::registers::{SP_EL1, Writeable};
+        SP_EL1.set(sp);
+    }
+
+    /// Disable all coprocessor trapping to EL2
+    ///
+    /// Clears CPTR_EL2 to prevent FP/SIMD, trace, and other coprocessor
+    /// accesses from trapping to EL2. Without this, FP/SIMD instructions
+    /// at EL1 would trap to EL2 with no valid handler after ERET.
+    ///
+    /// # Safety
+    /// Must be called from EL2. Calling from other ELs will fault.
+    #[inline]
+    pub unsafe fn disable_coprocessor_traps() {
+        use aarch64_cpu::registers::{CPTR_EL2, Writeable};
+        CPTR_EL2.set(0);
+    }
+
+    /// Disable system register trapping to EL2
+    ///
+    /// Clears HSTR_EL2 to prevent system register accesses from
+    /// trapping to EL2.
+    ///
+    /// # Safety
+    /// Must be called from EL2. Calling from other ELs will fault.
+    #[inline]
+    pub unsafe fn disable_sysreg_traps() {
+        // SAFETY: Caller guarantees we're at EL2
+        // Note: HSTR_EL2 is not yet available in aarch64-cpu crate
         unsafe {
             asm!(
-                "msr sp_el1, {sp}",
-                sp = in(reg) sp,
+                "msr hstr_el2, xzr",
                 options(nomem, nostack)
             );
         }
+    }
+
+    /// Disable debug and PMU trapping to EL2
+    ///
+    /// Clears MDCR_EL2 to allow EL1 debug and PMU access without
+    /// trapping to EL2.
+    ///
+    /// # Safety
+    /// Must be called from EL2. Calling from other ELs will fault.
+    #[inline]
+    pub unsafe fn disable_debug_traps() {
+        use aarch64_cpu::registers::{MDCR_EL2, Writeable};
+        MDCR_EL2.set(0);
     }
 }

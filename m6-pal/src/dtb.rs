@@ -8,7 +8,7 @@
 use fdt::Fdt;
 use m6_common::boot::{BootInfo, KERNEL_PHYS_MAP_BASE};
 use once_cell_no_std::OnceCell;
-use crate::dtb_platform::{DtbPlatform, GicVersion, SmmuConfig, UartType};
+use crate::dtb_platform::{DtbPlatform, GicVersion, PsciMethod, SmmuConfig, UartType};
 
 /// Maximum DTB size (2MB should accommodate most device trees)
 const DTB_MAX_SIZE: usize = 2 * 1024 * 1024;
@@ -70,11 +70,12 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
     // Extract configuration from DTB
     let (gic_dist, gic_cpu, gic_redist, gic_version) = parse_gic(&fdt)?;
     let (uart_base, uart_type) = parse_uart(&fdt)?;
-    let (ram_base, ram_size) = parse_memory(&fdt)?;
+    let (ram_base, ram_size) = parse_memory(&fdt);
     let timer_irq = parse_timer(&fdt)?;
     let name = parse_platform_name(&fdt)?;
     let smmu_config = parse_smmu(&fdt);
     let cpu_count = parse_cpu_count(&fdt);
+    let psci_method = parse_psci_method(&fdt);
 
     Ok(DtbPlatform {
         name,
@@ -89,6 +90,7 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
         ram_size,
         smmu_config,
         cpu_count,
+        psci_method,
     })
 }
 
@@ -170,7 +172,42 @@ fn parse_gic(fdt: &Fdt) -> Result<(u64, u64, u64, GicVersion), DtbError> {
 /// Parse UART (serial console) configuration
 ///
 /// Returns (base_address, uart_type)
+///
+/// Tries multiple strategies:
+/// 1. Check /aliases for serial2 (common console on RK3588)
+/// 2. Check /aliases for serial0, serial1, etc.
+/// 3. Fall back to first UART found
 fn parse_uart(fdt: &Fdt) -> Result<(u64, UartType), DtbError> {
+    // Strategy 1: Try /aliases serial2 first (common for RK3588 debug console)
+    if let Some(uart) = find_uart_via_alias(fdt, "serial2") {
+        return Ok(uart);
+    }
+
+    // Strategy 2: Try other serial aliases in order
+    for i in [0, 1, 3, 4, 5, 6, 7, 8, 9] {
+        let alias = if i < 10 {
+            // Build alias name - we can't use format! in no_std
+            match i {
+                0 => "serial0",
+                1 => "serial1",
+                3 => "serial3",
+                4 => "serial4",
+                5 => "serial5",
+                6 => "serial6",
+                7 => "serial7",
+                8 => "serial8",
+                9 => "serial9",
+                _ => continue,
+            }
+        } else {
+            continue
+        };
+        if let Some(uart) = find_uart_via_alias(fdt, alias) {
+            return Ok(uart);
+        }
+    }
+
+    // Strategy 3: Fall back to first UART found (original behavior)
     for node in fdt.all_nodes() {
         if let Some(compatible) = node.compatible() {
             // Check for ARM PL011 UART
@@ -197,21 +234,54 @@ fn parse_uart(fdt: &Fdt) -> Result<(u64, UartType), DtbError> {
     Err(DtbError::MissingNode("uart"))
 }
 
-/// Parse memory configuration
+/// Find UART via /aliases node
+fn find_uart_via_alias(fdt: &Fdt, alias_name: &str) -> Option<(u64, UartType)> {
+    let aliases = fdt.find_node("/aliases")?;
+    let alias_path = aliases.property(alias_name)?.as_str()?;
+
+    // Find the node at the alias path
+    let node = fdt.find_node(alias_path)?;
+
+    let compatible = node.compatible()?;
+    let reg = node.reg()?.next()?;
+    let addr = reg.starting_address as u64;
+
+    if compatible.all().any(|c| c == "arm,pl011") {
+        return Some((addr, UartType::Pl011));
+    }
+
+    if compatible.all().any(|c| {
+        c == "snps,dw-apb-uart" || c.starts_with("rockchip,rk") && c.contains("uart")
+    }) {
+        return Some((addr, UartType::Dw8250));
+    }
+
+    None
+}
+
+/// Parse memory configuration from DTB
 ///
-/// Returns (base_address, size)
-fn parse_memory(fdt: &Fdt) -> Result<(u64, u64), DtbError> {
+/// Returns (base_address, size). On UEFI systems, DTB may not have a memory
+/// node since memory info comes from the UEFI memory map. Returns (0, 0)
+/// if not found - the actual memory info is in BootInfo from UEFI.
+fn parse_memory(fdt: &Fdt) -> (u64, u64) {
     for node in fdt.all_nodes() {
-        if node.name.starts_with("memory") {
-            let reg = node.reg()
-                .ok_or(DtbError::MissingProperty("reg"))?
-                .next()
-                .ok_or(DtbError::InvalidData)?;
-            let size = reg.size.ok_or(DtbError::InvalidData)?;
-            return Ok((reg.starting_address as u64, size as u64));
+        // Check for memory node by name OR by device_type property
+        let is_memory = node.name.starts_with("memory")
+            || node.property("device_type")
+                .and_then(|p| p.as_str())
+                .is_some_and(|s| s == "memory");
+
+        if is_memory {
+            if let Some(reg) = node.reg().and_then(|mut r| r.next()) {
+                let size = reg.size.unwrap_or(0) as u64;
+                return (reg.starting_address as u64, size);
+            }
         }
     }
-    Err(DtbError::MissingNode("memory"))
+
+    // Not found - this is OK on UEFI systems
+    (0, 0)
 }
 
 /// Parse timer configuration
@@ -362,4 +432,24 @@ fn parse_smmu(fdt: &Fdt) -> Option<SmmuConfig> {
         }
     }
     None
+}
+
+/// Parse PSCI invocation method from DTB /psci node
+///
+/// The DTB /psci node has a "method" property that specifies either "smc" or "hvc".
+/// Defaults to HVC if not specified or not found.
+fn parse_psci_method(fdt: &Fdt) -> PsciMethod {
+    if let Some(psci_node) = fdt.find_node("/psci") {
+        if let Some(method_prop) = psci_node.property("method") {
+            if let Some(method_str) = method_prop.as_str() {
+                return match method_str {
+                    "smc" => PsciMethod::Smc,
+                    "hvc" => PsciMethod::Hvc,
+                    _ => PsciMethod::Hvc, // Default to HVC for unknown values
+                };
+            }
+        }
+    }
+    // Default to HVC (QEMU uses HVC)
+    PsciMethod::Hvc
 }

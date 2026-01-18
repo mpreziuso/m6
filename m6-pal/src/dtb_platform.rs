@@ -27,6 +27,16 @@ pub enum UartType {
     Unknown,
 }
 
+/// PSCI invocation method (conduit)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PsciMethod {
+    /// Use SMC (Secure Monitor Call) - traps to EL3
+    Smc,
+    /// Use HVC (Hypervisor Call) - traps to EL2
+    #[default]
+    Hvc,
+}
+
 /// SMMU (System Memory Management Unit) configuration
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SmmuConfig {
@@ -80,6 +90,8 @@ pub struct DtbPlatform {
     pub(crate) smmu_config: Option<SmmuConfig>,
     /// Number of CPUs detected.
     pub(crate) cpu_count: u32,
+    /// PSCI invocation method (SMC or HVC).
+    pub(crate) psci_method: PsciMethod,
 }
 
 impl Platform for DtbPlatform {
@@ -154,5 +166,9 @@ impl Platform for DtbPlatform {
 
     fn uart_type(&self) -> UartType {
         self.uart_type
+    }
+
+    fn psci_method(&self) -> PsciMethod {
+        self.psci_method
     }
 }

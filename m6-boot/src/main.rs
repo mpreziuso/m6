@@ -19,7 +19,7 @@ use m6_boot::initrd_loader::load_initrd;
 use m6_boot::kernel_loader::load_kernel;
 use m6_boot::memory::{mark_region, translate_memory_map};
 use m6_boot::page_table::{
-    setup_initial_page_tables, BootPageAllocator, FramebufferMapping, MmioConfig, RamRegions,
+    setup_initial_page_tables, tcr_value, BootPageAllocator, FramebufferMapping, MmioConfig, RamRegions,
 };
 use m6_common::boot::{BootInfo, FramebufferInfo, PerCpuStackInfo, BOOT_INFO_MAGIC, BOOT_INFO_VERSION};
 use m6_common::{PhysAddr, VirtAddr};
@@ -179,6 +179,12 @@ fn efi_main() -> Status {
         }
     }
 
+    // Ensure DTB region is included in physmap (may be in ACPI or other non-RAM type)
+    // DTB is typically small (<2MB), add it with some margin
+    const DTB_REGION_SIZE: u64 = 2 * 1024 * 1024; // 2MB
+    ram_regions.add(dtb_address, dtb_address + DTB_REGION_SIZE);
+    log::debug!("Added DTB region to physmap: {:#x} - {:#x}", dtb_address, dtb_address + DTB_REGION_SIZE);
+
     let max_phys_addr = ram_regions.max_addr();
     log::info!(
         "Detected {} RAM region(s), up to {:#x} ({} MB)",
@@ -270,6 +276,7 @@ fn efi_main() -> Status {
         pt_allocator.bytes_used()
     );
 
+    // Log TCR configuration before exiting boot services (for debugging)
     // Exit boot services and get final memory map
     log::info!("Exiting UEFI boot services...");
 
@@ -357,7 +364,22 @@ fn efi_main() -> Status {
         }
         // TTBR0 value for secondary CPU MMU setup (identity mapping)
         (*ptr).ttbr0_el1 = pt_result.tables.ttbr0;
+        // TCR value with correct IPS for this CPU's physical address capability
+        (*ptr).tcr_el1 = tcr_value();
     }
+
+    // Clean all bootloader-written memory from cache to Point of Coherency.
+    // This is critical because:
+    // 1. Page tables: The MMU table walker reads from PoC, not CPU cache.
+    //    If tables are still dirty in cache, the walker sees stale/zero data.
+    // 2. Kernel image: IC IALLU only invalidates I-cache, not D-cache. The kernel
+    //    code we loaded is still dirty in D-cache and must be cleaned to memory
+    //    before it can be fetched as instructions.
+    // 3. boot_info: After ERET to EL1, kernel might not see our EL2 cache writes.
+    // UEFI identity maps physical memory, so phys addr = virt addr for DC ops.
+    m6_arch::cache::cache_clean_range(pt_phys, PAGE_TABLE_ALLOC_SIZE);
+    m6_arch::cache::cache_clean_range(kernel.phys_base, kernel.size as usize);
+    m6_arch::cache::cache_clean_range(boot_info_phys, core::mem::size_of::<BootInfo>());
 
     // Enable MMU and jump to kernel
     // SAFETY: We've set up page tables and prepared everything

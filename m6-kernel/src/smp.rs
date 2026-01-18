@@ -117,8 +117,10 @@ fn secondary_entry_phys(boot_info: &BootInfo) -> u64 {
 ///
 /// Format: | boot_info_phys (upper 48 bits) | cpu_id (lower 16 bits) |
 fn encode_secondary_context(cpu: usize, boot_info: &BootInfo) -> u64 {
-    // boot_info is accessed via TTBR0 identity mapping, so its pointer IS the physical address
-    let boot_info_phys = boot_info as *const _ as u64;
+    // boot_info is accessed via physmap (virtual address 0xFFFF_8000_xxxx_xxxx)
+    // Convert back to physical address for secondary CPUs (they start with MMU off)
+    let boot_info_virt = boot_info as *const _ as u64;
+    let boot_info_phys = boot_info_virt - m6_common::boot::KERNEL_PHYS_MAP_BASE;
 
     (boot_info_phys << 16) | (cpu as u64 & 0xFFFF)
 }
@@ -126,8 +128,8 @@ fn encode_secondary_context(cpu: usize, boot_info: &BootInfo) -> u64 {
 // Constants for secondary_entry_stub (must be outside the naked function)
 use m6_common::boot::{
     BOOTINFO_PAGE_TABLE_BASE_OFFSET, BOOTINFO_PER_CPU_STACKS_OFFSET,
-    BOOTINFO_TTBR0_OFFSET, PER_CPU_STACK_INFO_SIZE, PER_CPU_STACK_VIRT_TOP_OFFSET,
-    MAIR_VALUE, TCR_VALUE, KERNEL_PHYS_MAP_BASE,
+    BOOTINFO_TTBR0_OFFSET, BOOTINFO_TCR_OFFSET, PER_CPU_STACK_INFO_SIZE,
+    PER_CPU_STACK_VIRT_TOP_OFFSET, MAIR_VALUE, KERNEL_PHYS_MAP_BASE,
 };
 
 /// Secondary CPU entry stub (called by PSCI after CPU_ON).
@@ -153,11 +155,12 @@ pub unsafe extern "C" fn secondary_entry_stub() -> ! {
         // Registers used:
         //   x19 = cpu_id (preserved across calls)
         //   x20 = boot_info_phys (preserved across calls)
-        //   x21 = scratch / TTBR1
-        //   x22 = scratch / TTBR0
-        //   x23 = scratch / stack_virt_top
+        //   x21 = TTBR1
+        //   x22 = TTBR0
+        //   x23 = stack_virt_top
         //   x24 = scratch
         //   x25 = current EL
+        //   x26 = TCR value (from boot_info)
 
         // -- Extract context
         "and x19, x0, #0xFFFF",        // x19 = cpu_id (lower 16 bits)
@@ -177,6 +180,11 @@ pub unsafe extern "C" fn secondary_entry_stub() -> ! {
         "mov x24, {ttbr0_offset}",
         "add x24, x20, x24",
         "ldr x22, [x24]",              // x22 = TTBR0
+
+        // TCR = boot_info.tcr_el1 (has correct IPS for this CPU)
+        "mov x24, {tcr_offset}",
+        "add x24, x20, x24",
+        "ldr x26, [x24]",              // x26 = TCR
 
         // -- Read stack virt_top for this CPU (save for after MMU enable)
         // Offset = per_cpu_stacks + cpu_id * 16 + 8
@@ -219,8 +227,7 @@ pub unsafe extern "C" fn secondary_entry_stub() -> ! {
         "ldr x24, ={mair}",
         "msr mair_el1, x24",
 
-        "ldr x24, ={tcr}",
-        "msr tcr_el1, x24",
+        "msr tcr_el1, x26",            // TCR from boot_info (in x26)
 
         "msr ttbr0_el1, x22",
         "msr ttbr1_el1, x21",
@@ -267,8 +274,7 @@ pub unsafe extern "C" fn secondary_entry_stub() -> ! {
         "ldr x24, ={mair}",
         "msr MAIR_EL1, x24",
 
-        "ldr x24, ={tcr}",
-        "msr TCR_EL1, x24",
+        "msr TCR_EL1, x26",            // TCR from boot_info (in x26)
 
         "msr TTBR0_EL1, x22",
         "msr TTBR1_EL1, x21",
@@ -310,11 +316,11 @@ pub unsafe extern "C" fn secondary_entry_stub() -> ! {
 
         pt_offset = const BOOTINFO_PAGE_TABLE_BASE_OFFSET,
         ttbr0_offset = const BOOTINFO_TTBR0_OFFSET,
+        tcr_offset = const BOOTINFO_TCR_OFFSET,
         stack_offset = const BOOTINFO_PER_CPU_STACKS_OFFSET,
         stack_size = const PER_CPU_STACK_INFO_SIZE,
         virt_top_offset = const PER_CPU_STACK_VIRT_TOP_OFFSET,
         mair = const MAIR_VALUE,
-        tcr = const TCR_VALUE,
         phys_map_base = const KERNEL_PHYS_MAP_BASE,
         secondary_entry_rust = sym secondary_entry_rust,
     );

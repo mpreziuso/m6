@@ -3,9 +3,13 @@
 //! Implements ARM PSCI v1.0+ for CPU power management.
 //! Used primarily to bring up secondary CPUs during SMP initialisation.
 //!
+//! The PSCI conduit (SMC vs HVC) is determined from the DTB /psci node.
+//!
 //! Reference: ARM DEN0022D - Power State Coordination Interface
 
 use core::arch::asm;
+use crate::dtb_platform::PsciMethod;
+use crate::platform::current_platform;
 
 // -- PSCI Function IDs (SMC64 convention for 64-bit calls)
 
@@ -87,22 +91,17 @@ pub enum AffinityState {
     OnPending = 2,
 }
 
-// -- SMC (Secure Monitor Call) Interface
+// -- PSCI Conduit Functions (SMC and HVC)
 
-/// Issue a PSCI HVC call with up to 3 arguments.
+/// Issue a PSCI call via HVC (Hypervisor Call).
 ///
-/// Uses the HVC64 calling convention (function ID in x0, args in x1-x3).
-/// HVC traps to EL2 which is where QEMU provides PSCI services.
+/// HVC traps to EL2 where QEMU or a hypervisor provides PSCI services.
 ///
 /// # Safety
-/// This issues an HVC. The caller must ensure:
-/// - The function ID is valid
-/// - Arguments are appropriate for the function
+/// This issues an HVC instruction.
 #[inline]
-unsafe fn psci_call(func: u32, arg0: u64, arg1: u64, arg2: u64) -> i64 {
+unsafe fn psci_call_hvc(func: u32, arg0: u64, arg1: u64, arg2: u64) -> i64 {
     let result: i64;
-    // SAFETY: HVC call to hypervisor. x0-x3 are used for call/return.
-    // QEMU's virt machine provides PSCI via HVC when running with EL2.
     unsafe {
         asm!(
             "hvc #0",
@@ -114,6 +113,49 @@ unsafe fn psci_call(func: u32, arg0: u64, arg1: u64, arg2: u64) -> i64 {
         );
     }
     result
+}
+
+/// Issue a PSCI call via SMC (Secure Monitor Call).
+///
+/// SMC traps to EL3 where firmware (e.g., TF-A) provides PSCI services.
+///
+/// # Safety
+/// This issues an SMC instruction.
+#[inline]
+unsafe fn psci_call_smc(func: u32, arg0: u64, arg1: u64, arg2: u64) -> i64 {
+    let result: i64;
+    unsafe {
+        asm!(
+            "smc #0",
+            inout("x0") func as u64 => result,
+            inout("x1") arg0 => _,
+            inout("x2") arg1 => _,
+            inout("x3") arg2 => _,
+            options(nomem, nostack)
+        );
+    }
+    result
+}
+
+/// Get the PSCI method from platform configuration.
+///
+/// Returns the method detected from DTB, or HVC as default.
+fn get_psci_method() -> PsciMethod {
+    current_platform()
+        .map(|p| p.psci_method())
+        .unwrap_or(PsciMethod::Hvc)
+}
+
+/// Issue a PSCI call using the platform-configured conduit (SMC or HVC).
+///
+/// # Safety
+/// The caller must ensure the function ID and arguments are valid.
+#[inline]
+unsafe fn psci_call(func: u32, arg0: u64, arg1: u64, arg2: u64) -> i64 {
+    match get_psci_method() {
+        PsciMethod::Smc => unsafe { psci_call_smc(func, arg0, arg1, arg2) },
+        PsciMethod::Hvc => unsafe { psci_call_hvc(func, arg0, arg1, arg2) },
+    }
 }
 
 // -- Public PSCI Interface

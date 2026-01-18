@@ -58,7 +58,13 @@ impl Console {
                 // SAFETY: We're reading/writing from a known MMIO address
                 unsafe {
                     let lsr_ptr = (self.base + dw8250::LSR as u64) as *const u32;
+                    // Timeout to avoid hanging on wrong UART address
+                    let mut timeout = 1_000u32;
                     while core::ptr::read_volatile(lsr_ptr) & dw8250::LSR_THRE == 0 {
+                        timeout = timeout.saturating_sub(1);
+                        if timeout == 0 {
+                            return; // Give up - wrong UART or hardware issue
+                        }
                         core::hint::spin_loop();
                     }
                     let thr_ptr = (self.base + dw8250::THR as u64) as *mut u32;

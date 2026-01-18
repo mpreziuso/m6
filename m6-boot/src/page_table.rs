@@ -672,21 +672,32 @@ pub const MAIR_VALUE: u64 = 0x00_00_00_00_44_04_FF;
 
 /// TCR (Translation Control Register) value for 4KB pages, 48-bit VA
 ///
+/// Computes the TCR value with correct IPS for this CPU's physical address capability.
+/// The IPS field is read from ID_AA64MMFR0_EL1.PARange at runtime.
+///
 /// - T0SZ = 16 (48-bit VA for TTBR0)
 /// - T1SZ = 16 (48-bit VA for TTBR1)
 /// - TG0 = 0b00 (4KB granule for TTBR0)
 /// - TG1 = 0b10 (4KB granule for TTBR1)
-/// - IPS = 0b101 (48-bit PA)
+/// - IPS = dynamic (from CPU's PARange)
 /// - SH0/SH1 = 0b11 (Inner Shareable)
 /// - ORGN0/ORGN1 = 0b01 (Write-Back, Read-Allocate, Write-Allocate)
 /// - IRGN0/IRGN1 = 0b01 (Write-Back, Read-Allocate, Write-Allocate)
-pub const TCR_VALUE: u64 = 16               // T0SZ
-    | (16 << 16)       // T1SZ
-    | (0b10 << 30)     // TG1 = 4KB
-    | (0b101 << 32)    // IPS = 48-bit
-    | (0b11 << 12)     // SH0 = Inner Shareable
-    | (0b11 << 28)     // SH1 = Inner Shareable
-    | (0b01 << 10)     // ORGN0
-    | (0b01 << 26)     // ORGN1
-    | (0b01 << 8)      // IRGN0
-    | (0b01 << 24);    // IRGN1
+#[must_use]
+pub fn tcr_value() -> u64 {
+    // Get the CPU's physical address range capability and convert to IPS
+    let ips = m6_arch::cpu::pa_range::tcr_ips();
+
+    // Build TCR value with dynamic IPS
+    let base: u64 = 16             // T0SZ = 48-bit VA
+        | (16 << 16)               // T1SZ = 48-bit VA
+        | (0b10 << 30)             // TG1 = 4KB granule
+        | (0b11 << 12)             // SH0 = Inner Shareable
+        | (0b11 << 28)             // SH1 = Inner Shareable
+        | (0b01 << 10)             // ORGN0 = WB-RWA
+        | (0b01 << 26)             // ORGN1 = WB-RWA
+        | (0b01 << 8)              // IRGN0 = WB-RWA
+        | (0b01 << 24);            // IRGN1 = WB-RWA
+
+    base | (ips << 32)  // IPS is at bits [34:32]
+}

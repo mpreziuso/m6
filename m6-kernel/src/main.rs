@@ -52,9 +52,13 @@ fn panic(info: &PanicInfo) -> ! {
 ///
 /// # Safety
 /// This function is called directly by the bootloader with a valid BootInfo pointer.
+/// The bootloader passes boot_info as a physical address.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
-    let boot_info = unsafe { &*boot_info };
+pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
+    // Access boot_info via physmap (works on both QEMU and Rock 5B+)
+    let boot_info_virt = m6_common::boot::KERNEL_PHYS_MAP_BASE + (boot_info_phys as u64);
+    let boot_info = unsafe { &*(boot_info_virt as *const BootInfo) };
+
     if !boot_info.is_valid() {
         #[allow(clippy::never_loop)]
         loop {
@@ -63,14 +67,12 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
     }
 
     platform::init(boot_info);
-    // Use the virtual address from boot_info (set up by bootloader) with the
-    // UART type detected from DTB
+
     let uart_type = m6_pal::current_platform()
         .map(|p| p.uart_type())
         .unwrap_or(m6_pal::UartType::Pl011);
     console::init_with_base(boot_info.uart_virt_base.0, uart_type);
 
-    // Initialise framebuffer console if available
     if boot_info.framebuffer.is_valid() {
         let fb_config = m6_pal::FramebufferConfig {
             base: boot_info.framebuffer.virt_base,
@@ -84,10 +86,7 @@ pub unsafe extern "C" fn _start(boot_info: *const BootInfo) -> ! {
     }
 
     print_banner();
-
-    // Initialise timer before logging (for timestamps)
     timer::init();
-
     logger::init();
 
     log::info!("M6 Kernel starting...");

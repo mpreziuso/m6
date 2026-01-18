@@ -455,11 +455,25 @@ pub unsafe fn init(smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
     // SAFETY: Reading SMMU identification registers.
     let idr0 = unsafe { (base.as_ptr().add(SMMU_IDR0) as *const u32).read_volatile() };
     let idr1 = unsafe { (base.as_ptr().add(SMMU_IDR1) as *const u32).read_volatile() };
+    let idr5 = unsafe { (base.as_ptr().add(SMMU_IDR5) as *const u32).read_volatile() };
+
+    // Log detailed SMMU capabilities
+    let ttf = (idr0 >> 2) & 0x3;
+    let cohacc = (idr0 >> 4) & 0x1;
+    let oas = idr5 & 0x7;
+    let oas_bits = match oas {
+        0 => 32, 1 => 36, 2 => 40, 3 => 42, 4 => 44, 5 => 48, 6 => 52, _ => 0,
+    };
+    log::info!(
+        "SMMU capabilities: IDR0={:#010x} IDR5={:#010x} TTF={} COHACC={} OAS={}bit",
+        idr0, idr5, ttf, cohacc, oas_bits
+    );
 
     // Verify AArch64 translation table format support
-    let ttf = (idr0 >> 2) & 0x3;
-    if ttf != 0b10 && ttf != 0b00 {
-        log::error!("SMMU does not support AArch64 page tables (TTF={:#x})", ttf);
+    // TTF encoding: 0b00=reserved, 0b01=AArch32 only, 0b10=AArch64 only, 0b11=both
+    let supports_aarch64 = ttf == 0b10 || ttf == 0b11;
+    if !supports_aarch64 {
+        log::error!("SMMU does not support AArch64 page tables (TTF={})", ttf);
         return Err(SmmuError::InvalidConfig);
     }
 

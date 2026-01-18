@@ -4,7 +4,7 @@
 //! Supports both EL1 (QEMU) and EL2 (Rock 5B+) boot scenarios.
 
 use core::arch::asm;
-use m6_boot::page_table::{MAIR_VALUE, TCR_VALUE};
+use m6_boot::page_table::{MAIR_VALUE, tcr_value};
 
 /// Enable MMU with the prepared page tables and jump to kernel
 ///
@@ -56,6 +56,9 @@ unsafe fn enable_mmu_and_jump_from_el1(
 ) -> ! {
     // Clear ASID bits from TTBR0
     let ttbr0_masked = ttbr0 & 0x0000_FFFF_FFFF_FFFF;
+
+    // Get TCR value with correct IPS for this CPU
+    let tcr = tcr_value();
 
     // SAFETY: This is the final step of the bootloader from EL1
     unsafe {
@@ -110,7 +113,7 @@ unsafe fn enable_mmu_and_jump_from_el1(
             "br {entry}",
 
             mair = in(reg) MAIR_VALUE,
-            tcr = in(reg) TCR_VALUE,
+            tcr = in(reg) tcr,
             ttbr0 = in(reg) ttbr0_masked,
             ttbr1 = in(reg) ttbr1,
             boot_info = in(reg) boot_info,
@@ -140,96 +143,116 @@ unsafe fn enable_mmu_and_jump_from_el2(
     // Clear ASID bits from TTBR0
     let ttbr0_masked = ttbr0 & 0x0000_FFFF_FFFF_FFFF;
 
+    // Get TCR value with correct IPS for this CPU
+    let tcr = tcr_value();
+
     // SAFETY: This is the final step of the bootloader from EL2
     unsafe {
         asm!(
+            // ============================================================
+            // CRITICAL: Save ALL input operands to callee-saved registers
+            // IMMEDIATELY, before using ANY scratch registers.
+            // The compiler may allocate in(reg) operands to x9-x17.
+            // ============================================================
+            "mov x19, {ttbr0}",
+            "mov x20, {ttbr1}",
+            "mov x21, {mair}",
+            "mov x22, {tcr}",
+            "mov x23, {boot_info}",
+            "mov x24, {stack}",
+            "mov x25, {entry}",
+
+            // Now safe to use x9-x17 as scratch registers
+
             // Disable interrupts at EL2
             "msr daifset, #0xf",
 
-            // -- Configure EL2 for EL1 execution --
-
-            // HCR_EL2: RW=1 (EL1 is AArch64), SWIO=1 (cache ops work)
-            "mov x9, #(1 << 31)",     // RW bit
+            // Configure HCR_EL2 to disable trapping before writing EL1 regs
+            // UEFI may have TVM=1 (trap virtual memory controls) set
+            "mov x9, #(1 << 31)",     // RW bit (EL1 is AArch64)
             "orr x9, x9, #(1 << 1)",  // SWIO bit
             "msr hcr_el2, x9",
 
-            // Enable EL1 timer access from EL2
-            // CNTHCTL_EL2: EL1PCEN=1, EL1PCTEN=1
+            // Disable all coprocessor/sysreg trapping
+            "msr cptr_el2, xzr",
+            "msr hstr_el2, xzr",
+            "msr mdcr_el2, xzr",
+            "isb",
+
+            // Set up EL1 MMU registers (from saved callee-saved regs)
+            "msr ttbr0_el1, x19",     // TTBR0 from x19
+            "msr ttbr1_el1, x20",     // TTBR1 from x20
+            "msr mair_el1, x21",      // MAIR from x21
+            "msr tcr_el1, x22",       // TCR from x22
+            "isb",
+
+            // Disable EL2 MMU if UEFI left it enabled
+            "mrs x9, sctlr_el2",
+            "bic x9, x9, #1",         // Clear M bit
+            "msr sctlr_el2, x9",
+            "isb",
+            "dsb sy",
+
+            // Enable EL1 timer access
             "mov x9, #3",
             "msr cnthctl_el2, x9",
-            // No offset between physical and virtual counters
             "msr cntvoff_el2, xzr",
 
-            // Enable EL1 GIC access (GICv3 system registers)
-            // ICC_SRE_EL2: SRE=1, Enable=1
+            // Enable EL1 GIC access (ICC_SRE_EL2)
             "mov x9, #0xf",
-            "msr s3_4_c12_c9_5, x9",  // ICC_SRE_EL2 encoding
+            "msr s3_4_c12_c9_5, x9",
             "isb",
 
-            // -- Configure EL1 registers (will take effect after ERET) --
+            // Enable FP/SIMD at EL1
+            "mov x9, #(3 << 20)",
+            "msr cpacr_el1, x9",
+            "isb",
 
-            // Set up MAIR_EL1
-            "msr mair_el1, {mair}",
-
-            // Set up TCR_EL1
-            "msr tcr_el1, {tcr}",
-
-            // Set up TTBR0_EL1 (identity mapping)
-            "msr ttbr0_el1, {ttbr0}",
-
-            // Set up TTBR1_EL1 (kernel mapping)
-            "msr ttbr1_el1, {ttbr1}",
-
-            // Ensure all writes complete
             "dsb sy",
-            "isb",
 
-            // Invalidate TLB (using EL1 TLB invalidate since we're setting up EL1)
+            // Invalidate TLB
             "tlbi vmalle1",
             "dsb sy",
             "isb",
 
-            // Invalidate instruction cache
+            // Invalidate I-cache
             "ic iallu",
             "dsb sy",
             "isb",
 
-            // Set up SCTLR_EL1 with MMU enabled
-            // M=1 (MMU), C=1 (data cache), I=1 (instruction cache)
-            "mov x9, #0",
-            "orr x9, x9, #1",         // M bit
-            "orr x9, x9, #(1 << 2)",  // C bit
-            "orr x9, x9, #(1 << 12)", // I bit
+            // Set up SCTLR_EL1 with MMU enabled + RES1 bits
+            "movz x9, #0x1805",
+            "movk x9, #0x30C5, lsl #16",
             "msr sctlr_el1, x9",
+            "isb",
 
-            // Set up SP_EL1 for kernel stack
-            "msr sp_el1, {stack}",
+            // Set up SP_EL1 from saved register
+            "msr sp_el1, x24",        // stack from x24
 
-            // -- Prepare for ERET to EL1 --
+            // -- Prepare for ERET --
 
-            // SPSR_EL2: Return to EL1h with all interrupts masked
-            // D=1, A=1, I=1, F=1 (bits 9,8,7,6), M=0b0101 (EL1h)
+            // SPSR_EL2: Return to EL1h with interrupts masked
             "mov x9, #0x3c5",
             "msr spsr_el2, x9",
 
-            // ELR_EL2: Return address is kernel entry point
-            "msr elr_el2, {entry}",
+            // ELR_EL2: Return address is kernel entry
+            "msr elr_el2, x25",       // entry from x25
 
-            // Set up x0 with boot_info for kernel
-            "mov x0, {boot_info}",
+            // Set up x0 with boot_info
+            "mov x0, x23",            // boot_info from x23
 
-            // Clear other argument registers for cleanliness
+            // Clear other argument registers
             "mov x1, xzr",
             "mov x2, xzr",
             "mov x3, xzr",
 
-            // Return to EL1
+            // ERET to EL1
             "eret",
 
-            mair = in(reg) MAIR_VALUE,
-            tcr = in(reg) TCR_VALUE,
             ttbr0 = in(reg) ttbr0_masked,
             ttbr1 = in(reg) ttbr1,
+            mair = in(reg) MAIR_VALUE,
+            tcr = in(reg) tcr,
             boot_info = in(reg) boot_info,
             stack = in(reg) stack_top,
             entry = in(reg) kernel_entry,

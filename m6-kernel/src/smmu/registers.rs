@@ -12,6 +12,8 @@
 pub const SMMU_IDR0: usize = 0x000;
 /// Identification Register 1
 pub const SMMU_IDR1: usize = 0x004;
+/// Identification Register 5 (contains OAS - Output Address Size)
+pub const SMMU_IDR5: usize = 0x014;
 /// Control Register 0
 pub const SMMU_CR0: usize = 0x020;
 /// Control Register 0 Acknowledgement
