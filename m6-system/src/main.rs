@@ -196,7 +196,8 @@ const DEVMGR_DTB_ADDR: u64 = 0x0000_1001_0000; // Just after boot info
 const DEVMGR_INITRD_ADDR: u64 = 0x0000_2000_0000; // 512MB mark
 
 /// Maximum number of device untyped regions to pass to device-mgr
-const MAX_DEVICE_UNTYPED: usize = 8;
+/// RK3588 has 10+ UARTs, 5 PCIe controllers, SMMUs, etc.
+const MAX_DEVICE_UNTYPED: usize = 48;
 
 /// First device untyped slot in device-mgr's CSpace
 const DEVMGR_FIRST_DEVICE_UNTYPED: u64 = 20;
@@ -290,11 +291,11 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     io::puts("[init] Registry endpoint created successfully\n");
 
     // Build initial capabilities list including device untypeds
-    // Max 16 initial caps: 3 standard + up to 8 device untypeds + some margin
-    let mut initial_caps_storage: [InitialCap; 16] = [InitialCap {
+    // Max 64 initial caps: 5 standard + up to 48 device untypeds + margin
+    let mut initial_caps_storage: [InitialCap; 64] = [InitialCap {
         src_slot: 0,
         dst_slot: 0,
-    }; 16];
+    }; 64];
     let mut cap_idx = 0;
 
     // Standard caps
@@ -551,9 +552,13 @@ fn request_uart_driver(registry_ep: u64, radix: u8, next_slot: &mut u64) {
 
                 if recv_count > 0 {
                     let recv_caps = unsafe { ipc_get_recv_caps() };
-                    let uart_ep_cptr = cptr(recv_caps[0]);
-                    io::init_console(uart_ep_cptr);
-                    io::puts("[init] IPC console initialised\n");
+                    io::puts("[init] Received UART endpoint at slot ");
+                    io::put_u64(recv_caps[0]);
+                    io::newline();
+                    // Don't switch to IPC console for now - the spawned UART driver
+                    // may be connected to a different UART than the kernel console.
+                    // TODO: Pass UART address from device-mgr to spawn correct driver.
+                    io::puts("[init] UART driver available (not switching console)\n");
                 } else {
                     io::puts("[init] Warning: No endpoint received from device-mgr\n");
                 }

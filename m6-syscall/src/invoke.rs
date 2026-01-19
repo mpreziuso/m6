@@ -1017,6 +1017,64 @@ pub fn irq_clear_handler(irq_handler: u64) -> SyscallResult {
     check_result(syscall1(Syscall::IrqClearHandler, irq_handler))
 }
 
+/// Result of MSI allocation.
+#[derive(Clone, Copy, Debug)]
+pub struct MsiAllocResult {
+    /// Physical address to write for MSI (GICD_SETSPI_NSR).
+    pub target_addr: u64,
+    /// Base SPI number (message data for first vector).
+    pub base_spi: u32,
+    /// Number of vectors actually allocated.
+    pub vector_count: u32,
+}
+
+/// Allocate MSI vectors for a device.
+///
+/// Allocates SPIs for MSI-X interrupt delivery and returns the
+/// configuration needed to programme the device's MSI-X table.
+///
+/// # Arguments
+///
+/// * `irq_control` - CPtr to the IRQControl capability
+/// * `vector_count` - Number of MSI vectors requested
+///
+/// # Returns
+///
+/// On success, returns MsiAllocResult with MSI configuration.
+/// On error, returns the syscall error.
+#[inline]
+pub fn msi_allocate(
+    irq_control: u64,
+    vector_count: u32,
+) -> Result<MsiAllocResult, crate::error::SyscallError> {
+    let x0: i64;
+    let x1: u64;
+    let x2: u64;
+    let x3: u64;
+    // SAFETY: Inline assembly for syscall. Capture all return registers.
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x7") Syscall::MsiAllocate as u64,
+            inlateout("x0") irq_control as i64 => x0,
+            inlateout("x1") vector_count as u64 => x1,
+            lateout("x2") x2,
+            lateout("x3") x3,
+            options(nostack)
+        );
+    }
+    if x0 < 0 {
+        Err(crate::error::SyscallError::from_i64(x0)
+            .unwrap_or(crate::error::SyscallError::InvalidArg))
+    } else {
+        Ok(MsiAllocResult {
+            target_addr: x1,
+            base_spi: x2 as u32,
+            vector_count: x3 as u32,
+        })
+    }
+}
+
 // -- IOSpace and DMA Operations
 
 /// Create an IOSpace from untyped memory.
@@ -1341,4 +1399,115 @@ pub fn get_random(buf: &mut [u8]) -> SyscallResult {
         buf.as_mut_ptr() as u64,
         buf.len() as u64,
     ))
+}
+
+// -- Cache Maintenance Operations
+
+/// DMA transfer direction for cache maintenance.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmaDirection {
+    /// CPU writes data, device reads (e.g., TX buffer).
+    ToDevice,
+    /// Device writes data, CPU reads (e.g., RX buffer).
+    FromDevice,
+    /// Both CPU and device may read/write.
+    Bidirectional,
+}
+
+/// Clean cache range (write back dirty lines to memory).
+///
+/// Use before DMA to device to ensure memory has the latest CPU writes.
+///
+/// # Arguments
+///
+/// * `vaddr` - Virtual address of buffer
+/// * `size` - Size of buffer in bytes
+///
+/// # Returns
+///
+/// 0 on success.
+///
+/// # Errors
+///
+/// * `InvalidArg` - Size exceeds 16MB limit
+/// * `Range` - Address is outside userspace range
+#[inline]
+pub fn cache_clean(vaddr: u64, size: usize) -> SyscallResult {
+    check_result(syscall2(Syscall::CacheClean, vaddr, size as u64))
+}
+
+/// Invalidate cache range (discard cache lines without writing back).
+///
+/// Use after DMA from device to ensure CPU reads fresh data from memory.
+///
+/// # Arguments
+///
+/// * `vaddr` - Virtual address of buffer
+/// * `size` - Size of buffer in bytes
+///
+/// # Returns
+///
+/// 0 on success.
+///
+/// # Errors
+///
+/// * `InvalidArg` - Size exceeds 16MB limit
+/// * `Range` - Address is outside userspace range
+///
+/// # Safety Note
+///
+/// Only use when you're certain no dirty data needs to be preserved.
+/// Typically used after a device has written new data via DMA.
+#[inline]
+pub fn cache_invalidate(vaddr: u64, size: usize) -> SyscallResult {
+    check_result(syscall2(Syscall::CacheInvalidate, vaddr, size as u64))
+}
+
+/// Flush cache range (clean + invalidate).
+///
+/// Use for bidirectional DMA or when the coherency direction is uncertain.
+///
+/// # Arguments
+///
+/// * `vaddr` - Virtual address of buffer
+/// * `size` - Size of buffer in bytes
+///
+/// # Returns
+///
+/// 0 on success.
+///
+/// # Errors
+///
+/// * `InvalidArg` - Size exceeds 16MB limit
+/// * `Range` - Address is outside userspace range
+#[inline]
+pub fn cache_flush(vaddr: u64, size: usize) -> SyscallResult {
+    check_result(syscall2(Syscall::CacheFlush, vaddr, size as u64))
+}
+
+/// Synchronise cache for DMA with direction awareness.
+///
+/// This is a convenience wrapper that selects the appropriate cache
+/// operation based on DMA direction:
+///
+/// - `ToDevice`: Clean (CPU -> Device)
+/// - `FromDevice`: Invalidate (Device -> CPU)
+/// - `Bidirectional`: Flush (both directions)
+///
+/// # Arguments
+///
+/// * `vaddr` - Virtual address of buffer
+/// * `size` - Size of buffer in bytes
+/// * `direction` - DMA transfer direction
+///
+/// # Returns
+///
+/// 0 on success.
+#[inline]
+pub fn dma_sync(vaddr: u64, size: usize, direction: DmaDirection) -> SyscallResult {
+    match direction {
+        DmaDirection::ToDevice => cache_clean(vaddr, size),
+        DmaDirection::FromDevice => cache_invalidate(vaddr, size),
+        DmaDirection::Bidirectional => cache_flush(vaddr, size),
+    }
 }

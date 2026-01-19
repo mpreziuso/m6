@@ -228,6 +228,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "m6-mmio"
+version = "0.1.0"
+dependencies = [
+ "heapless",
+ "tock-registers",
+ "zerocopy",
+]
+
+[[package]]
 name = "m6-paging"
 version = "0.1.0"
 dependencies = [
@@ -280,6 +289,8 @@ dependencies = [
  "m6-common",
  "m6-syscall",
  "tar-no-std",
+ "tock-registers",
+ "zerocopy",
 ]
 
 [[package]]

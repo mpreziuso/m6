@@ -11,7 +11,9 @@ pub const DEV_MGR_BOOT_INFO_MAGIC: u64 = 0x54_4F_4F_42_4D_56_45_44;
 pub const DEV_MGR_BOOT_INFO_VERSION: u32 = 1;
 
 /// Maximum number of device untyped regions supported.
-pub const MAX_DEVICE_UNTYPED: usize = 8;
+/// RK3588 has 10+ UARTs, 5 PCIe controllers with multiple reg entries each,
+/// plus SMMUs, GIC, USB controllers, etc. - 48 to match MAX_DEVICE_REGIONS.
+pub const MAX_DEVICE_UNTYPED: usize = 48;
 
 /// Boot information passed from init to device-mgr.
 #[repr(C)]
@@ -44,15 +46,15 @@ pub struct DevMgrBootInfo {
 impl DevMgrBootInfo {
     /// Find the device untyped slot that covers a given physical address.
     ///
-    /// Returns the slot number and size in bytes if found.
-    pub fn find_device_untyped(&self, phys_addr: u64) -> Option<(u64, u64)> {
+    /// Returns (slot, size, base_address) if found.
+    pub fn find_device_untyped(&self, phys_addr: u64) -> Option<(u64, u64, u64)> {
         for i in 0..self.device_untyped_count as usize {
             let base = self.device_untyped_phys[i];
             let size = 1u64 << self.device_untyped_size_bits[i];
             if phys_addr >= base && phys_addr < base + size {
                 // Slot number is FIRST_DEVICE_UNTYPED + index
                 let slot = crate::slots::FIRST_DEVICE_UNTYPED + i as u64;
-                return Some((slot, size));
+                return Some((slot, size, base));
             }
         }
         None

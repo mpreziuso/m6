@@ -1,0 +1,16 @@
+[package]
+name = "m6-mmio"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "MMIO abstraction layer and queue engine for M6 device drivers"
+
+[lib]
+name = "m6_mmio"
+
+[dependencies]
+tock-registers = { workspace = true }
+zerocopy = { workspace = true }
+heapless = { workspace = true }

@@ -78,7 +78,17 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         is_platform: true,
         virtio_device_id: 0, // Match any (fallback)
     },
-    // -- Storage drivers
+    // -- Storage drivers (PCIe class code matching)
+    // NVMe: class=01 (storage), subclass=08 (NVMe), prog_if=02 (NVMe)
+    DriverManifest {
+        compatible: "pcie:010802",
+        binary_name: "drv-nvme",
+        needs_irq: true,
+        needs_iommu: true,
+        is_platform: false,
+        virtio_device_id: 0,
+    },
+    // Platform NVMe (DTB-enumerated)
     DriverManifest {
         compatible: "nvme",
         binary_name: "drv-nvme",
@@ -87,7 +97,26 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         is_platform: false,
         virtio_device_id: 0,
     },
-    // -- USB drivers
+    // SATA AHCI: class=01 (storage), subclass=06 (SATA), prog_if=01 (AHCI)
+    DriverManifest {
+        compatible: "pcie:010601",
+        binary_name: "drv-ahci",
+        needs_irq: true,
+        needs_iommu: true,
+        is_platform: false,
+        virtio_device_id: 0,
+    },
+    // -- USB drivers (PCIe class code matching)
+    // xHCI: class=0c (serial bus), subclass=03 (USB), prog_if=30 (xHCI)
+    DriverManifest {
+        compatible: "pcie:0c0330",
+        binary_name: "drv-usb-xhci",
+        needs_irq: true,
+        needs_iommu: true,
+        is_platform: false,
+        virtio_device_id: 0,
+    },
+    // Platform xHCI (DTB-enumerated)
     DriverManifest {
         compatible: "generic-xhci",
         binary_name: "drv-usb-xhci",

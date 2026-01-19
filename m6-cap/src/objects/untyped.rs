@@ -129,6 +129,43 @@ impl UntypedObject {
 
         Ok(alloc_addr)
     }
+
+    /// Try to allocate at a specific offset within the untyped.
+    ///
+    /// This is used for device untypeds where we need to create frames at
+    /// specific physical addresses (e.g., PCIe BAR addresses within a memory
+    /// window).
+    ///
+    /// NOTE: This doesn't update the watermark - device memory is accessed
+    /// directly without sequential allocation tracking.
+    ///
+    /// # Parameters
+    ///
+    /// - `offset`: Offset from base where allocation should occur
+    /// - `object_size`: Size of the object to allocate
+    ///
+    /// # Returns
+    ///
+    /// Physical address of the allocated space, or error.
+    pub fn try_allocate_at_offset(
+        &self,
+        offset: u64,
+        object_size: usize,
+    ) -> Result<PhysAddr, CapError> {
+        // Check if this is a device untyped
+        if !self.is_device {
+            return Err(CapError::InvalidOperation);
+        }
+
+        // Check if the requested region fits within the untyped
+        let end_offset = offset.saturating_add(object_size as u64);
+        if end_offset > self.size() as u64 {
+            return Err(CapError::UntypedExhausted);
+        }
+
+        // Return the physical address at the requested offset
+        Ok(self.phys_base.offset(offset))
+    }
 }
 
 /// Parameters for retyping untyped memory into new objects.

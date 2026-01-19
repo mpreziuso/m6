@@ -31,16 +31,31 @@ pub enum DeviceState {
     Dead = 3,
 }
 
+/// MSI-X capability information for PCIe devices
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MsixInfo {
+    /// Whether MSI-X capability is present
+    pub present: bool,
+    /// Number of MSI-X vectors available
+    pub table_size: u16,
+    /// BAR index containing MSI-X table (0-5)
+    pub table_bir: u8,
+    /// Offset of MSI-X table within the BAR
+    pub table_offset: u32,
+    /// Config space offset of MSI-X capability
+    pub cap_offset: u8,
+}
+
 /// Device entry in registry
 #[derive(Clone)]
 pub struct DeviceEntry {
-    /// FDT node path (e.g., "/soc/uart@9000000")
+    /// FDT node path (e.g., "/soc/uart@9000000") or PCIe BDF (e.g., "pcie:00:00.0")
     pub path: [u8; MAX_PATH_LEN],
     pub path_len: usize,
-    /// First compatible string from FDT
+    /// First compatible string from FDT or PCIe class code (e.g., "pcie:010802")
     pub compatible: [u8; MAX_COMPAT_LEN],
     pub compatible_len: usize,
-    /// Physical base address (from reg property)
+    /// Physical base address (from reg property or BAR0 for PCIe)
     pub phys_base: u64,
     /// Size of MMIO region
     pub size: u64,
@@ -49,6 +64,12 @@ pub struct DeviceEntry {
     /// VirtIO device ID (0 if not a virtio device or not yet probed)
     /// Value read from MMIO offset 0x08: 1=net, 2=blk, 3=console, etc.
     pub virtio_device_id: u32,
+    /// PCIe Bus/Device/Function (None for platform devices)
+    pub pcie_bdf: Option<(u8, u8, u8)>,
+    /// IOMMU stream ID (0 = none, used for PCIe devices)
+    pub stream_id: u32,
+    /// MSI-X capability info (for PCIe devices)
+    pub msix: MsixInfo,
     /// Current state
     pub state: DeviceState,
     /// Index into drivers array if bound, or usize::MAX
@@ -67,6 +88,15 @@ impl DeviceEntry {
             size: 0,
             irq: 0,
             virtio_device_id: 0,
+            pcie_bdf: None,
+            stream_id: 0,
+            msix: MsixInfo {
+                present: false,
+                table_size: 0,
+                table_bir: 0,
+                table_offset: 0,
+                cap_offset: 0,
+            },
             state: DeviceState::Unbound,
             driver_idx: usize::MAX,
         }

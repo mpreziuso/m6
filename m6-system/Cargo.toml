@@ -32,6 +32,10 @@ name = "drv-virtio-blk"
 path = "src/drivers/virtio_blk/main.rs"
 
 [[bin]]
+name = "drv-nvme"
+path = "src/drivers/nvme/main.rs"
+
+[[bin]]
 name = "svc-fat32"
 path = "src/services/fat32/main.rs"
 
@@ -44,3 +48,5 @@ m6-alloc = { path = "../m6-alloc" }
 fdt = "0.1"
 tar-no-std = "0.4"
 embedded-sdmmc = { version = "0.8", default-features = false }
+tock-registers = { workspace = true }
+zerocopy = { workspace = true }

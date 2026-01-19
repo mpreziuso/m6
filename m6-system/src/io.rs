@@ -126,3 +126,31 @@ pub fn put_hex(n: u64) {
 pub fn newline() {
     puts("\n");
 }
+
+/// Print a byte as two hex digits (no prefix).
+#[allow(dead_code)]
+pub fn put_hex_byte(b: u8) {
+    const HEX_CHARS: &[u8] = b"0123456789abcdef";
+    let mut buf = [0u8; 2];
+    buf[0] = HEX_CHARS[(b >> 4) as usize];
+    buf[1] = HEX_CHARS[(b & 0xF) as usize];
+    // SAFETY: We just filled this with hex chars
+    let s = unsafe { core::str::from_utf8_unchecked(&buf) };
+    puts(s);
+}
+
+/// Print a 16-bit value as hex (no prefix).
+#[allow(dead_code)]
+pub fn put_hex16(v: u16) {
+    put_hex_byte((v >> 8) as u8);
+    put_hex_byte(v as u8);
+}
+
+/// Print a 32-bit value as hex (no prefix).
+#[allow(dead_code)]
+pub fn put_hex32(v: u32) {
+    put_hex_byte((v >> 24) as u8);
+    put_hex_byte((v >> 16) as u8);
+    put_hex_byte((v >> 8) as u8);
+    put_hex_byte(v as u8);
+}

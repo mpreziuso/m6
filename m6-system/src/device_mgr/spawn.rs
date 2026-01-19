@@ -52,12 +52,31 @@ pub enum SpawnError {
     DeviceUntypedNotFound,
     /// IOMMU required but not available (security violation)
     IommuRequired,
+    /// Failed to allocate MSI vectors
+    MsiAllocateFailed(SyscallError),
+    /// Failed to setup MSI-X interrupts
+    MsixSetupFailed,
 }
 
 impl From<ElfError> for SpawnError {
     fn from(e: ElfError) -> Self {
         Self::InvalidElf(e)
     }
+}
+
+/// MSI-X capability information (copied from registry)
+#[derive(Clone, Copy, Default)]
+pub struct MsixInfo {
+    /// Whether MSI-X capability is present
+    pub present: bool,
+    /// Number of MSI-X vectors available
+    pub table_size: u16,
+    /// BAR index containing MSI-X table
+    pub table_bir: u8,
+    /// Offset of MSI-X table within the BAR
+    pub table_offset: u32,
+    /// Config space offset of MSI-X capability
+    pub cap_offset: u8,
 }
 
 /// Device information needed for spawning (copied to avoid borrow issues)
@@ -67,10 +86,14 @@ pub struct DeviceInfo {
     pub phys_base: u64,
     /// Size of MMIO region
     pub size: u64,
-    /// IRQ number
+    /// IRQ number (for legacy interrupts)
     pub irq: u32,
     /// Stream ID for IOMMU/SMMU (None if device doesn't have one, e.g. VirtIO MMIO)
     pub stream_id: Option<u32>,
+    /// PCIe BDF address (None for platform devices)
+    pub pcie_bdf: Option<(u8, u8, u8)>,
+    /// MSI-X capability info (None for non-MSI-X devices)
+    pub msix: Option<MsixInfo>,
 }
 
 impl DeviceInfo {
@@ -80,9 +103,24 @@ impl DeviceInfo {
             phys_base: entry.phys_base,
             size: entry.size,
             irq: entry.irq,
-            // VirtIO MMIO devices typically don't have stream IDs
-            // PCIe devices would extract this from device tree "iommu-map" property
-            stream_id: None,
+            // Use stream_id from registry if non-zero (PCIe devices have stream IDs)
+            stream_id: if entry.stream_id != 0 {
+                Some(entry.stream_id)
+            } else {
+                None
+            },
+            pcie_bdf: entry.pcie_bdf,
+            msix: if entry.msix.present {
+                Some(MsixInfo {
+                    present: true,
+                    table_size: entry.msix.table_size,
+                    table_bir: entry.msix.table_bir,
+                    table_offset: entry.msix.table_offset,
+                    cap_offset: entry.msix.cap_offset,
+                })
+            } else {
+                None
+            },
         }
     }
 }
@@ -474,6 +512,27 @@ pub fn spawn_driver(
         dma_buffer_slots.as_ref(), // optional DMA buffer frame slots
     )?;
 
+    // Setup MSI-X for PCIe devices that support it
+    if let (Some(msix), Some(bdf)) = (&config.device_info.msix, config.device_info.pcie_bdf)
+        && msix.present
+        && config.device_info.phys_base != 0
+    {
+        // Request 2 vectors for NVMe (admin + 1 IO queue), can be expanded later
+        let requested_vectors = 2u32.min(msix.table_size as u32);
+
+        let msix_result = setup_msix(
+            msix,
+            requested_vectors,
+            bdf,
+            config.device_info.phys_base,
+            registry,
+            &cptr,
+        )?;
+
+        // Install MSI-X handler capabilities into driver's CSpace
+        install_msix_caps(cptr(cspace_slot), cptr(slots::ROOT_CNODE), &msix_result)?;
+    }
+
     // Calculate fault badge for this driver
     let driver_idx = registry.driver_count;
     let fault_badge = crate::ipc::badge::fault_badge_for_driver(driver_idx as u32);
@@ -554,19 +613,24 @@ fn create_device_frame(
     let boot_info = unsafe { crate::get_boot_info() };
 
     // Find the device untyped that covers this physical address
-    let (device_untyped_slot, _size) = boot_info
+    let (device_untyped_slot, _size, untyped_base) = boot_info
         .find_device_untyped(device_info.phys_base)
         .ok_or(SpawnError::DeviceUntypedNotFound)?;
 
+    // Calculate offset within the device untyped
+    // For PCIe devices, the BAR address may be offset from the untyped base
+    let offset = device_info.phys_base.saturating_sub(untyped_base);
+
     // Retype the device untyped to DeviceFrame
     // DeviceFrame size is always 4KB (size_bits = 12)
+    // For DeviceFrame, arg5 is the offset within the device untyped
     retype(
         cptr(device_untyped_slot),
         ObjectType::DeviceFrame as u64,
         12, // 4KB
         cptr(slots::ROOT_CNODE),
         slot,
-        1,
+        offset,
     )
     .map_err(SpawnError::RetypeFailed)?;
 
@@ -1052,6 +1116,370 @@ fn install_driver_caps(
             let dest_slot = slots::driver::DMA_BUFFER_START + i as u64;
             cap_copy(child_cspace_cptr, dest_slot, 0, src_cnode_cptr, slot, 0)
                 .map_err(SpawnError::CapCopyFailed)?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Result of MSI-X setup
+pub struct MsixSetupResult {
+    /// Number of vectors actually allocated
+    pub vector_count: u32,
+    /// Base SPI number for the allocated vectors
+    pub base_spi: u32,
+    /// Slots containing IRQHandler caps (in device-mgr's CSpace)
+    pub handler_slots: [u64; slots::driver::MSIX_MAX_VECTORS],
+    /// Slots containing notification caps for each vector
+    pub notif_slots: [u64; slots::driver::MSIX_MAX_VECTORS],
+}
+
+/// Setup MSI-X interrupts for a PCIe device.
+///
+/// This function:
+/// 1. Allocates MSI vectors from the GIC
+/// 2. Creates IRQHandler capabilities for each allocated SPI
+/// 3. Maps the BAR containing the MSI-X table
+/// 4. Programmes each MSI-X table entry with target address and SPI data
+/// 5. Enables MSI-X in the device's config space
+///
+/// # Arguments
+/// * `msix` - MSI-X capability info from the device
+/// * `requested_vectors` - Number of vectors to allocate (clamped to device max)
+/// * `pcie_bdf` - PCIe Bus/Device/Function address for config space access
+/// * `bar_phys_base` - Physical base address of the BAR containing MSI-X table
+/// * `registry` - Registry for slot allocation
+/// * `cptr` - CPtr conversion function
+pub fn setup_msix(
+    msix: &MsixInfo,
+    requested_vectors: u32,
+    pcie_bdf: (u8, u8, u8),
+    bar_phys_base: u64,
+    registry: &mut Registry,
+    cptr: &impl Fn(u64) -> u64,
+) -> Result<MsixSetupResult, SpawnError> {
+    use crate::io;
+
+    // Clamp requested vectors to device capability and our maximum
+    let max_vectors = (msix.table_size as u32)
+        .min(requested_vectors)
+        .min(slots::driver::MSIX_MAX_VECTORS as u32);
+
+    if max_vectors == 0 {
+        return Err(SpawnError::MsixSetupFailed);
+    }
+
+    io::puts("[device-mgr] MSI-X: allocating ");
+    io::put_u64(max_vectors as u64);
+    io::puts(" vectors\n");
+
+    // Allocate MSI vectors from the kernel
+    let msi_result = msi_allocate(cptr(slots::IRQ_CONTROL), max_vectors)
+        .map_err(SpawnError::MsiAllocateFailed)?;
+
+    io::puts("[device-mgr] MSI-X: allocated ");
+    io::put_u64(msi_result.vector_count as u64);
+    io::puts(" vectors, base SPI=");
+    io::put_u64(msi_result.base_spi as u64);
+    io::puts(", target=");
+    io::put_hex(msi_result.target_addr);
+    io::newline();
+
+    let mut result = MsixSetupResult {
+        vector_count: msi_result.vector_count,
+        base_spi: msi_result.base_spi,
+        handler_slots: [0; slots::driver::MSIX_MAX_VECTORS],
+        notif_slots: [0; slots::driver::MSIX_MAX_VECTORS],
+    };
+
+    // Create IRQHandler and Notification caps for each vector
+    for i in 0..msi_result.vector_count {
+        let spi = msi_result.base_spi + i;
+        let handler_slot = registry.alloc_slot();
+        let notif_slot = registry.alloc_slot();
+
+        // Claim IRQ handler for this SPI
+        irq_control_get(
+            cptr(slots::IRQ_CONTROL),
+            spi,
+            cptr(slots::ROOT_CNODE),
+            handler_slot,
+            0,
+        )
+        .map_err(SpawnError::IrqClaimFailed)?;
+
+        // Create notification for this vector
+        retype(
+            cptr(slots::RAM_UNTYPED),
+            ObjectType::Notification as u64,
+            0,
+            cptr(slots::ROOT_CNODE),
+            notif_slot,
+            1,
+        )
+        .map_err(SpawnError::RetypeFailed)?;
+
+        // Bind the IRQ handler to the notification with badge = vector index
+        irq_set_handler(cptr(handler_slot), cptr(notif_slot), i as u64)
+            .map_err(SpawnError::IrqClaimFailed)?;
+
+        result.handler_slots[i as usize] = handler_slot;
+        result.notif_slots[i as usize] = notif_slot;
+    }
+
+    // Programme the MSI-X table
+    // The table is in the BAR at offset msix.table_offset
+    // We need to map the BAR temporarily to write to the table
+    programme_msix_table(
+        bar_phys_base,
+        msix,
+        msi_result.target_addr,
+        msi_result.base_spi,
+        msi_result.vector_count,
+        pcie_bdf,
+        registry,
+        cptr,
+    )?;
+
+    Ok(result)
+}
+
+/// Programme the MSI-X table entries.
+///
+/// This maps the BAR containing the MSI-X table, writes the target address
+/// and data to each entry, and unmasks the vectors.
+#[allow(clippy::too_many_arguments)]
+fn programme_msix_table(
+    bar_phys_base: u64,
+    msix: &MsixInfo,
+    target_addr: u64,
+    base_spi: u32,
+    vector_count: u32,
+    pcie_bdf: (u8, u8, u8),
+    registry: &mut Registry,
+    cptr: &impl Fn(u64) -> u64,
+) -> Result<(), SpawnError> {
+    use crate::io;
+
+    // SAFETY: Called after _start has initialised BOOT_INFO
+    let boot_info = unsafe { crate::get_boot_info() };
+
+    // Find the device untyped that covers the BAR
+    let (device_untyped_slot, _size, untyped_base) = boot_info
+        .find_device_untyped(bar_phys_base)
+        .ok_or(SpawnError::DeviceUntypedNotFound)?;
+
+    // Calculate the page-aligned base and offset
+    let table_phys = bar_phys_base + msix.table_offset as u64;
+    let page_base = table_phys & !0xFFF;
+    let page_offset = (table_phys & 0xFFF) as usize;
+
+    // Retype to DeviceFrame for temporary mapping
+    let bar_frame_slot = registry.alloc_slot();
+    let offset_in_untyped = page_base.saturating_sub(untyped_base);
+
+    retype(
+        cptr(device_untyped_slot),
+        ObjectType::DeviceFrame as u64,
+        12, // 4KB
+        cptr(slots::ROOT_CNODE),
+        bar_frame_slot,
+        offset_in_untyped,
+    )
+    .map_err(SpawnError::RetypeFailed)?;
+
+    // Map into device-mgr's VSpace at a temporary address
+    const MSIX_TABLE_VADDR: u64 = 0x0000_9000_0000; // Temporary mapping address
+
+    // Ensure page tables exist for this address
+    ensure_page_tables(
+        slots::ROOT_VSPACE,
+        MSIX_TABLE_VADDR,
+        MSIX_TABLE_VADDR + PAGE_SIZE as u64,
+        registry,
+        cptr,
+    )?;
+
+    // Map the frame (device memory = uncached)
+    map_frame(
+        cptr(slots::ROOT_VSPACE),
+        cptr(bar_frame_slot),
+        MSIX_TABLE_VADDR,
+        MapRights::RW.to_bits() | (1 << 3), // RW + device memory attribute
+        0,
+    )
+    .map_err(SpawnError::FrameMapFailed)?;
+
+    // Programme each MSI-X table entry
+    // Each entry is 16 bytes: [msg_addr_lo (4), msg_addr_hi (4), msg_data (4), vector_ctrl (4)]
+    let table_vaddr = MSIX_TABLE_VADDR as usize + page_offset;
+
+    io::puts("[device-mgr] MSI-X: programming table at vaddr ");
+    io::put_hex(table_vaddr as u64);
+    io::newline();
+
+    for i in 0..vector_count {
+        let entry_offset = (i as usize) * 16;
+        let entry_addr = table_vaddr + entry_offset;
+
+        // SAFETY: We just mapped this memory and the address is valid
+        unsafe {
+            // Message Address Low (lower 32 bits of target address)
+            core::ptr::write_volatile(entry_addr as *mut u32, target_addr as u32);
+            // Message Address High (upper 32 bits)
+            core::ptr::write_volatile((entry_addr + 4) as *mut u32, (target_addr >> 32) as u32);
+            // Message Data (SPI number)
+            core::ptr::write_volatile((entry_addr + 8) as *mut u32, base_spi + i);
+            // Vector Control: bit 0 = mask bit, 0 = unmasked
+            core::ptr::write_volatile((entry_addr + 12) as *mut u32, 0);
+        }
+
+        io::puts("[device-mgr] MSI-X: vector ");
+        io::put_u64(i as u64);
+        io::puts(" -> SPI ");
+        io::put_u64((base_spi + i) as u64);
+        io::newline();
+    }
+
+    // Unmap the temporary mapping
+    let _ = unmap_frame(cptr(bar_frame_slot));
+
+    // Enable MSI-X in config space
+    enable_msix_in_config(pcie_bdf, msix.cap_offset, registry, cptr)?;
+
+    Ok(())
+}
+
+/// Enable MSI-X in PCIe config space.
+///
+/// This maps the config space temporarily and sets the MSI-X Enable bit.
+fn enable_msix_in_config(
+    pcie_bdf: (u8, u8, u8),
+    cap_offset: u8,
+    registry: &mut Registry,
+    cptr: &impl Fn(u64) -> u64,
+) -> Result<(), SpawnError> {
+    use crate::io;
+    use crate::pcie;
+
+    // SAFETY: Called after _start has initialised BOOT_INFO
+    let boot_info = unsafe { crate::get_boot_info() };
+    let dtb_data =
+        unsafe { core::slice::from_raw_parts(boot_info.dtb_vaddr as *const u8, 0x10000) };
+
+    // Parse PCIe hosts to find config space base
+    let hosts = pcie::parse_pcie_hosts(dtb_data);
+
+    let Some(host) = hosts.iter().flatten().next() else {
+        io::puts("[device-mgr] MSI-X: no PCIe host found for config access\n");
+        return Err(SpawnError::MsixSetupFailed);
+    };
+
+    // Calculate config space address for this BDF
+    let (bus, dev, func) = pcie_bdf;
+    let rel_bus = bus - host.bus_range.0;
+    let config_offset = ((rel_bus as u64) << 20)
+        | ((dev as u64) << 15)
+        | ((func as u64) << 12)
+        | (cap_offset as u64);
+
+    let config_phys = host.config_base + (config_offset & !0xFFF);
+    let config_page_offset = (config_offset & 0xFFF) as usize;
+
+    // Find device untyped for config space
+    let (device_untyped_slot, _size, untyped_base) = boot_info
+        .find_device_untyped(config_phys)
+        .ok_or(SpawnError::DeviceUntypedNotFound)?;
+
+    // Retype to DeviceFrame
+    let config_frame_slot = registry.alloc_slot();
+    let offset_in_untyped = config_phys.saturating_sub(untyped_base);
+
+    retype(
+        cptr(device_untyped_slot),
+        ObjectType::DeviceFrame as u64,
+        12,
+        cptr(slots::ROOT_CNODE),
+        config_frame_slot,
+        offset_in_untyped,
+    )
+    .map_err(SpawnError::RetypeFailed)?;
+
+    // Map into device-mgr's VSpace
+    const CONFIG_VADDR: u64 = 0x0000_9001_0000;
+
+    ensure_page_tables(
+        slots::ROOT_VSPACE,
+        CONFIG_VADDR,
+        CONFIG_VADDR + PAGE_SIZE as u64,
+        registry,
+        cptr,
+    )?;
+
+    map_frame(
+        cptr(slots::ROOT_VSPACE),
+        cptr(config_frame_slot),
+        CONFIG_VADDR,
+        MapRights::RW.to_bits() | (1 << 3),
+        0,
+    )
+    .map_err(SpawnError::FrameMapFailed)?;
+
+    // Read and modify MSI-X Message Control register (cap_offset + 2)
+    let msg_ctrl_addr = CONFIG_VADDR as usize + config_page_offset + 2;
+
+    // SAFETY: We just mapped this memory
+    unsafe {
+        let msg_ctrl = core::ptr::read_volatile(msg_ctrl_addr as *const u16);
+        // Set MSI-X Enable (bit 15), clear Function Mask (bit 14)
+        let new_msg_ctrl = (msg_ctrl | (1 << 15)) & !(1 << 14);
+        core::ptr::write_volatile(msg_ctrl_addr as *mut u16, new_msg_ctrl);
+    }
+
+    io::puts("[device-mgr] MSI-X: enabled in config space\n");
+
+    // Unmap
+    let _ = unmap_frame(cptr(config_frame_slot));
+
+    Ok(())
+}
+
+/// Copy MSI-X handler capabilities to driver's CSpace.
+pub fn install_msix_caps(
+    child_cspace_cptr: u64,
+    src_cnode_cptr: u64,
+    msix_result: &MsixSetupResult,
+) -> Result<(), SpawnError> {
+    // Copy IRQHandler caps to slots 40+
+    for i in 0..msix_result.vector_count as usize {
+        if msix_result.handler_slots[i] != 0 {
+            let dest_slot = slots::driver::MSIX_IRQ_START + i as u64;
+            cap_copy(
+                child_cspace_cptr,
+                dest_slot,
+                0,
+                src_cnode_cptr,
+                msix_result.handler_slots[i],
+                0,
+            )
+            .map_err(SpawnError::CapCopyFailed)?;
+        }
+    }
+
+    // Also copy notifications - they go after the IRQ handlers (slots 48+)
+    for i in 0..msix_result.vector_count as usize {
+        if msix_result.notif_slots[i] != 0 {
+            let dest_slot =
+                slots::driver::MSIX_IRQ_START + slots::driver::MSIX_MAX_VECTORS as u64 + i as u64;
+            cap_copy(
+                child_cspace_cptr,
+                dest_slot,
+                0,
+                src_cnode_cptr,
+                msix_result.notif_slots[i],
+                0,
+            )
+            .map_err(SpawnError::CapCopyFailed)?;
         }
     }
 

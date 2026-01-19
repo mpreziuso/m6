@@ -499,3 +499,97 @@ pub fn register_ipi_handler(handler: IrqHandler) {
     register_handler(0, handler);
     enable_irq(0);
 }
+
+// -- MSI-X Support
+//
+// On ARM GICv3, MSI-X interrupts are delivered by writing to specific GIC registers:
+// - GICD_SETSPI_NSR (offset 0x40): Set SPI Non-Secure - triggers an SPI interrupt
+// - Message address = GICD_base + 0x40 (physical address)
+// - Message data = SPI number (32-1019)
+//
+// For MSI-X, each vector writes its assigned SPI number to the SETSPI register.
+
+/// GICv3 GICD_SETSPI_NSR register offset
+const GICD_SETSPI_NSR_OFFSET: u64 = 0x40;
+
+/// First SPI available for MSI allocation (reserving some for platform devices)
+const MSI_SPI_BASE: u32 = 64;
+
+/// Maximum SPI that can be used for MSI
+const MSI_SPI_MAX: u32 = 256;
+
+/// Next available MSI SPI (simple linear allocator)
+static NEXT_MSI_SPI: Mutex<u32> = Mutex::new(MSI_SPI_BASE);
+
+/// MSI configuration for a device
+#[derive(Debug, Clone, Copy)]
+pub struct MsiConfig {
+    /// Physical address to write for MSI (GICD_SETSPI_NSR)
+    pub target_addr: u64,
+    /// Base message data (SPI number for first vector)
+    pub data_base: u32,
+    /// Number of vectors allocated
+    pub vector_count: u32,
+}
+
+/// Allocate MSI vectors for a device.
+///
+/// Returns MSI configuration including the target address and data values
+/// for programming the MSI-X table.
+///
+/// # Arguments
+/// * `count` - Number of MSI-X vectors requested
+///
+/// # Returns
+/// * `Some(MsiConfig)` if allocation succeeded
+/// * `None` if not enough SPIs available
+pub fn allocate_msi_vectors(count: u32) -> Option<MsiConfig> {
+    if count == 0 {
+        return None;
+    }
+
+    let plat = platform::platform();
+    let gicd_phys = plat.gic_distributor_base();
+
+    // Allocate SPIs for the vectors
+    let mut next_spi = NEXT_MSI_SPI.lock();
+    let base_spi = *next_spi;
+
+    // Check if we have enough SPIs
+    if base_spi + count > MSI_SPI_MAX {
+        return None;
+    }
+
+    // Reserve the SPIs
+    *next_spi = base_spi + count;
+
+    Some(MsiConfig {
+        target_addr: gicd_phys + GICD_SETSPI_NSR_OFFSET,
+        data_base: base_spi,
+        vector_count: count,
+    })
+}
+
+/// Configure an SPI for MSI use.
+///
+/// Sets up the SPI as edge-triggered (required for MSI) and enables it.
+///
+/// # Arguments
+/// * `spi` - The SPI number (32+)
+pub fn configure_msi_spi(spi: u32) {
+    // MSI interrupts are edge-triggered
+    set_trigger(spi, true);
+    // Set priority (middle priority)
+    set_priority(spi, 0x80);
+    // Enable the interrupt
+    enable_irq(spi);
+}
+
+/// Get the MSI target address for this platform.
+///
+/// Returns the physical address where MSI writes should be directed.
+/// For GICv3, this is GICD_SETSPI_NSR.
+pub fn msi_target_address() -> u64 {
+    let plat = platform::platform();
+    plat.gic_distributor_base() + GICD_SETSPI_NSR_OFFSET
+}

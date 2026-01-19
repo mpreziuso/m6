@@ -5,7 +5,9 @@
 //! - IrqSetHandler: Bind an IRQ to a notification
 //! - IrqClearHandler: Unbind an IRQ from its notification
 //! - IrqControlGet: Claim an IRQ from IRQControl and create IRQHandler
+//! - MsiAllocate: Allocate MSI vectors for a device
 
+use m6_arch::exceptions::ExceptionContext;
 use m6_cap::objects::{IrqHandlerObject, IrqState, MAX_IRQ};
 use m6_cap::{Badge, CapRights, CapSlot, ObjectType, SlotFlags};
 
@@ -287,5 +289,69 @@ pub fn handle_irq_control_get(args: &SyscallArgs) -> SyscallResult {
         irq,
         dest_index
     );
+    Ok(0)
+}
+
+/// Handle MsiAllocate syscall.
+///
+/// Allocates MSI vectors for a device and returns MSI configuration.
+///
+/// # ABI
+///
+/// - x0: IRQControl capability pointer
+/// - x1: Number of vectors requested
+///
+/// # Returns
+///
+/// - x0: 0 on success, negative error code on failure
+/// - x1: MSI target address (physical address to write for MSI)
+/// - x2: Base SPI number (message data for first vector)
+/// - x3: Actual number of vectors allocated
+pub fn handle_msi_allocate(args: &SyscallArgs, ctx: &ExceptionContext) -> SyscallResult {
+    let irq_control_cptr = args.arg0;
+    let requested_count = args.arg1 as u32;
+
+    log::trace!(
+        "msi_allocate: control={:#x} count={}",
+        irq_control_cptr,
+        requested_count
+    );
+
+    // Validate request
+    if requested_count == 0 || requested_count > 64 {
+        return Err(SyscallError::InvalidArg);
+    }
+
+    // Look up IRQControl capability with ALL rights
+    let _control_cap = ipc::lookup_cap(irq_control_cptr, ObjectType::IRQControl, CapRights::ALL)?;
+
+    // Allocate MSI vectors
+    let msi_config =
+        m6_pal::gic::allocate_msi_vectors(requested_count).ok_or(SyscallError::NoMemory)?;
+
+    // Configure each allocated SPI for MSI use
+    for i in 0..msi_config.vector_count {
+        let spi = msi_config.data_base + i;
+        m6_pal::gic::configure_msi_spi(spi);
+    }
+
+    // Return MSI configuration via registers
+    // x1 = target address, x2 = base SPI, x3 = count
+    // We need to write to x1-x3 in the exception context
+    // SAFETY: We're modifying return values in the exception context
+    unsafe {
+        let ctx_ptr = ctx as *const ExceptionContext as *mut ExceptionContext;
+        (*ctx_ptr).gpr[1] = msi_config.target_addr;
+        (*ctx_ptr).gpr[2] = msi_config.data_base as u64;
+        (*ctx_ptr).gpr[3] = msi_config.vector_count as u64;
+    }
+
+    log::trace!(
+        "msi_allocate: allocated {} vectors, target={:#x}, base_spi={}",
+        msi_config.vector_count,
+        msi_config.target_addr,
+        msi_config.data_base
+    );
+
     Ok(0)
 }

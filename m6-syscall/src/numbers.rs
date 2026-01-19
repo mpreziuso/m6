@@ -110,6 +110,10 @@ pub enum Syscall {
     TimerCancel = 87,
     /// Clear timer (unbind from notification).
     TimerClear = 88,
+    /// Allocate MSI vectors and get configuration.
+    /// Args: x0 = IRQ control cap, x1 = vector count
+    /// Returns: x0 = result, x1 = MSI target address, x2 = base SPI, x3 = actual count
+    MsiAllocate = 89,
 
     // === IOMMU Operations ===
     /// Create IOSpace from untyped memory.
@@ -130,6 +134,14 @@ pub enum Syscall {
     DmaPoolAlloc = 105,
     /// Free DMA buffer.
     DmaPoolFree = 106,
+
+    // === Cache Maintenance Operations ===
+    /// Clean cache range (before DMA to device).
+    CacheClean = 120,
+    /// Invalidate cache range (after DMA from device).
+    CacheInvalidate = 121,
+    /// Flush cache range (clean + invalidate, for bidirectional DMA).
+    CacheFlush = 122,
 
     // === Miscellaneous Operations ===
     /// Get cryptographically random bytes.
@@ -189,6 +201,7 @@ impl Syscall {
             86 => Some(Self::TimerArm),
             87 => Some(Self::TimerCancel),
             88 => Some(Self::TimerClear),
+            89 => Some(Self::MsiAllocate),
             96 => Some(Self::IOSpaceCreate),
             97 => Some(Self::IOSpaceMapFrame),
             98 => Some(Self::IOSpaceUnmapFrame),
@@ -199,6 +212,9 @@ impl Syscall {
             105 => Some(Self::DmaPoolAlloc),
             106 => Some(Self::DmaPoolFree),
             112 => Some(Self::GetRandom),
+            120 => Some(Self::CacheClean),
+            121 => Some(Self::CacheInvalidate),
+            122 => Some(Self::CacheFlush),
             254 => Some(Self::DebugPuts),
             255 => Some(Self::DebugPutChar),
             _ => None,
@@ -250,6 +266,7 @@ impl Syscall {
             Self::TimerArm => "TimerArm",
             Self::TimerCancel => "TimerCancel",
             Self::TimerClear => "TimerClear",
+            Self::MsiAllocate => "MsiAllocate",
             Self::IOSpaceCreate => "IOSpaceCreate",
             Self::IOSpaceMapFrame => "IOSpaceMapFrame",
             Self::IOSpaceUnmapFrame => "IOSpaceUnmapFrame",
@@ -260,6 +277,9 @@ impl Syscall {
             Self::DmaPoolAlloc => "DmaPoolAlloc",
             Self::DmaPoolFree => "DmaPoolFree",
             Self::GetRandom => "GetRandom",
+            Self::CacheClean => "CacheClean",
+            Self::CacheInvalidate => "CacheInvalidate",
+            Self::CacheFlush => "CacheFlush",
             Self::DebugPuts => "DebugPuts",
             Self::DebugPutChar => "DebugPutChar",
         }

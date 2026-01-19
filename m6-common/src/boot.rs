@@ -26,7 +26,8 @@ pub const BOOT_INFO_VERSION: u32 = 8;
 pub const MAX_MEMORY_REGIONS: usize = 64;
 
 /// Maximum number of device regions supported
-pub const MAX_DEVICE_REGIONS: usize = 32;
+/// RK3588 has many PCIe, UART, and other device regions
+pub const MAX_DEVICE_REGIONS: usize = 48;
 
 /// Device type classification for MMIO regions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

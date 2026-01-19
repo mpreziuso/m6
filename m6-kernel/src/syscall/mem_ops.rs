@@ -82,16 +82,33 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
     let size_bits = args.arg2 as u8;
     let dest_cnode_cptr = args.arg3;
     let dest_index = args.arg4 as usize;
-    let count = args.arg5 as usize;
+    // For DeviceFrame: arg5 is offset within the device untyped
+    // For other types: arg5 is count
+    let count_or_offset = args.arg5;
+
+    // Parse target object type
+    let target_type = object_type_from_raw(target_type_raw as u8).ok_or_else(|| {
+        log::debug!("Retype: invalid target type {}", target_type_raw);
+        SyscallError::InvalidArg
+    })?;
+
+    // For DeviceFrame, arg5 is offset (count is always 1)
+    // For other types, arg5 is count
+    let (count, device_offset) = if target_type == ObjectType::DeviceFrame {
+        (1usize, count_or_offset)
+    } else {
+        (count_or_offset as usize, 0u64)
+    };
 
     log::trace!(
-        "Retype: untyped={} type={} size_bits={} dest_cnode={} dest_idx={} count={}",
+        "Retype: untyped={} type={} size_bits={} dest_cnode={} dest_idx={} count={} offset={}",
         untyped_cptr,
         target_type_raw,
         size_bits,
         dest_cnode_cptr,
         dest_index,
-        count
+        count,
+        device_offset
     );
 
     // Validate count
@@ -99,12 +116,6 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
         log::debug!("Retype: invalid count");
         return Err(SyscallError::Range);
     }
-
-    // Parse target object type
-    let target_type = object_type_from_raw(target_type_raw as u8).ok_or_else(|| {
-        log::debug!("Retype: invalid target type {}", target_type_raw);
-        SyscallError::InvalidArg
-    })?;
 
     // Can't retype to Empty
     if target_type == ObjectType::Empty {
@@ -156,12 +167,22 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
         }
 
         // Allocate from untyped
-        let phys_addr = object_table::with_untyped_mut(untyped_cap.obj_ref, |untyped| {
-            untyped
-                .try_allocate(obj_size, obj_align)
-                .map_err(|_| SyscallError::NoMemory)
-        })
-        .ok_or(SyscallError::InvalidCap)??;
+        // For DeviceFrame with offset, use offset-based allocation
+        let phys_addr = if target_type == ObjectType::DeviceFrame && device_offset != 0 {
+            object_table::with_untyped(untyped_cap.obj_ref, |untyped| {
+                untyped
+                    .try_allocate_at_offset(device_offset, obj_size)
+                    .map_err(|_| SyscallError::NoMemory)
+            })
+            .ok_or(SyscallError::InvalidCap)??
+        } else {
+            object_table::with_untyped_mut(untyped_cap.obj_ref, |untyped| {
+                untyped
+                    .try_allocate(obj_size, obj_align)
+                    .map_err(|_| SyscallError::NoMemory)
+            })
+            .ok_or(SyscallError::InvalidCap)??
+        };
 
         // Allocate object table entry
         let obj_ref = object_table::alloc(kernel_type).ok_or(SyscallError::NoMemory)?;

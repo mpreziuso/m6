@@ -819,43 +819,48 @@ fn update_user_boot_info_all_untyped(
     // SAFETY: user_boot_info_phys points to a valid UserBootInfo we allocated
     let info = unsafe { &mut *(virt as *mut UserBootInfo) };
 
-    let device_count = boot_info.device_region_count as usize;
-    let total_count = 1 + device_count;
-    info.untyped_count = total_count as u32;
-
     // First region: RAM untyped
     info.untyped_size_bits[0] = ram_size_bits;
     info.untyped_is_device[0] = 0; // not device memory
     info.untyped_phys_base[0] = ram_phys_base;
 
     // Remaining regions: device untyped from BootInfo
+    // Use a running counter to match the capability creation order
+    // (invalid regions are skipped in both places)
+    let device_count = boot_info.device_region_count as usize;
+    let mut idx = 1; // Start after RAM untyped
     for i in 0..device_count {
         let region = &boot_info.device_regions[i];
         if !region.is_valid() {
             continue;
         }
-        let idx = i + 1;
         info.untyped_size_bits[idx] = region.size_bits;
         info.untyped_is_device[idx] = 1; // device memory
         info.untyped_phys_base[idx] = region.phys_base.as_u64();
+        idx += 1;
     }
+
+    // Set untyped_count to actual number of valid entries
+    info.untyped_count = idx as u32;
 
     log::debug!(
         "Updated UserBootInfo: {} untyped region(s) ({} RAM, {} device)",
-        total_count,
+        idx,
         1,
-        device_count
+        idx - 1
     );
+    let mut valid_idx = 0;
     for i in 0..device_count {
         let region = &boot_info.device_regions[i];
         if region.is_valid() {
             log::debug!(
-                "  Device region {}: {:?} at {:#x} ({} bytes)",
-                i,
+                "  Device untyped {}: {:?} at {:#x} ({} bytes)",
+                valid_idx,
                 region.device_type,
                 region.phys_base.as_u64(),
                 1u64 << region.size_bits
             );
+            valid_idx += 1;
         }
     }
 }

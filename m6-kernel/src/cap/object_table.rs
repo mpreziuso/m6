@@ -522,6 +522,25 @@ where
     None
 }
 
+/// Access an untyped object with a closure (immutable).
+///
+/// Executes the closure with an immutable reference to the untyped object.
+/// Used for offset-based allocation from device untypeds.
+/// Does nothing if the object is not a valid untyped.
+pub fn with_untyped<F, R>(untyped_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&UntypedObject) -> R,
+{
+    let table = get_table().lock();
+    if let Some(obj) = table.get(untyped_ref)
+        && obj.obj_type == KernelObjectType::Untyped
+    {
+        // SAFETY: We verified the object type, so untyped is the active variant.
+        return Some(f(unsafe { &obj.data.untyped }));
+    }
+    None
+}
+
 /// Access a frame with a closure (mutable).
 ///
 /// Executes the closure with a mutable reference to the frame.

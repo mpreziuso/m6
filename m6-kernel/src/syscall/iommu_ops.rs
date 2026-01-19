@@ -1107,20 +1107,23 @@ pub fn handle_dma_pool_alloc(args: &SyscallArgs) -> SyscallResult {
     // Allocate from pool (bump allocator)
     object_table::with_dma_pool_mut(pool_ref, |pool| {
         // Round up watermark to alignment
+        // alloc_watermark is an offset from iova_base
         let aligned_watermark = (pool.alloc_watermark + alignment - 1) & !(alignment - 1);
 
-        // Check if allocation fits
-        if aligned_watermark + size > pool.iova_base + pool.iova_size {
+        // Check if allocation fits within pool size
+        let end = aligned_watermark.saturating_add(size);
+        if end > pool.iova_size {
             return Err(SyscallError::NoMemory);
         }
 
-        // Check allocation count limit
-        if pool.alloc_count >= pool.max_allocs {
+        // Check allocation count limit (0 means unlimited)
+        if pool.max_allocs > 0 && pool.alloc_count >= pool.max_allocs {
             return Err(SyscallError::NoMemory);
         }
 
-        let iova = aligned_watermark;
-        pool.alloc_watermark = aligned_watermark + size;
+        // Convert offset to absolute IOVA
+        let iova = pool.iova_base.saturating_add(aligned_watermark);
+        pool.alloc_watermark = end;
         pool.alloc_count += 1;
 
         Ok(iova as i64)

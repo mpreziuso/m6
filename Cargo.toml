@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["m6-alloc", "m6-arch", "m6-boot", "m6-cap", "m6-common", "m6-kernel", "m6-paging", "m6-pal", "m6-std", "m6-syscall", "m6-system", "m6-user"]
+members = ["m6-alloc", "m6-arch", "m6-boot", "m6-cap", "m6-common", "m6-kernel", "m6-mmio", "m6-paging", "m6-pal", "m6-std", "m6-syscall", "m6-system", "m6-user"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,6 +22,8 @@ elf_rs = { version = "0.3", default-features = false }
 
 # External dependencies
 aarch64-cpu = "11.2.0"
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
+heapless = { version = "0.8", default-features = false }
 arm-gic = "0.7"
 spin = { version = "0.10", default-features = false, features = [
     "mutex",

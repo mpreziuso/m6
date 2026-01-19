@@ -88,6 +88,7 @@ if [ "$PREPARE_ONLY" = true ]; then
     echo "Image prepared successfully"
     echo "  ESP image: $ESP_IMG"
     echo "  Disk image: $BUILD_DIR/disk.img"
+    echo "  NVMe image: $BUILD_DIR/nvme.img"
 else
     echo "Starting QEMU..."
     echo "  Firmware: $FIRMWARE"
@@ -105,6 +106,14 @@ else
         echo "Created $DISK_IMG (64MB)"
     fi
 
+    # Create an NVMe test image if it doesn't exist
+    NVME_IMG="$BUILD_DIR/nvme.img"
+    if [ ! -f "$NVME_IMG" ]; then
+        echo "Creating NVMe test image..."
+        dd if=/dev/zero of="$NVME_IMG" bs=1M count=64 2>/dev/null
+        echo "Created $NVME_IMG (64MB)"
+    fi
+
     # Run QEMU
     exec $QEMU \
         -machine virt,gic-version=3,acpi=off,iommu=smmuv3 \
@@ -115,6 +124,8 @@ else
         -drive format=raw,file="$ESP_IMG" \
         -drive file="$DISK_IMG",if=none,format=raw,id=hd0 \
         -device virtio-blk-device,drive=hd0 \
+        -drive file="$NVME_IMG",if=none,id=nvme0 \
+        -device nvme,serial=deadbeef,drive=nvme0 \
         -device ramfb \
         -device virtio-keyboard-pci \
         -device virtio-mouse-pci \

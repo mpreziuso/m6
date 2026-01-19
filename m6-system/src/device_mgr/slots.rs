@@ -40,10 +40,12 @@ pub const SMMU_CONTROL: u64 = 18;
 pub const FIRST_DEVICE_UNTYPED: u64 = 20;
 
 /// Maximum number of device untyped regions
-pub const MAX_DEVICE_UNTYPED: usize = 8;
+/// RK3588 has 10+ UARTs, 5 PCIe controllers with multiple reg entries, etc.
+pub const MAX_DEVICE_UNTYPED: usize = 48;
 
 /// First free slot for dynamic allocation
-pub const FIRST_FREE_SLOT: u64 = 32;
+/// Must be greater than FIRST_DEVICE_UNTYPED + MAX_DEVICE_UNTYPED
+pub const FIRST_FREE_SLOT: u64 = 72;
 
 // -- Well-known slots in spawned driver CSpaces
 
@@ -81,6 +83,12 @@ pub mod driver {
     /// Number of DMA buffer frames provided to DMA-capable drivers
     pub const DMA_BUFFER_COUNT: usize = 8;
 
+    /// First MSI-X IRQHandler slot (for PCIe devices with MSI-X)
+    /// Slots 40-47 contain IRQHandler caps for MSI-X vectors 0-7
+    pub const MSIX_IRQ_START: u64 = 40;
+    /// Maximum number of MSI-X vectors we support per driver
+    pub const MSIX_MAX_VECTORS: usize = 8;
+
     /// First free slot for driver's own allocations
-    pub const FIRST_FREE_SLOT: u64 = 32;
+    pub const FIRST_FREE_SLOT: u64 = 50;
 }

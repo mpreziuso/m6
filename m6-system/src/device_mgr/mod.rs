@@ -7,6 +7,7 @@
 pub mod dtb;
 pub mod ipc;
 pub mod manifest;
+pub mod pcie;
 pub mod registry;
 pub mod slots;
 pub mod spawn;

@@ -16,6 +16,7 @@
 //! dispatches to the appropriate handler.
 
 pub mod asid_ops;
+pub mod cache_ops;
 pub mod cap_ops;
 pub mod error;
 pub mod iommu_ops;
@@ -189,6 +190,9 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
         Syscall::TimerCancel => timer_ops::handle_timer_cancel(args),
         Syscall::TimerClear => timer_ops::handle_timer_clear(args),
 
+        // MSI operations
+        Syscall::MsiAllocate => irq_ops::handle_msi_allocate(args, ctx),
+
         // IOMMU operations
         Syscall::IOSpaceCreate => iommu_ops::handle_iospace_create(args),
         Syscall::IOSpaceMapFrame => iommu_ops::handle_iospace_map_frame(args),
@@ -202,6 +206,11 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
 
         // Miscellaneous operations
         Syscall::GetRandom => misc_ops::handle_get_random(args),
+
+        // Cache maintenance operations
+        Syscall::CacheClean => cache_ops::handle_cache_clean(args),
+        Syscall::CacheInvalidate => cache_ops::handle_cache_invalidate(args),
+        Syscall::CacheFlush => cache_ops::handle_cache_flush(args),
 
         // Debug syscalls
         Syscall::DebugPuts => {

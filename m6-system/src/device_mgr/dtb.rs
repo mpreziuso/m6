@@ -136,6 +136,10 @@ fn parse_device_node(node: &fdt::node::FdtNode, compat: &str) -> Option<DeviceEn
         }
     }
 
+    // Platform devices don't have PCIe BDF
+    entry.pcie_bdf = None;
+    entry.stream_id = 0;
+
     entry.state = DeviceState::Unbound;
     Some(entry)
 }

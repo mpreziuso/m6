@@ -130,6 +130,14 @@ pub fn switch_vspace(vspace_ref: Option<ObjectRef>) {
                 // ASID allocation). This is safe but slightly inefficient.
             }
 
+            // DSB ensures all prior page table writes are visible to the
+            // hardware page table walker before we switch to the new TTBR0.
+            // Without this, the walker might see stale/invalid entries.
+            // SAFETY: DSB is always safe to execute.
+            unsafe {
+                core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+            }
+
             mmu().set_ttbr0(ttbr0_with_asid);
 
             // Instruction barrier to ensure TTBR0 change is visible
