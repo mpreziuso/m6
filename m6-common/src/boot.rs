@@ -26,8 +26,17 @@ pub const BOOT_INFO_VERSION: u32 = 8;
 pub const MAX_MEMORY_REGIONS: usize = 64;
 
 /// Maximum number of device regions supported
-/// RK3588 has many PCIe, UART, and other device regions
-pub const MAX_DEVICE_REGIONS: usize = 48;
+/// RK3588 has 100+ device regions (PCIe, UART, USB PHY GRFs, CRU, QoS, etc.)
+pub const MAX_DEVICE_REGIONS: usize = 128;
+
+/// Maximum number of untyped memory regions passed to userspace.
+/// This is 1 (RAM untyped) + MAX_DEVICE_REGIONS (device untypeds).
+pub const MAX_UNTYPED_REGIONS: usize = 1 + MAX_DEVICE_REGIONS;
+
+/// First device untyped slot in device-mgr's CSpace.
+/// Init copies device untypeds starting at this slot; device-mgr expects them here.
+/// This must be greater than any fixed slots used by device-mgr (SMMU_CONTROL_3 = 21).
+pub const DEVMGR_FIRST_DEVICE_UNTYPED: u64 = 24;
 
 /// Device type classification for MMIO regions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -50,6 +59,12 @@ pub enum DeviceType {
     Usb = 6,
     /// VirtIO MMIO device
     VirtioMmio = 7,
+    /// General Register File (GRF) - system configuration registers
+    Grf = 8,
+    /// Clock and Reset Unit (CRU)
+    Cru = 9,
+    /// PHY devices (USB PHY, PCIe PHY, etc.)
+    Phy = 10,
 }
 
 /// Device memory region discovered from DTB

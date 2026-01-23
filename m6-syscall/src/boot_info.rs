@@ -21,8 +21,8 @@ pub const USER_BOOT_INFO_VERSION: u32 = 3;
 /// Virtual address where UserBootInfo is mapped.
 pub const USER_BOOT_INFO_ADDR: u64 = 0x0000_7FFF_E000_0000;
 
-/// Maximum number of untyped memory regions.
-pub const MAX_UNTYPED_REGIONS: usize = 64;
+// Re-export from m6-common for backwards compatibility
+pub use m6_common::boot::MAX_UNTYPED_REGIONS;
 
 /// Platform identifiers.
 #[repr(u32)]
@@ -83,8 +83,10 @@ pub struct UserBootInfo {
     pub cpu_count: u32,
     /// Whether an SMMU is available (1) or not (0).
     pub has_smmu: u8,
+    /// Number of SMMU control capabilities (0-4).
+    pub smmu_count: u8,
     /// Padding for alignment.
-    _pad1: [u8; 3],
+    _pad1: [u8; 2],
     /// Size of each untyped region in bits (log2), indexed by slot - FirstUntyped.
     pub untyped_size_bits: [u8; MAX_UNTYPED_REGIONS],
     /// Whether each untyped is device memory (1) or normal RAM (0).

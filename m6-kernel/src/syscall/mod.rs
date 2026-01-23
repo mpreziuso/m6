@@ -165,6 +165,7 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
         Syscall::MapPageTable => mem_ops::handle_map_page_table(args),
         Syscall::AsidPoolAssign => asid_ops::handle_asid_pool_assign(args),
         Syscall::FrameWrite => mem_ops::handle_frame_write(args),
+        Syscall::FrameGetPhys => mem_ops::handle_frame_get_phys(args),
 
         // TCB operations
         Syscall::TcbConfigure => tcb_ops::handle_tcb_configure(args),

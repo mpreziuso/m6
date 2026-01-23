@@ -97,6 +97,7 @@ unsafe fn enable_mmu_and_jump_from_el1(
             "orr x9, x9, #1",         // M bit (MMU enable)
             "orr x9, x9, #(1 << 2)",  // C bit (data cache)
             "orr x9, x9, #(1 << 12)", // I bit (instruction cache)
+            "orr x9, x9, #(1 << 26)", // UCI bit (user cache instructions)
             "msr sctlr_el1, x9",
             "isb",
 
@@ -220,9 +221,9 @@ unsafe fn enable_mmu_and_jump_from_el2(
             "dsb sy",
             "isb",
 
-            // Set up SCTLR_EL1 with MMU enabled + RES1 bits
+            // Set up SCTLR_EL1 with MMU enabled + RES1 bits + UCI
             "movz x9, #0x1805",
-            "movk x9, #0x30C5, lsl #16",
+            "movk x9, #0x34C5, lsl #16",    // 0x34C5 includes UCI (bit 26)
             "msr sctlr_el1, x9",
             "isb",
 

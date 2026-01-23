@@ -94,7 +94,10 @@ struct AllocatorStorage {
 }
 
 /// Size of allocator storage (should be enough for Allocator<V, P, S>)
-const ALLOCATOR_STORAGE_SIZE: usize = 4096;
+/// With MAX_SPANS=64 and SpanMeta ~104 bytes, SpanStorage is ~7KB.
+/// Plus LargeSideTable (32 entries × ~40 bytes = ~1.3KB) and other structures.
+/// Total allocator size is approximately 10KB.
+const ALLOCATOR_STORAGE_SIZE: usize = 16 * 1024; // 16 KB
 
 // SAFETY: AllocatorStorage uses atomics and function pointers for synchronisation
 unsafe impl Sync for AllocatorStorage {}

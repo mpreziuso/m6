@@ -138,6 +138,14 @@ pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
 /// spawned immediately during enumeration rather than waiting for ENSURE
 /// requests. This ensures critical system services are available early.
 ///
+/// Boot ordering is critical:
+/// 1. First pass: SMMU drivers (required for IOSpace creation)
+/// 2. Second pass: Non-DMA drivers (UART, PCIe host bridges)
+/// 3. Third pass: DMA-capable drivers (USB, NVMe, VirtIO block)
+///
+/// This ensures SMMU is running before we try to create IOSpaces for
+/// DMA-capable device drivers.
+///
 /// Note: Only one UART driver is spawned (the first one found, typically the
 /// console UART) to avoid resource exhaustion on platforms with many UARTs.
 fn spawn_platform_drivers(registry: &mut Registry) {
@@ -155,39 +163,96 @@ fn spawn_platform_drivers(registry: &mut Registry) {
     let mut uart_count = 0;
     const MAX_UART_DRIVERS: usize = 1;
 
-    // Iterate through devices and spawn drivers
+    // -- Pass 1: Spawn SMMU drivers first (required for IOSpace)
+    let mut smmu_instance_count = 0u8;
     for i in 0..registry.device_count {
         if registry.devices[i].state != DeviceState::Unbound {
             continue;
         }
 
         let compat = registry.devices[i].compatible_str();
+        if !compat.contains("smmu") {
+            continue;
+        }
 
-        // Check if this device has a driver
         let virtio_id = registry.devices[i].virtio_device_id;
         if let Some(manifest) = manifest::find_driver(compat, virtio_id) {
-            // Spawn platform drivers and PCIe drivers (pcie:XXXXXX compatible)
-            let is_pcie_device = compat.starts_with("pcie:");
-            if !manifest.is_platform && !is_pcie_device {
-                continue; // Skip other non-platform drivers
+            let has_binary = archive
+                .entries()
+                .any(|e| e.filename().as_str() == Ok(manifest.binary_name));
+            if has_binary {
+                // Store SMMU instance index in device entry for spawn function
+                registry.devices[i].smmu_instance = smmu_instance_count;
+                let _ = spawn_driver_for_device(registry, i);
+                smmu_instance_count += 1;
+            }
+        }
+    }
+
+    // -- Pass 2: Spawn non-DMA drivers (UART, PCIe host bridges, etc.)
+    for i in 0..registry.device_count {
+        if registry.devices[i].state != DeviceState::Unbound {
+            continue;
+        }
+
+        let compat = registry.devices[i].compatible_str();
+        let virtio_id = registry.devices[i].virtio_device_id;
+
+        if let Some(manifest) = manifest::find_driver(compat, virtio_id) {
+            // Skip DMA-capable drivers for now (they need IOSpace)
+            if manifest.needs_iommu {
+                continue;
             }
 
-            // Limit UART driver spawning to avoid resource exhaustion
+            // Spawn platform drivers and PCIe drivers
+            let is_pcie_device = compat.starts_with("pcie:");
+            if !manifest.is_platform && !is_pcie_device {
+                continue;
+            }
+
+            // Limit UART driver spawning
             let is_uart = compat.contains("uart") || compat.contains("serial");
             if is_uart {
                 if uart_count >= MAX_UART_DRIVERS {
-                    continue; // Skip additional UARTs
+                    continue;
                 }
                 uart_count += 1;
             }
 
-            // Check if binary exists in initrd
             let has_binary = archive
                 .entries()
                 .any(|e| e.filename().as_str() == Ok(manifest.binary_name));
-
             if has_binary {
-                // Spawn the driver
+                let _ = spawn_driver_for_device(registry, i);
+            }
+        }
+    }
+
+    // -- Pass 3: Spawn DMA-capable drivers (USB, NVMe, VirtIO block, etc.)
+    for i in 0..registry.device_count {
+        if registry.devices[i].state != DeviceState::Unbound {
+            continue;
+        }
+
+        let compat = registry.devices[i].compatible_str();
+        let virtio_id = registry.devices[i].virtio_device_id;
+
+        if let Some(manifest) = manifest::find_driver(compat, virtio_id) {
+            // Only DMA-capable drivers in this pass
+            if !manifest.needs_iommu {
+                continue;
+            }
+
+            // Spawn platform drivers and PCIe drivers
+            let is_pcie_device = compat.starts_with("pcie:");
+            if !manifest.is_platform && !is_pcie_device {
+                continue;
+            }
+
+            let has_binary = archive
+                .entries()
+                .any(|e| e.filename().as_str() == Ok(manifest.binary_name));
+            if has_binary {
                 let _ = spawn_driver_for_device(registry, i);
             }
         }
@@ -1179,6 +1244,13 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
                     io::puts(err.name());
                 }
                 spawn::SpawnError::MsixSetupFailed => io::puts("MSI-X setup failed"),
+                spawn::SpawnError::InvalidDeviceConfig => {
+                    io::puts("invalid device config (no MMIO address)")
+                }
+                spawn::SpawnError::IOSpaceOpFailed(err) => {
+                    io::puts("IOSpace operation failed: ");
+                    io::puts(err.name());
+                }
             }
             io::newline();
 

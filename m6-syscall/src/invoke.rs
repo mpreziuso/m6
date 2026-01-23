@@ -773,6 +773,23 @@ pub fn frame_write(frame: u64, offset: u64, src: *const u8, len: usize) -> Sysca
     ))
 }
 
+/// Get the physical address of a frame.
+///
+/// Returns the physical address of the frame, suitable for DMA programming
+/// on platforms without IOMMU.
+///
+/// # Arguments
+///
+/// * `frame` - CPtr to the frame capability (Frame or DeviceFrame)
+///
+/// # Returns
+///
+/// Physical address of the frame on success, or error code on failure.
+#[inline]
+pub fn frame_get_phys(frame: u64) -> SyscallResult {
+    check_result(syscall1(Syscall::FrameGetPhys, frame))
+}
+
 // -- TCB Operations
 
 /// Configure a TCB with its execution environment.

@@ -10,10 +10,8 @@ pub const DEV_MGR_BOOT_INFO_MAGIC: u64 = 0x54_4F_4F_42_4D_56_45_44;
 /// Version of the DevMgrBootInfo structure.
 pub const DEV_MGR_BOOT_INFO_VERSION: u32 = 1;
 
-/// Maximum number of device untyped regions supported.
-/// RK3588 has 10+ UARTs, 5 PCIe controllers with multiple reg entries each,
-/// plus SMMUs, GIC, USB controllers, etc. - 48 to match MAX_DEVICE_REGIONS.
-pub const MAX_DEVICE_UNTYPED: usize = 48;
+/// Maximum number of device untyped regions (re-exported from m6-common)
+pub use m6_common::boot::MAX_DEVICE_REGIONS as MAX_DEVICE_UNTYPED;
 
 /// Boot information passed from init to device-mgr.
 #[repr(C)]

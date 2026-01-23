@@ -34,13 +34,23 @@ pub enum Slot {
     TimerControl = 6,
     /// ASID pool for spawning child processes.
     AsidPool = 7,
-    /// SMMU control capability (optional, only if SMMU present).
+    /// First SMMU control capability (optional, only if SMMU present).
+    /// Additional SMMUs use consecutive slots (8, 9, 10, 11 for up to 4 SMMUs).
     SmmuControl = 8,
-    /// First untyped memory slot.
-    FirstUntyped = 9,
+    /// First untyped memory slot (offset by number of SMMUs).
+    FirstUntyped = 12,
 }
 
 impl Slot {
+    /// Maximum number of SMMUs supported.
+    pub const MAX_SMMUS: usize = 4;
+
+    /// Get the slot index for a given SMMU control by index (0-3).
+    #[inline]
+    pub const fn smmu_control(idx: usize) -> usize {
+        Self::SmmuControl as usize + idx
+    }
+
     /// Get the slot index for a given untyped region index.
     #[inline]
     pub const fn untyped(idx: usize) -> usize {

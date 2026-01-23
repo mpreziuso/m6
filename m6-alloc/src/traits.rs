@@ -42,10 +42,25 @@ impl VmRights {
 /// Represents pages allocated from the pool
 #[derive(Debug, Clone, Copy)]
 pub struct AllocatedPages {
-    /// Frame capability pointer for MapFrame syscall
+    /// Frame capability pointer for the first frame (MapFrame syscall)
     pub frame_cptr: u64,
     /// Number of pages allocated
     pub count: usize,
+}
+
+impl AllocatedPages {
+    /// Get the frame cptr for the page at the given index.
+    ///
+    /// When multiple pages are allocated, they're placed at consecutive
+    /// CNode slots. This method calculates the cptr for each page.
+    ///
+    /// # Panics
+    /// Panics if `index >= self.count`.
+    #[inline]
+    pub fn frame_cptr_for(&self, index: usize) -> u64 {
+        debug_assert!(index < self.count, "page index out of bounds");
+        self.frame_cptr + (index as u64 * crate::config::CPTR_SLOT_OFFSET)
+    }
 }
 
 /// Virtual memory provider trait

@@ -3,6 +3,8 @@
 //! This module provides a Platform implementation that is dynamically
 //! configured from the Device Tree Blob at runtime.
 
+extern crate alloc;
+
 use crate::platform::Platform;
 
 /// GIC version detection
@@ -37,6 +39,9 @@ pub enum PsciMethod {
     Hvc,
 }
 
+/// Maximum number of SMMUs supported
+pub const MAX_SMMUS: usize = 4;
+
 /// SMMU (System Memory Management Unit) configuration
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SmmuConfig {
@@ -50,6 +55,8 @@ pub struct SmmuConfig {
     pub gerror_irq: u32,
     /// Command queue sync interrupt.
     pub cmdq_sync_irq: u32,
+    /// DTB phandle for this SMMU (for mapping devices to SMMUs).
+    pub phandle: u32,
 }
 
 impl SmmuConfig {
@@ -63,6 +70,7 @@ impl SmmuConfig {
             event_irq: 0,
             gerror_irq: 0,
             cmdq_sync_irq: 0,
+            phandle: 0,
         }
     }
 
@@ -86,8 +94,10 @@ pub struct DtbPlatform {
     pub(crate) uart_type: UartType,
     pub(crate) ram_base: u64,
     pub(crate) ram_size: u64,
-    /// SMMU configuration (None if no SMMU detected).
-    pub(crate) smmu_config: Option<SmmuConfig>,
+    /// SMMU configurations (up to MAX_SMMUS).
+    pub(crate) smmus: [SmmuConfig; MAX_SMMUS],
+    /// Number of valid SMMUs in the array.
+    pub(crate) smmu_count: usize,
     /// Number of CPUs detected.
     pub(crate) cpu_count: u32,
     /// PSCI invocation method (SMC or HVC).
@@ -145,15 +155,19 @@ impl Platform for DtbPlatform {
     }
 
     fn smmu_base(&self) -> Option<u64> {
-        self.smmu_config.as_ref().map(|c| c.base_addr)
+        self.smmus.get(0).filter(|c| c.is_valid()).map(|c| c.base_addr)
     }
 
     fn smmu_config(&self) -> Option<&SmmuConfig> {
-        self.smmu_config.as_ref()
+        self.smmus.get(0).filter(|c| c.is_valid())
+    }
+
+    fn smmus(&self) -> &[SmmuConfig] {
+        &self.smmus[..self.smmu_count]
     }
 
     fn has_iommu(&self) -> bool {
-        self.smmu_config.as_ref().is_some_and(|c| c.is_valid())
+        self.smmu_count > 0 && self.smmus[0].is_valid()
     }
 
     fn cpu_count(&self) -> Option<u32> {

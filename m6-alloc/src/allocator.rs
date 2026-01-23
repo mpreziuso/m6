@@ -293,14 +293,13 @@ where
             .alloc_pages(class.span_pages)
             .map_err(|_| AllocError::OutOfMemory)?;
 
-        // Map the pages
+        // Map the pages - each page has its own frame capability at a consecutive slot
         for i in 0..class.span_pages {
             let page_vaddr = vaddr + (i * PAGE_SIZE);
-            // Note: For now we use the same frame_cptr for all pages
-            // In a real implementation, each page would have its own capability
+            let page_frame_cptr = pages.frame_cptr_for(i);
             if self
                 .vm
-                .map_frame(page_vaddr, pages.frame_cptr, VmRights::RW)
+                .map_frame(page_vaddr, page_frame_cptr, VmRights::RW)
                 .is_err()
             {
                 // Unmap already mapped pages
@@ -477,12 +476,13 @@ where
             .alloc_pages(page_count)
             .map_err(|_| AllocError::OutOfMemory)?;
 
-        // Map the pages (not the guard page)
+        // Map the pages (not the guard page) - each page has its own frame capability
         for i in 0..page_count {
             let page_vaddr = vaddr + (i * PAGE_SIZE);
+            let page_frame_cptr = pages.frame_cptr_for(i);
             if self
                 .vm
-                .map_frame(page_vaddr, pages.frame_cptr, VmRights::RW)
+                .map_frame(page_vaddr, page_frame_cptr, VmRights::RW)
                 .is_err()
             {
                 // Unmap already mapped pages

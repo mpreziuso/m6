@@ -809,10 +809,6 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
 
     // Copy user-specified initial capabilities
     for cap in config.initial_caps {
-        crate::io::puts("[spawn]   src=");
-        crate::io::put_u64(cap.src_slot);
-        crate::io::puts(" -> dst=");
-        crate::io::put_u64(cap.dst_slot);
         let result = cap_copy(
             cptr(cspace_slot),       // dest cnode
             cap.dst_slot,            // dest index
@@ -822,7 +818,7 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
             0,                       // src depth (auto)
         );
         match result {
-            Ok(_) => crate::io::puts(" OK\n"),
+            Ok(_) => (),
             Err(e) => {
                 crate::io::puts(" FAILED: ");
                 crate::io::puts(e.name());

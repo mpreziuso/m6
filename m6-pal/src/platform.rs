@@ -54,6 +54,11 @@ pub trait Platform: Send + Sync {
         None
     }
 
+    /// Get all SMMU configurations (empty slice if no SMMUs present).
+    fn smmus(&self) -> &[SmmuConfig] {
+        &[]
+    }
+
     /// Check if IOMMU is available (required for userspace drivers).
     fn has_iommu(&self) -> bool {
         false

@@ -68,6 +68,12 @@ pub struct DeviceEntry {
     pub pcie_bdf: Option<(u8, u8, u8)>,
     /// IOMMU stream ID (0 = none, used for PCIe devices)
     pub stream_id: u32,
+    /// SMMU phandle from device tree (0 = none or unknown)
+    /// Used to map device to correct SMMU instance on multi-SMMU systems (e.g., RK3588)
+    pub smmu_phandle: u32,
+    /// SMMU instance index (0-3) for SMMU driver devices only
+    /// Used to assign unique virtual addresses to multiple SMMU drivers
+    pub smmu_instance: u8,
     /// MSI-X capability info (for PCIe devices)
     pub msix: MsixInfo,
     /// Current state
@@ -90,6 +96,8 @@ impl DeviceEntry {
             virtio_device_id: 0,
             pcie_bdf: None,
             stream_id: 0,
+            smmu_phandle: 0,
+            smmu_instance: 0,
             msix: MsixInfo {
                 present: false,
                 table_size: 0,
@@ -209,6 +217,34 @@ impl VirtioProbeFrame {
     }
 }
 
+/// Maximum additional frame cache entries (GRF, CRU, etc.)
+pub const MAX_ADDITIONAL_FRAME_CACHE: usize = 16;
+
+/// Cached additional frame capability for reuse across drivers.
+///
+/// GRF/CRU frames are shared resources that multiple USB controllers need.
+/// We cache the DeviceFrame capability after the first retype and use
+/// cap_copy for subsequent drivers.
+#[derive(Clone, Copy)]
+pub struct AdditionalFrameEntry {
+    /// Physical base address of the frame
+    pub phys_addr: u64,
+    /// Capability slot in device-mgr's CSpace
+    pub slot: u64,
+    /// Whether this entry is valid
+    pub valid: bool,
+}
+
+impl AdditionalFrameEntry {
+    pub const fn empty() -> Self {
+        Self {
+            phys_addr: 0,
+            slot: 0,
+            valid: false,
+        }
+    }
+}
+
 /// Device registry
 pub struct Registry {
     /// Enumerated devices
@@ -225,6 +261,8 @@ pub struct Registry {
     pub console_ep_slot: Option<u64>,
     /// VirtIO probe frames - kept around for reuse when spawning drivers
     pub virtio_probe_frames: [VirtioProbeFrame; MAX_VIRTIO_PROBE_FRAMES],
+    /// Additional frame cache - GRF/CRU frames shared across drivers
+    pub additional_frame_cache: [AdditionalFrameEntry; MAX_ADDITIONAL_FRAME_CACHE],
 }
 
 impl Registry {
@@ -239,6 +277,7 @@ impl Registry {
             next_free_slot: first_free_slot,
             console_ep_slot: None,
             virtio_probe_frames: [const { VirtioProbeFrame::empty() }; MAX_VIRTIO_PROBE_FRAMES],
+            additional_frame_cache: [const { AdditionalFrameEntry::empty() }; MAX_ADDITIONAL_FRAME_CACHE],
         }
     }
 
@@ -260,6 +299,33 @@ impl Registry {
             if !frame.valid {
                 *frame = VirtioProbeFrame {
                     phys_base,
+                    slot,
+                    valid: true,
+                };
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Find an additional frame in the cache by physical address.
+    /// Returns the slot number if found.
+    pub fn find_additional_frame(&self, phys_addr: u64) -> Option<u64> {
+        for entry in &self.additional_frame_cache {
+            if entry.valid && entry.phys_addr == phys_addr {
+                return Some(entry.slot);
+            }
+        }
+        None
+    }
+
+    /// Add an additional frame to the cache.
+    /// Returns true if added successfully, false if cache is full.
+    pub fn add_additional_frame(&mut self, phys_addr: u64, slot: u64) -> bool {
+        for entry in &mut self.additional_frame_cache {
+            if !entry.valid {
+                *entry = AdditionalFrameEntry {
+                    phys_addr,
                     slot,
                     valid: true,
                 };

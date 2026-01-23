@@ -318,37 +318,51 @@ fn create_asid_pool() -> BootstrapResult<ObjectRef> {
     Ok(obj_ref)
 }
 
-/// Create the SMMU control object (if SMMU is available).
-fn create_smmu_control() -> BootstrapResult<Option<ObjectRef>> {
+/// Create SMMU control objects for all initialized SMMUs.
+///
+/// Returns a vector of ObjectRefs for each SMMU, or an empty vector if no SMMUs.
+fn create_smmu_controls() -> BootstrapResult<alloc::vec::Vec<ObjectRef>> {
     use alloc::boxed::Box;
+    use alloc::vec::Vec;
     use m6_cap::objects::SmmuControlObject;
 
-    // Check if SMMU is available
-    let smmu_info = match crate::smmu::get_smmu_info() {
-        Some(info) => info,
-        None => return Ok(None), // No SMMU, return None
-    };
+    // Check if any SMMUs are available
+    if !crate::smmu::is_available() {
+        return Ok(Vec::new()); // No SMMUs
+    }
 
-    // Allocate object table entry
-    let obj_ref =
-        object_table::alloc(KernelObjectType::SmmuControl).ok_or(BootstrapError::NoObjectSlots)?;
+    let mut smmu_refs = Vec::new();
+    let smmu_count = crate::smmu::get_smmu_count();
 
-    // Create SMMU control object
-    let mut ctrl = Box::new(SmmuControlObject::new(
-        smmu_info.base_phys,
-        smmu_info.base_virt,
-        smmu_info.index,
-        smmu_info.max_streams,
-    ));
-    ctrl.set_ready(); // Mark as ready since init() already succeeded
-    let ctrl_ptr = Box::into_raw(ctrl);
+    // Create SmmuControl for each initialized SMMU
+    for index in 0..smmu_count.min(4) {
+        if let Some(smmu_info) = crate::smmu::get_smmu_info_by_index(index as u8) {
+            // Allocate object table entry
+            let obj_ref = object_table::alloc(KernelObjectType::SmmuControl)
+                .ok_or(BootstrapError::NoObjectSlots)?;
 
-    // Store pointer in object table
-    object_table::with_object_mut(obj_ref, |obj| {
-        obj.data.smmu_control_ptr = ctrl_ptr;
-    });
+            // Create SMMU control object
+            let mut ctrl = Box::new(SmmuControlObject::new(
+                smmu_info.base_phys,
+                smmu_info.base_virt,
+                smmu_info.index,
+                smmu_info.max_streams,
+            ));
+            ctrl.set_ready(); // Mark as ready since init() already succeeded
+            let ctrl_ptr = Box::into_raw(ctrl);
 
-    Ok(Some(obj_ref))
+            // Store pointer in object table
+            object_table::with_object_mut(obj_ref, |obj| {
+                obj.data.smmu_control_ptr = ctrl_ptr;
+            });
+
+            log::debug!("Created SmmuControl for SMMU #{}: {:?}", index, obj_ref);
+            smmu_refs.push(obj_ref);
+        }
+    }
+
+    log::info!("Created {} SmmuControl capabilities", smmu_refs.len());
+    Ok(smmu_refs)
 }
 
 /// Install a capability in a CNode slot.
@@ -460,11 +474,8 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
     let asid_pool_ref = create_asid_pool()?;
     log::debug!("Created ASID pool for init: {:?}", asid_pool_ref);
 
-    // Create SMMU control if SMMU is available
-    let smmu_control_ref = create_smmu_control()?;
-    if let Some(ref_val) = smmu_control_ref {
-        log::debug!("Created SMMU control: {:?}", ref_val);
-    }
+    // Create SMMU controls for all available SMMUs
+    let smmu_control_refs = create_smmu_controls()?;
 
     // 5. Set up user VSpace with ELF, stack, DTB, and initrd
     let vspace_result = vspace_setup::setup_root_vspace(
@@ -582,17 +593,17 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         );
         cap_count += 1;
 
-        // Install SMMU control if available
-        if let Some(smmu_ref) = smmu_control_ref {
+        // Install SMMU control capabilities (one per SMMU)
+        for (index, smmu_ref) in smmu_control_refs.iter().enumerate() {
             install_cap(
                 cnode,
-                BootSlot::SmmuControl as usize,
-                smmu_ref,
+                BootSlot::smmu_control(index),
+                *smmu_ref,
                 ObjectType::SmmuControl,
                 CapRights::ALL,
             );
             cap_count += 1;
-            log::debug!("Installed SMMU control capability");
+            log::debug!("Installed SMMU #{} control capability at slot {}", index, BootSlot::smmu_control(index));
         }
 
         log::debug!("Installed {} control capabilities", cap_count);
@@ -713,6 +724,7 @@ fn create_user_boot_info(_boot_info: &BootInfo) -> BootstrapResult<PhysAddr> {
 
     // SMMU availability
     info.has_smmu = if crate::smmu::is_available() { 1 } else { 0 };
+    info.smmu_count = crate::smmu::get_smmu_count() as u8;
 
     // Untyped regions - zeroed by default, TODO: populate with actual regions
 
@@ -828,8 +840,17 @@ fn update_user_boot_info_all_untyped(
     // Use a running counter to match the capability creation order
     // (invalid regions are skipped in both places)
     let device_count = boot_info.device_region_count as usize;
+    let max_regions = m6_syscall::boot_info::MAX_UNTYPED_REGIONS;
     let mut idx = 1; // Start after RAM untyped
     for i in 0..device_count {
+        if idx >= max_regions {
+            log::warn!(
+                "Device region limit ({}) reached, skipping remaining {} regions",
+                max_regions,
+                device_count - i
+            );
+            break;
+        }
         let region = &boot_info.device_regions[i];
         if !region.is_valid() {
             continue;

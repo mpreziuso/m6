@@ -18,3 +18,4 @@ userspace = []
 
 [dependencies]
 m6-cap = { path = "../m6-cap", default-features = false }
+m6-common = { workspace = true }

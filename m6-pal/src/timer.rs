@@ -59,6 +59,22 @@ pub fn init() {
     let freq = read_cntfrq();
     TIMER_FREQ.store(freq, Ordering::Relaxed);
 
+    // Enable EL0 (userspace) access to the virtual counter (CNTVCT_EL0).
+    // CNTKCTL_EL1 bits:
+    //   Bit 0 (EL0PCTEN): EL0 access to CNTPCT_EL0 (physical counter)
+    //   Bit 1 (EL0VCTEN): EL0 access to CNTVCT_EL0 (virtual counter)
+    // SAFETY: Writing CNTKCTL_EL1 from EL1 is always safe.
+    unsafe {
+        core::arch::asm!(
+            "mrs {tmp}, cntkctl_el1",
+            "orr {tmp}, {tmp}, #0b11",  // Set EL0PCTEN and EL0VCTEN
+            "msr cntkctl_el1, {tmp}",
+            "isb",
+            tmp = out(reg) _,
+            options(nostack, preserves_flags)
+        );
+    }
+
     // Disable timer initially
     write_cntv_ctl(0);
 }

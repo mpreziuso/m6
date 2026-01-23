@@ -49,6 +49,12 @@ impl DeviceRegionResult {
         if self.count < MAX_DEVICE_REGIONS {
             self.regions[self.count] = region;
             self.count += 1;
+        } else {
+            log::warn!(
+                "Device region limit ({}) exceeded, dropping region at {:#x}",
+                MAX_DEVICE_REGIONS,
+                region.phys_base.as_u64()
+            );
         }
     }
 }
@@ -262,6 +268,65 @@ pub fn parse_device_regions(
         }
     }
 
+    // Add RK3588-specific PHY regions that may be missing from DTB.
+    // The DTB may have these nodes disabled even though firmware uses them.
+    // We detect RK3588 by scanning for any rockchip,rk3588-* compatible device.
+    let mut is_rk3588 = false;
+    for node in fdt.all_nodes() {
+        if let Some(compat) = node.compatible() {
+            for s in compat.all() {
+                if s.contains("rk3588") {
+                    is_rk3588 = true;
+                    break;
+                }
+            }
+            if is_rk3588 {
+                break;
+            }
+        }
+    }
+
+    if is_rk3588 {
+        // USBDPPHY0 at 0xFED70000 (64KB) - may be missing if DTB has it disabled
+        const USBDPPHY0_BASE: u64 = 0xFED7_0000;
+        const USBDPPHY_SIZE: u64 = 0x10000; // 64KB
+
+        // Only add if not already present
+        let has_usbdpphy0 = result.regions[..result.count]
+            .iter()
+            .any(|r| r.phys_base.as_u64() == USBDPPHY0_BASE);
+
+        if !has_usbdpphy0 && !ram_regions.overlaps_ram(USBDPPHY0_BASE, USBDPPHY0_BASE + USBDPPHY_SIZE) {
+            let region = DeviceRegion {
+                phys_base: PhysAddr::new(USBDPPHY0_BASE),
+                size: USBDPPHY_SIZE,
+                size_bits: 16, // 2^16 = 64KB
+                device_type: DeviceType::Phy,
+                _reserved: [0; 6],
+            };
+            log::info!("Adding RK3588 USBDPPHY0 at {:#x} (not in DTB)", USBDPPHY0_BASE);
+            result.add(region);
+        }
+
+        // USBDPPHY1 at 0xFED80000 - also add as fallback
+        const USBDPPHY1_BASE: u64 = 0xFED8_0000;
+        let has_usbdpphy1 = result.regions[..result.count]
+            .iter()
+            .any(|r| r.phys_base.as_u64() == USBDPPHY1_BASE);
+
+        if !has_usbdpphy1 && !ram_regions.overlaps_ram(USBDPPHY1_BASE, USBDPPHY1_BASE + USBDPPHY_SIZE) {
+            let region = DeviceRegion {
+                phys_base: PhysAddr::new(USBDPPHY1_BASE),
+                size: USBDPPHY_SIZE,
+                size_bits: 16, // 2^16 = 64KB
+                device_type: DeviceType::Phy,
+                _reserved: [0; 6],
+            };
+            log::info!("Adding RK3588 USBDPPHY1 at {:#x} (not in DTB)", USBDPPHY1_BASE);
+            result.add(region);
+        }
+    }
+
     log::info!("Discovered {} device regions from DTB", result.count);
     Some(result)
 }
@@ -289,9 +354,26 @@ fn classify_device(compat_list: &[&str]) -> DeviceType {
             return DeviceType::VirtioMmio;
         }
 
+        // GRF (General Register File) - RK3588 system configuration
+        // These are needed for USB PHY and other subsystem configuration
+        if compat.contains("grf") || compat.contains("syscon") {
+            return DeviceType::Grf;
+        }
+
+        // CRU (Clock and Reset Unit) - RK3588 clock/reset control
+        if compat.contains("rockchip") && compat.contains("cru") {
+            return DeviceType::Cru;
+        }
+
         // PCIe (wildcard match)
         if compat.contains("pcie") || compat.contains("pci") {
             return DeviceType::Pcie;
+        }
+
+        // PHY devices (USB PHY, PCIE PHY, etc.)
+        // Match "phy" before "usb" since usbdp-phy contains both
+        if compat.contains("phy") {
+            return DeviceType::Phy;
         }
 
         // USB (wildcard match)

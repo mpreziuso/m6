@@ -68,6 +68,8 @@ pub enum Syscall {
     AsidPoolAssign = 52,
     /// Write data from userspace into a frame.
     FrameWrite = 53,
+    /// Get physical address of a frame (for DMA without IOMMU).
+    FrameGetPhys = 54,
 
     // === TCB Operations ===
     /// Configure TCB (set CSpace, VSpace, etc.).
@@ -183,6 +185,7 @@ impl Syscall {
             51 => Some(Self::MapPageTable),
             52 => Some(Self::AsidPoolAssign),
             53 => Some(Self::FrameWrite),
+            54 => Some(Self::FrameGetPhys),
             64 => Some(Self::TcbConfigure),
             65 => Some(Self::TcbWriteRegisters),
             66 => Some(Self::TcbReadRegisters),
@@ -248,6 +251,7 @@ impl Syscall {
             Self::MapPageTable => "MapPageTable",
             Self::AsidPoolAssign => "AsidPoolAssign",
             Self::FrameWrite => "FrameWrite",
+            Self::FrameGetPhys => "FrameGetPhys",
             Self::TcbConfigure => "TcbConfigure",
             Self::TcbWriteRegisters => "TcbWriteRegisters",
             Self::TcbReadRegisters => "TcbReadRegisters",

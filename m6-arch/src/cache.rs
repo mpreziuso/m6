@@ -233,15 +233,63 @@ pub fn cache_clean_all() {
     }
 }
 
-/// Invalidate entire instruction cache
+/// Clean data cache to Point of Unification for code coherency
+///
+/// Use this before invalidating the instruction cache after writing code.
+/// DC CVAU ensures the data reaches the Point of Unification where the
+/// instruction cache can observe it, rather than just PoC.
+///
+/// # Arguments
+/// * `vaddr` - Virtual address of buffer
+/// * `size` - Size of buffer in bytes
+///
+/// # Safety
+/// - vaddr must point to valid, mapped memory
+/// - Buffer must not span unmapped regions
+pub fn cache_clean_range_pou(vaddr: u64, size: usize) {
+    if size == 0 {
+        return;
+    }
+
+    let start = align_down_to_cache_line(vaddr);
+    let end = align_up_to_cache_line(vaddr + size as u64);
+    let line_size = cache_line_size() as u64;
+
+    let mut addr = start;
+    while addr < end {
+        // SAFETY: DC CVAU is safe for any valid mapped address.
+        unsafe {
+            // DC CVAU: Data Cache Clean by VA to Point of Unification
+            asm!(
+                "dc cvau, {addr}",
+                addr = in(reg) addr,
+                options(nostack)
+            );
+        }
+        addr += line_size;
+    }
+
+    // DSB ISH: Ensure clean completes within Inner Shareable domain
+    unsafe {
+        asm!("dsb ish", options(nostack));
+    }
+}
+
+/// Invalidate entire instruction cache (broadcast to all cores)
 ///
 /// Required after modifying executable code (e.g., loading programs).
+/// Uses IC IALLUIS to broadcast the invalidation to all PEs in the
+/// Inner Shareable domain, which is essential for non-coherent SMP systems
+/// like RK3588 where IC IALLU (local-only) is insufficient.
 ///
 /// # Safety
 /// This is a privileged operation. Only call from kernel context.
 pub fn icache_invalidate_all() {
     unsafe {
-        // IC IALLU: Instruction Cache Invalidate All to PoU
-        asm!("ic iallu", "dsb sy", "isb", options(nostack));
+        // IC IALLUIS: Instruction Cache Invalidate All to PoU, Inner Shareable
+        // This broadcasts the invalidation to all cores in the Inner Shareable domain.
+        // Critical for non-coherent systems (e.g., RK3588) where local-only IC IALLU
+        // would cause instruction faults on newly loaded code.
+        asm!("ic ialluis", "dsb ish", "isb", options(nostack));
     }
 }

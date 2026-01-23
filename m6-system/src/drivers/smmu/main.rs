@@ -48,10 +48,13 @@ mod slots {
     pub const IRQ_HANDLER: u64 = 11;
     pub const SERVICE_EP: u64 = 12;
     pub const NOTIF: u64 = 14;
+    pub const INSTANCE_INFO: u64 = 29;
 }
 
-/// SMMU MMIO virtual address (where DeviceFrame is mapped).
-const SMMU_MMIO_VADDR: u64 = 0x0000_8000_0000;
+/// Base SMMU MMIO virtual address (where DeviceFrame is mapped).
+/// Each SMMU instance uses an offset: instance_0 = 0x80000000, instance_1 = 0x80100000, etc.
+const SMMU_MMIO_VADDR_BASE: u64 = 0x0000_8000_0000;
+const SMMU_MMIO_VADDR_OFFSET: u64 = 0x0010_0000; // 1MB per instance
 
 /// Event queue size (must match kernel configuration).
 const EVENTQ_SIZE: usize = 1024;
@@ -184,17 +187,52 @@ impl SmmuState {
 pub unsafe extern "C" fn _start() -> ! {
     puts("[SMMU] Driver starting\n");
 
+    // Read instance index from INSTANCE_INFO frame to calculate unique virtual address
+    const INSTANCE_INFO_VADDR: u64 = 0x0000_7000_0000;
+
+    // Map instance info frame temporarily to read instance index
+    match map_frame(
+        cptr(slots::ROOT_VSPACE),
+        cptr(slots::INSTANCE_INFO),
+        INSTANCE_INFO_VADDR,
+        0b001, // Read-only
+        0,
+    ) {
+        Ok(_) => {}
+        Err(e) => {
+            puts("[SMMU] Failed to map instance info: ");
+            put_u64(e as u64);
+            newline();
+            panic!("Cannot determine SMMU instance");
+        }
+    }
+
+    // Read SMMU instance index (0, 1, 2, or 3)
+    // SAFETY: Reading from mapped frame at valid address
+    let instance_idx = unsafe {
+        core::ptr::read_volatile(INSTANCE_INFO_VADDR as *const u64)
+    };
+
+    // Calculate unique virtual address for this SMMU instance
+    let smmu_mmio_vaddr = SMMU_MMIO_VADDR_BASE + (instance_idx * SMMU_MMIO_VADDR_OFFSET);
+
+    puts("[SMMU] Instance index: ");
+    put_u64(instance_idx);
+    puts(", using VADDR ");
+    put_hex(smmu_mmio_vaddr);
+    newline();
+
     // Map SMMU MMIO region (read-only for monitoring)
     match map_frame(
         cptr(slots::ROOT_VSPACE),
         cptr(slots::DEVICE_FRAME),
-        SMMU_MMIO_VADDR,
+        smmu_mmio_vaddr,
         0b001, // Read-only
         0,
     ) {
         Ok(_) => {
             puts("[SMMU] Mapped MMIO at ");
-            put_hex(SMMU_MMIO_VADDR);
+            put_hex(smmu_mmio_vaddr);
             newline();
         }
         Err(e) => {
@@ -205,8 +243,8 @@ pub unsafe extern "C" fn _start() -> ! {
         }
     }
 
-    // Initialize driver state
-    let mut state = SmmuState::new(SMMU_MMIO_VADDR);
+    // Initialise driver state
+    let mut state = SmmuState::new(smmu_mmio_vaddr);
 
     // Set up IRQ handler for event queue interrupt
     match irq_set_handler(

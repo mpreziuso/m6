@@ -127,6 +127,9 @@ else
         -drive file="$NVME_IMG",if=none,id=nvme0 \
         -device nvme,serial=deadbeef,drive=nvme0 \
         -device ramfb \
+        -device qemu-xhci,id=xhci \
+        -device usb-kbd,bus=xhci.0 \
+        -device usb-mouse,bus=xhci.0 \
         -device virtio-keyboard-pci \
         -device virtio-mouse-pci \
         -device virtio-net-pci,netdev=net0 \

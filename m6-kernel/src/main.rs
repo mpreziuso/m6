@@ -124,29 +124,38 @@ pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
     // Register IPI handler for SMP
     gic::register_ipi_handler(ipi_handler);
 
-    // Initialise SMMU if present
-    if let Some(smmu_config) = platform::platform().smmu_config() {
-        log::info!(
-            "SMMU detected at {:#x}, size {:#x}",
-            smmu_config.base_addr,
-            smmu_config.size
-        );
-        // Map SMMU registers to kernel address space
-        let smmu_virt = memory::translate::phys_to_virt(smmu_config.base_addr);
-        // SAFETY: Called once during init with valid platform-provided SMMU address
-        match unsafe { m6_kernel::smmu::init(smmu_config.base_addr, smmu_virt) } {
-            Ok(()) => {
-                log::info!("SMMU initialised successfully");
+    // Initialise all SMMUs if present
+    let smmus = platform::platform().smmus();
+    if !smmus.is_empty() {
+        log::info!("Found {} SMMU(s) in device tree", smmus.len());
 
-                // Register event queue IRQ handler
-                let event_irq = smmu_config.event_irq;
-                gic::register_handler(event_irq, smmu_event_irq_handler);
-                gic::set_priority(event_irq, 0x90); // Lower priority than timer
-                gic::enable_irq(event_irq);
-                log::info!("SMMU event IRQ {} enabled", event_irq);
-            }
-            Err(e) => {
-                log::error!("SMMU initialisation failed: {:?}", e);
+        for (index, smmu_config) in smmus.iter().enumerate() {
+            log::info!(
+                "SMMU #{} detected at {:#x}, size {:#x}, phandle {:#x}",
+                index,
+                smmu_config.base_addr,
+                smmu_config.size,
+                smmu_config.phandle
+            );
+
+            // Map SMMU registers to kernel address space
+            let smmu_virt = memory::translate::phys_to_virt(smmu_config.base_addr);
+
+            // SAFETY: Called during init with valid platform-provided SMMU address
+            match unsafe { m6_kernel::smmu::init(smmu_config.base_addr, smmu_virt, index as u8) } {
+                Ok(()) => {
+                    log::info!("SMMU #{} initialised successfully", index);
+
+                    // Register event queue IRQ handler
+                    let event_irq = smmu_config.event_irq;
+                    gic::register_handler(event_irq, smmu_event_irq_handler);
+                    gic::set_priority(event_irq, 0x90); // Lower priority than timer
+                    gic::enable_irq(event_irq);
+                    log::info!("SMMU #{} event IRQ {} enabled", index, event_irq);
+                }
+                Err(e) => {
+                    log::error!("SMMU #{} initialisation failed: {:?}", index, e);
+                }
             }
         }
     } else {

@@ -248,6 +248,7 @@ pub unsafe extern "C" fn secondary_entry_stub() -> ! {
         "orr x24, x24, #(1 << 0)",     // M bit (MMU enable)
         "orr x24, x24, #(1 << 2)",     // C bit (data cache)
         "orr x24, x24, #(1 << 12)",    // I bit (instruction cache)
+        "orr x24, x24, #(1 << 26)",    // UCI bit (user cache instructions)
         "msr sctlr_el1, x24",
 
         // Set SP_EL1 for kernel stack
@@ -290,6 +291,7 @@ pub unsafe extern "C" fn secondary_entry_stub() -> ! {
         "orr x24, x24, #(1 << 0)",     // M bit
         "orr x24, x24, #(1 << 2)",     // C bit
         "orr x24, x24, #(1 << 12)",    // I bit
+        "orr x24, x24, #(1 << 26)",    // UCI bit (user cache instructions)
         "msr SCTLR_EL1, x24",
         "isb",
 

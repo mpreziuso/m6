@@ -5,7 +5,9 @@
 //! The parsed DTB is kept in static storage for later access by other modules
 //! (e.g., device manager service).
 
-use crate::dtb_platform::{DtbPlatform, GicVersion, PsciMethod, SmmuConfig, UartType};
+extern crate alloc;
+
+use crate::dtb_platform::{DtbPlatform, GicVersion, PsciMethod, SmmuConfig, UartType, MAX_SMMUS};
 use fdt::Fdt;
 use m6_common::boot::{BootInfo, KERNEL_PHYS_MAP_BASE};
 use once_cell_no_std::OnceCell;
@@ -71,7 +73,7 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
     let (ram_base, ram_size) = parse_memory(&fdt);
     let timer_irq = parse_timer(&fdt)?;
     let name = parse_platform_name(&fdt)?;
-    let smmu_config = parse_smmu(&fdt);
+    let (smmus, smmu_count) = parse_smmus(&fdt);
     let cpu_count = parse_cpu_count(&fdt);
     let psci_method = parse_psci_method(&fdt);
 
@@ -86,7 +88,8 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
         uart_type,
         ram_base,
         ram_size,
-        smmu_config,
+        smmus,
+        smmu_count,
         cpu_count,
         psci_method,
     })
@@ -389,49 +392,72 @@ pub fn parse_cpu_count_from_slice(dtb_slice: &[u8]) -> Result<u32, DtbError> {
     Ok(parse_cpu_count(&fdt))
 }
 
-/// Parse SMMU (System Memory Management Unit) configuration
+/// Parse all SMMU (System Memory Management Unit) configurations
 ///
-/// Returns Some(SmmuConfig) if an SMMUv3 is found, None otherwise.
+/// Returns an array of SMMU configurations and the count of valid entries.
 /// SMMU is optional - the system can run without it (but userspace drivers
 /// will be disabled for security).
-fn parse_smmu(fdt: &Fdt) -> Option<SmmuConfig> {
+fn parse_smmus(fdt: &Fdt) -> ([SmmuConfig; MAX_SMMUS], usize) {
+    let mut smmus = [SmmuConfig::default(); MAX_SMMUS];
+    let mut count = 0;
+
     for node in fdt.all_nodes() {
+        if count >= MAX_SMMUS {
+            break; // Array is full
+        }
+
         if let Some(compatible) = node.compatible() {
             // Check for ARM SMMUv3
             if compatible.all().any(|c| c == "arm,smmu-v3") {
-                let reg = node.reg()?.next()?;
-                let base_addr = reg.starting_address as u64;
-                let size = reg.size.unwrap_or(0x20000) as u64;
+                if let Some(reg) = node.reg().and_then(|mut r| r.next()) {
+                    let base_addr = reg.starting_address as u64;
+                    let size = reg.size.unwrap_or(0x20000) as u64;
 
-                // Parse interrupts (SMMUv3 typically has: eventq, gerror, cmdq-sync)
-                // The interrupt property format depends on the interrupt controller
-                let mut event_irq = 0u32;
-                let mut gerror_irq = 0u32;
-                let mut cmdq_sync_irq = 0u32;
+                    // Parse phandle for this SMMU node
+                    let phandle = if let Some(prop) = node.property("phandle") {
+                        let data = prop.value;
+                        if data.len() >= 4 {
+                            u32::from_be_bytes([data[0], data[1], data[2], data[3]])
+                        } else {
+                            0
+                        }
+                    } else {
+                        0
+                    };
 
-                if let Some(mut interrupts) = node.interrupts() {
-                    if let Some(irq) = interrupts.next() {
-                        event_irq = irq as u32;
+                    // Parse interrupts (SMMUv3 typically has: eventq, gerror, cmdq-sync)
+                    // The interrupt property format depends on the interrupt controller
+                    let mut event_irq = 0u32;
+                    let mut gerror_irq = 0u32;
+                    let mut cmdq_sync_irq = 0u32;
+
+                    if let Some(mut interrupts) = node.interrupts() {
+                        if let Some(irq) = interrupts.next() {
+                            event_irq = irq as u32;
+                        }
+                        if let Some(irq) = interrupts.next() {
+                            gerror_irq = irq as u32;
+                        }
+                        if let Some(irq) = interrupts.next() {
+                            cmdq_sync_irq = irq as u32;
+                        }
                     }
-                    if let Some(irq) = interrupts.next() {
-                        gerror_irq = irq as u32;
-                    }
-                    if let Some(irq) = interrupts.next() {
-                        cmdq_sync_irq = irq as u32;
-                    }
+
+                    smmus[count] = SmmuConfig {
+                        base_addr,
+                        size,
+                        event_irq,
+                        gerror_irq,
+                        cmdq_sync_irq,
+                        phandle,
+                    };
+                    count += 1;
                 }
-
-                return Some(SmmuConfig {
-                    base_addr,
-                    size,
-                    event_irq,
-                    gerror_irq,
-                    cmdq_sync_irq,
-                });
             }
         }
     }
-    None
+
+    (smmus, count)
 }
 
 /// Parse PSCI invocation method from DTB /psci node

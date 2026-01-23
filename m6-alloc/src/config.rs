@@ -3,6 +3,13 @@
 /// Page size constant (4KB for ARM64)
 pub const PAGE_SIZE: usize = 4096;
 
+/// CPtr slot offset for consecutive frame capabilities.
+///
+/// For CNode radix 10, each slot is offset by 1 << 54 in CPtr space.
+/// When allocating multiple frames, they're placed at consecutive slots,
+/// so frame[i] has cptr = base_cptr + (i * CPTR_SLOT_OFFSET).
+pub const CPTR_SLOT_OFFSET: u64 = 1 << 54;
+
 /// Minimum allocation size (pointer-sized for freelist storage)
 pub const MIN_ALLOC_SIZE: usize = 8;
 
@@ -13,10 +20,12 @@ pub const MAX_SMALL_SIZE: usize = 2048;
 pub const LARGE_THRESHOLD: usize = MAX_SMALL_SIZE;
 
 /// Maximum number of spans the allocator can manage
-pub const MAX_SPANS: usize = 1024;
+/// Reduced from 1024 to keep allocator size under 16KB for embedded use
+pub const MAX_SPANS: usize = 64;
 
 /// Maximum number of large allocations tracked in side table
-pub const MAX_LARGE_ENTRIES: usize = 256;
+/// Reduced from 256 to keep allocator size small for embedded use
+pub const MAX_LARGE_ENTRIES: usize = 32;
 
 /// Size of quarantine queue (when feature enabled)
 #[cfg(feature = "quarantine")]

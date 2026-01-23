@@ -53,7 +53,6 @@ static SMMU_AVAILABLE: AtomicBool = AtomicBool::new(false);
 /// Collection of SMMU instances.
 struct SmmuInstances {
     instances: [Option<SmmuInstance>; MAX_SMMUS],
-    #[expect(dead_code)]
     count: usize,
 }
 
@@ -449,14 +448,23 @@ pub enum SmmuError {
     AllocFailed,
 }
 
-/// Initialise the SMMU subsystem.
+/// Initialise an SMMU instance.
 ///
 /// # Safety
 ///
-/// - Must be called once during kernel init
+/// - Must be called during kernel init
 /// - `smmu_phys` must be the physical base address of the SMMU
 /// - `smmu_virt` must be a valid kernel-mapped address for the SMMU registers
-pub unsafe fn init(smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
+/// - `index` must be a valid SMMU index (0-3)
+pub unsafe fn init(
+    smmu_phys: u64,
+    smmu_virt: u64,
+    index: u8,
+) -> Result<(), SmmuError> {
+    if index as usize >= MAX_SMMUS {
+        return Err(SmmuError::InvalidConfig);
+    }
+
     let base = NonNull::new(smmu_virt as *mut u8).ok_or(SmmuError::NotAvailable)?;
 
     // Read identification registers
@@ -554,7 +562,7 @@ pub unsafe fn init(smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
             cons: 0,
         },
         enabled: false,
-        index: 0,
+        index,
         stream_bindings,
     };
 
@@ -620,21 +628,35 @@ pub unsafe fn init(smmu_phys: u64, smmu_virt: u64) -> Result<(), SmmuError> {
 
     instance.enabled = true;
 
-    // Store instance
-    let instances = SmmuInstances {
-        instances: [Some(instance), None, None, None],
-        count: 1,
-    };
+    // Initialize SMMU_INSTANCES on first call
+    if SMMU_INSTANCES.get().is_none() {
+        let instances = SmmuInstances {
+            instances: [None, None, None, None],
+            count: 0,
+        };
+        SMMU_INSTANCES.call_once(|| IrqSpinMutex::new(instances));
+    }
 
-    SMMU_INSTANCES.call_once(|| IrqSpinMutex::new(instances));
+    // Store instance in the appropriate slot
+    if let Some(instances_lock) = SMMU_INSTANCES.get() {
+        let mut instances = instances_lock.lock();
+        if instances.instances[index as usize].is_some() {
+            return Err(SmmuError::InvalidConfig); // Already initialised
+        }
+        instances.instances[index as usize] = Some(instance);
+        instances.count += 1;
+
+        log::info!(
+            "SMMU #{} initialised @ {:#x}: {} streams, cmdq={} entries, eventq={} entries",
+            index,
+            smmu_phys,
+            1 << strtab_log2size,
+            CMDQ_ENTRIES,
+            EVENTQ_ENTRIES
+        );
+    }
+
     SMMU_AVAILABLE.store(true, Ordering::Release);
-
-    log::info!(
-        "SMMU initialised: {} streams, cmdq={} entries, eventq={} entries",
-        1 << strtab_log2size,
-        CMDQ_ENTRIES,
-        EVENTQ_ENTRIES
-    );
 
     Ok(())
 }
@@ -661,18 +683,39 @@ pub struct SmmuInfo {
 ///
 /// Returns None if no SMMU is initialized.
 pub fn get_smmu_info() -> Option<SmmuInfo> {
+    get_smmu_info_by_index(0)
+}
+
+/// Get information about a specific SMMU instance by index.
+///
+/// Returns None if no SMMU at that index is initialized.
+pub fn get_smmu_info_by_index(index: u8) -> Option<SmmuInfo> {
     if !is_available() {
         return None;
     }
 
     SMMU_INSTANCES.get().and_then(|instances_lock| {
         let instances = instances_lock.lock();
-        instances.instances[0].as_ref().map(|inst| SmmuInfo {
-            base_phys: inst.base_phys,
-            base_virt: inst.base.as_ptr() as u64,
-            max_streams: 1 << inst.strtab_log2size,
-            index: inst.index,
-        })
+        instances.instances.get(index as usize)
+            .and_then(|opt| opt.as_ref())
+            .map(|inst| SmmuInfo {
+                base_phys: inst.base_phys,
+                base_virt: inst.base.as_ptr() as u64,
+                max_streams: 1 << inst.strtab_log2size,
+                index: inst.index,
+            })
+    })
+}
+
+/// Get count of initialized SMMU instances.
+pub fn get_smmu_count() -> usize {
+    if !is_available() {
+        return 0;
+    }
+
+    SMMU_INSTANCES.get().map_or(0, |instances_lock| {
+        let instances = instances_lock.lock();
+        instances.count
     })
 }
 

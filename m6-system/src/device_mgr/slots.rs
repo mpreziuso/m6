@@ -31,21 +31,33 @@ pub const RAM_UNTYPED: u64 = 15;
 pub const ASID_POOL: u64 = 16;
 /// Notification bound to this TCB for driver fault delivery
 pub const FAULT_NOTIF: u64 = 17;
-/// SMMU control capability (optional, only if SMMU present)
-pub const SMMU_CONTROL: u64 = 18;
+/// First SMMU control capability (optional, only if SMMU present)
+/// Additional SMMUs use consecutive slots (18, 19, 20, 21 for up to 4 SMMUs)
+pub const SMMU_CONTROL_0: u64 = 18;
+pub const SMMU_CONTROL_1: u64 = 19;
+pub const SMMU_CONTROL_2: u64 = 20;
+pub const SMMU_CONTROL_3: u64 = 21;
 
-/// First device untyped slot
+/// Maximum number of SMMUs supported
+pub const MAX_SMMUS: usize = 4;
+
+/// Get SMMU control slot by index (0-3)
+#[inline]
+pub const fn smmu_control_slot(index: usize) -> u64 {
+    SMMU_CONTROL_0 + index as u64
+}
+
+/// First device untyped slot (from shared constant in m6-common)
 /// Device untyped capabilities are placed starting here
 /// Each covers a device MMIO region that can be retyped to DeviceFrame
-pub const FIRST_DEVICE_UNTYPED: u64 = 20;
+pub const FIRST_DEVICE_UNTYPED: u64 = m6_common::boot::DEVMGR_FIRST_DEVICE_UNTYPED;
 
-/// Maximum number of device untyped regions
-/// RK3588 has 10+ UARTs, 5 PCIe controllers with multiple reg entries, etc.
-pub const MAX_DEVICE_UNTYPED: usize = 48;
+/// Maximum number of device untyped regions (re-exported from m6-common)
+pub use m6_common::boot::MAX_DEVICE_REGIONS as MAX_DEVICE_UNTYPED;
 
 /// First free slot for dynamic allocation
 /// Must be greater than FIRST_DEVICE_UNTYPED + MAX_DEVICE_UNTYPED
-pub const FIRST_FREE_SLOT: u64 = 72;
+pub const FIRST_FREE_SLOT: u64 = FIRST_DEVICE_UNTYPED + MAX_DEVICE_UNTYPED as u64 + 4;
 
 // -- Well-known slots in spawned driver CSpaces
 
@@ -72,6 +84,8 @@ pub mod driver {
     pub const SMMU_CONTROL: u64 = 15;
     /// DMA pool for IOVA allocation (if needs_iommu)
     pub const DMA_POOL: u64 = 16;
+    /// RAM untyped for heap allocation (for drivers that need heap)
+    pub const RAM_UNTYPED: u64 = 17;
 
     /// Console endpoint for IPC-based output (optional)
     /// If present, drivers can use io::init_console() with this slot
@@ -83,12 +97,36 @@ pub mod driver {
     /// Number of DMA buffer frames provided to DMA-capable drivers
     pub const DMA_BUFFER_COUNT: usize = 8;
 
+    /// Instance info frame for drivers that need instance-specific configuration
+    /// Contains a u64 at offset 0 indicating instance index (0, 1, 2, etc.)
+    /// Used by SMMU drivers to derive unique virtual addresses
+    pub const INSTANCE_INFO: u64 = 29;
+
+    /// First additional frame slot (for GRF, CRU, PHY, etc.)
+    /// Slots 30-39 contain DeviceFrame caps for single-page additional MMIO regions
+    pub const ADDITIONAL_FRAME_START: u64 = 30;
+    /// Maximum number of single-page additional frames per driver
+    pub const ADDITIONAL_FRAME_MAX: usize = 10;
+
+    /// First large additional frame slot (for multi-page regions like PHY MMIO)
+    /// Slots 64-127 contain DeviceFrame caps for large MMIO regions
+    pub const LARGE_FRAME_START: u64 = 64;
+    /// Maximum number of large additional frame pages per driver
+    pub const LARGE_FRAME_MAX: usize = 64;
+
     /// First MSI-X IRQHandler slot (for PCIe devices with MSI-X)
     /// Slots 40-47 contain IRQHandler caps for MSI-X vectors 0-7
     pub const MSIX_IRQ_START: u64 = 40;
     /// Maximum number of MSI-X vectors we support per driver
     pub const MSIX_MAX_VECTORS: usize = 8;
 
+    /// First extended MMIO frame slot (for devices with large MMIO regions)
+    /// Slots 48-63 contain DeviceFrame caps for pages beyond the first 4KB
+    /// DEVICE_FRAME covers offset 0x0000-0x0FFF, these cover 0x1000+
+    pub const EXTENDED_MMIO_START: u64 = 48;
+    /// Maximum number of extended MMIO pages (plus 1 for DEVICE_FRAME = 17 pages = 68KB)
+    pub const EXTENDED_MMIO_MAX: usize = 16;
+
     /// First free slot for driver's own allocations
-    pub const FIRST_FREE_SLOT: u64 = 50;
+    pub const FIRST_FREE_SLOT: u64 = 64;
 }

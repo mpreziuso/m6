@@ -25,7 +25,6 @@ use m6_cap::objects::ThreadState;
 use super::run_queue::{with_tcb, with_tcb_mut};
 use super::{PerCpuSched, eevdf};
 use crate::cap::object_table::{self, KernelObjectType};
-use crate::memory::asid::current_generation;
 
 /// Perform a context switch.
 ///
@@ -102,33 +101,20 @@ pub fn switch_vspace(vspace_ref: Option<ObjectRef>) {
             // The VSpace stores the physical address of the L0 page table
             let ttbr0 = vspace.root_table.as_u64();
             let asid = vspace.asid.value() as u64;
-            let vspace_gen = vspace.asid_generation;
-
-            // Check if we need TLB invalidation due to ASID recycling
-            let current_gen = current_generation();
-            let needs_tlb_invalidation = vspace_gen != current_gen;
 
             // Combine ASID and table base
             // TTBR0_EL1 format: [ASID:16][BADDR:48]
             let ttbr0_with_asid = (asid << 48) | (ttbr0 & 0x0000_FFFF_FFFF_FFFF);
 
-            if needs_tlb_invalidation {
-                // ASID was recycled - invalidate all TLB entries for this ASID
-                // before switching to prevent stale translations
-                //
-                // We use ASID-specific invalidation which is more efficient
-                // than full TLB invalidation. The `aside1is` instruction
-                // invalidates all TLB entries with the given ASID across
-                // all CPUs in the inner shareable domain.
-                invalidate_tlb_by_asid(asid);
-
-                // Note: In a more complete implementation, we would update
-                // the VSpace's generation here. However, this requires
-                // mutable access which we don't have in this context.
-                // The generation mismatch will continue to trigger
-                // invalidation until the VSpace is updated (e.g., on next
-                // ASID allocation). This is safe but slightly inefficient.
-            }
+            // Always invalidate TLB for this ASID before switching.
+            // This is necessary because:
+            // 1. On first use of an ASID, there may be stale entries from
+            //    the bootloader phase or previous boot cycles
+            // 2. On RK3588 and similar big.LITTLE systems, TLB entries may
+            //    not be properly invalidated across all clusters
+            // 3. The ASID generation tracking alone is insufficient when
+            //    switching to a newly created VSpace
+            invalidate_tlb_by_asid(asid);
 
             // DSB ensures all prior page table writes are visible to the
             // hardware page table walker before we switch to the new TTBR0.

@@ -27,7 +27,7 @@ user: sysroot
 initrd: system
 	@mkdir -p target/initrd
 	cd target/aarch64-unknown-none/release && \
-		tar --format=ustar -cf ../../../target/initrd/INITRD init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme svc-fat32
+		tar --format=ustar -cf ../../../target/initrd/INITRD init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme drv-usb-xhci drv-usb-dwc3 svc-fat32
 	@echo "Created initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
 	@echo "Contents:"
 	@tar -tvf target/initrd/INITRD
@@ -43,6 +43,8 @@ initrd-full: system user
 	@cp target/aarch64-unknown-none/release/drv-smmu target/initrd/
 	@cp target/aarch64-unknown-none/release/drv-virtio-blk target/initrd/
 	@cp target/aarch64-unknown-none/release/drv-nvme target/initrd/
+	@cp target/aarch64-unknown-none/release/drv-usb-xhci target/initrd/
+	@cp target/aarch64-unknown-none/release/drv-usb-dwc3 target/initrd/
 	@cp target/aarch64-unknown-none/release/svc-fat32 target/initrd/
 	@# Copy user binaries
 	@cp target/aarch64-unknown-m6/release/shell target/initrd/
@@ -54,7 +56,7 @@ initrd-full: system user
 	@# Create TAR archive
 	cd target/initrd && \
 		tar --format=ustar -cf INITRD \
-		init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme svc-fat32 \
+		init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme drv-usb-xhci drv-usb-dwc3 svc-fat32 \
 		shell ls cat cp echo mkdir
 	@echo "Created full initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
 	@echo "Contents:"

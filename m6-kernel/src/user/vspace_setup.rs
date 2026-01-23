@@ -157,10 +157,11 @@ pub fn load_elf_into_vspace(l0_phys: PhysAddr, elf_data: &[u8]) -> Result<u64, V
                     );
                 }
 
-                // ARM64 cache maintenance: Clean D-cache for executable code
-                // This ensures the written data is visible to instruction fetches
+                // ARM64 cache maintenance: Clean D-cache to PoU for executable code
+                // DC CVAU ensures the data reaches Point of Unification where
+                // the instruction cache can observe it (required for non-coherent systems)
                 if perms.execute {
-                    m6_arch::cache::cache_clean_range(frame_virt, data.len());
+                    m6_arch::cache::cache_clean_range_pou(frame_virt, data.len());
                 }
             }
 

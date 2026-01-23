@@ -138,10 +138,78 @@ fn parse_device_node(node: &fdt::node::FdtNode, compat: &str) -> Option<DeviceEn
 
     // Platform devices don't have PCIe BDF
     entry.pcie_bdf = None;
-    entry.stream_id = 0;
+
+    // Parse stream ID and SMMU phandle for devices with iommus property
+    // The iommus property format is: [phandle, stream_id]
+    // For RK3588 USB controllers, this indicates which SMMU stream ID to use
+    if compat.contains("snps,dwc3") {
+        // First try parsing from DTB, fall back to hardcoded IDs based on base address
+        let fallback_id = match entry.phys_base {
+            0xFC00_0000 => 0x10, // USB3OTG_0
+            0xFC40_0000 => 0x11, // USB3OTG_1
+            0xFCD0_0000 => 0x12, // USB3OTG_2
+            _ => 0,
+        };
+
+        // Hardcoded PHP SMMU phandle for RK3588 (from linux-kernel DTS: mmu600_php)
+        // This is SMMU #1 at 0xfcb00000
+        let fallback_phandle = 0x191u32;
+
+        // Try to parse iommus property to get SMMU phandle and stream ID
+        if let Some((smmu_phandle, stream_id)) = parse_iommus_info(node) {
+            entry.stream_id = stream_id;
+            entry.smmu_phandle = smmu_phandle;
+        } else {
+            // Use hardcoded fallback for RK3588 USB
+            entry.stream_id = fallback_id;
+            entry.smmu_phandle = if entry.phys_base >= 0xFC00_0000
+                && entry.phys_base < 0xFCE0_0000
+            {
+                fallback_phandle
+            } else {
+                0
+            };
+        }
+    } else if let Some((smmu_phandle, stream_id)) = parse_iommus_info(node) {
+        // Other devices with iommus property
+        entry.stream_id = stream_id;
+        entry.smmu_phandle = smmu_phandle;
+    } else {
+        entry.stream_id = 0;
+        entry.smmu_phandle = 0;
+    }
 
     entry.state = DeviceState::Unbound;
     Some(entry)
+}
+
+/// Parse stream ID and SMMU phandle from the iommus property.
+///
+/// The iommus property is formatted as: [phandle (4 bytes), stream_id (4 bytes)]
+/// Returns (smmu_phandle, stream_id) if present, or None if the property is missing or malformed.
+fn parse_iommus_info(node: &fdt::node::FdtNode) -> Option<(u32, u32)> {
+    let iommus = node.property("iommus")?;
+    let data = iommus.value;
+
+    // Need at least 8 bytes (phandle + stream_id)
+    if data.len() < 8 {
+        return None;
+    }
+
+    // Extract SMMU phandle (first u32, bytes 0-3)
+    let smmu_phandle = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+
+    // Extract stream ID (second u32, bytes 4-7)
+    let stream_id = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+
+    Some((smmu_phandle, stream_id))
+}
+
+/// Parse stream ID from the iommus property (discarding phandle).
+///
+/// Returns just the stream ID for backward compatibility.
+fn parse_iommus_stream_id(node: &fdt::node::FdtNode) -> Option<u32> {
+    parse_iommus_info(node).map(|(_, stream_id)| stream_id)
 }
 
 /// Get the platform name from DTB root node.
@@ -221,4 +289,82 @@ pub fn virtio_device_name(device_id: u32) -> &'static str {
         virtio_device_ids::INPUT => "input",
         _ => "unknown",
     }
+}
+
+/// Resolve a phandle value to its corresponding device node.
+///
+/// This walks all nodes in the FDT to find the node with the matching phandle property.
+/// Returns the node if found, or None if no node has the specified phandle.
+fn resolve_phandle<'a>(fdt: &'a fdt::Fdt, phandle: u32) -> Option<fdt::node::FdtNode<'a, 'a>> {
+    for node in fdt.all_nodes() {
+        if let Some(prop) = node.property("phandle") {
+            let value = prop.value;
+            if value.len() >= 4 {
+                let node_phandle = u32::from_be_bytes([value[0], value[1], value[2], value[3]]);
+                if node_phandle == phandle {
+                    return Some(node);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parse additional MMIO frames needed by USB DWC3 driver from DTB.
+///
+/// Looks for phandle references to GRF, CRU, and PHY nodes in the USB device node.
+/// Returns a vector of (physical_address, size, name) tuples.
+///
+/// This function attempts to dynamically discover register regions from the device tree
+/// rather than relying on hardcoded addresses. Falls back to static addresses if
+/// DTB parsing fails or references are missing.
+pub fn parse_usb_additional_frames(
+    fdt: &fdt::Fdt,
+    usb_node: &fdt::node::FdtNode,
+) -> alloc::vec::Vec<(u64, usize, &'static str)> {
+    use alloc::vec::Vec;
+
+    let mut frames = Vec::new();
+
+    // Parse GRF reference (rockchip,grf property)
+    if let Some(grf_prop) = usb_node.property("rockchip,grf") {
+        let data = grf_prop.value;
+        if data.len() >= 4 {
+            let phandle = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+            if let Some(grf_node) = resolve_phandle(fdt, phandle)
+                && let Some(mut reg) = grf_node.reg()
+                && let Some(region) = reg.next()
+            {
+                frames.push((
+                    region.starting_address as u64,
+                    region.size.unwrap_or(0x1000),
+                    "GRF",
+                ));
+            }
+        }
+    }
+
+    // Parse PHY references (phys property with multiple phandles)
+    if let Some(phys_prop) = usb_node.property("phys") {
+        let data = phys_prop.value;
+        // Each phandle is 4 bytes
+        for chunk in data.chunks_exact(4) {
+            let phandle = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            if let Some(phy_node) = resolve_phandle(fdt, phandle)
+                && let Some(mut reg) = phy_node.reg()
+                && let Some(region) = reg.next()
+            {
+                frames.push((
+                    region.starting_address as u64,
+                    region.size.unwrap_or(0x4000),
+                    "PHY",
+                ));
+            }
+        }
+    }
+
+    // Note: CRU (clock) reference parsing via "clocks" property is more complex
+    // and requires understanding the clock binding. For now, fall back to static CRU address.
+
+    frames
 }

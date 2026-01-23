@@ -15,14 +15,16 @@ pub mod process;
 mod rt;
 
 use m6_cap::root_slots::Slot;
+use m6_common::boot::{MAX_DEVICE_REGIONS, MAX_UNTYPED_REGIONS};
 use m6_syscall::{
     IpcBuffer, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION, UserBootInfo,
     invoke::{ipc_get_recv_caps, ipc_set_recv_slots, sched_yield},
 };
 use process::{InitialCap, SpawnConfig};
 
-/// First free slot for dynamic allocation
-const FIRST_FREE_SLOT: u64 = 64;
+/// First free slot for dynamic allocation.
+/// Must be after all untyped slots: FirstUntyped (9) + MAX_UNTYPED_REGIONS.
+const FIRST_FREE_SLOT: u64 = Slot::FirstUntyped as u64 + MAX_UNTYPED_REGIONS as u64 + 1;
 
 /// Entry point - called by kernel with UserBootInfo address in x0.
 ///
@@ -194,13 +196,14 @@ const DEV_MGR_BOOT_INFO_VERSION: u32 = 1;
 const DEVMGR_BOOT_INFO_ADDR: u64 = 0x0000_1000_0000; // 256MB mark
 const DEVMGR_DTB_ADDR: u64 = 0x0000_1001_0000; // Just after boot info
 const DEVMGR_INITRD_ADDR: u64 = 0x0000_2000_0000; // 512MB mark
+const DEVMGR_SMMU_CONTROL_0: u64 = 18; // First SMMU control slot (18-21 for up to 4 SMMUs)
 
 /// Maximum number of device untyped regions to pass to device-mgr
-/// RK3588 has 10+ UARTs, 5 PCIe controllers, SMMUs, etc.
-const MAX_DEVICE_UNTYPED: usize = 48;
+/// Uses the centralized constant from m6-common.
+const MAX_DEVICE_UNTYPED: usize = MAX_DEVICE_REGIONS;
 
-/// First device untyped slot in device-mgr's CSpace
-const DEVMGR_FIRST_DEVICE_UNTYPED: u64 = 20;
+/// First device untyped slot in device-mgr's CSpace (from shared constant)
+const DEVMGR_FIRST_DEVICE_UNTYPED: u64 = m6_common::boot::DEVMGR_FIRST_DEVICE_UNTYPED;
 
 /// DevMgrBootInfo structure layout (must match device_mgr/boot_info.rs)
 #[repr(C)]
@@ -247,15 +250,15 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             device_untyped_phys[device_untyped_count] = boot_info.untyped_phys_base[i];
             device_untyped_size_bits[device_untyped_count] = boot_info.untyped_size_bits[i];
 
-            io::puts("[init] Device untyped ");
-            io::put_u64(device_untyped_count as u64);
-            io::puts(": slot ");
-            io::put_u64(slot);
-            io::puts(" phys ");
-            io::put_hex(boot_info.untyped_phys_base[i]);
-            io::puts(" size 2^");
-            io::put_u64(boot_info.untyped_size_bits[i] as u64);
-            io::newline();
+            // io::puts("[init] Device untyped ");
+            // io::put_u64(device_untyped_count as u64);
+            // io::puts(": slot ");
+            // io::put_u64(slot);
+            // io::puts(" phys ");
+            // io::put_hex(boot_info.untyped_phys_base[i]);
+            // io::puts(" size 2^");
+            // io::put_u64(boot_info.untyped_size_bits[i] as u64);
+            // io::newline();
 
             device_untyped_count += 1;
         }
@@ -291,11 +294,12 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     io::puts("[init] Registry endpoint created successfully\n");
 
     // Build initial capabilities list including device untypeds
-    // Max 64 initial caps: 5 standard + up to 48 device untypeds + margin
-    let mut initial_caps_storage: [InitialCap; 64] = [InitialCap {
+    // Need: 5 standard caps + up to MAX_DEVICE_REGIONS device untypeds
+    const INITIAL_CAPS_MAX: usize = 8 + MAX_DEVICE_UNTYPED;
+    let mut initial_caps_storage: [InitialCap; INITIAL_CAPS_MAX] = [InitialCap {
         src_slot: 0,
         dst_slot: 0,
-    }; 64];
+    }; INITIAL_CAPS_MAX];
     let mut cap_idx = 0;
 
     // Standard caps
@@ -319,13 +323,18 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         dst_slot: 16,
     };
     cap_idx += 1;
-    initial_caps_storage[cap_idx] = InitialCap {
-        src_slot: Slot::SmmuControl as u64,
-        dst_slot: 18,
-    };
-    cap_idx += 1;
 
-    // Device untypeds at slots 20+
+    // Copy all available SMMU control capabilities (only as many as exist)
+    let smmu_count = boot_info.smmu_count.min(4) as usize;
+    for smmu_idx in 0..smmu_count {
+        initial_caps_storage[cap_idx] = InitialCap {
+            src_slot: Slot::smmu_control(smmu_idx) as u64,
+            dst_slot: DEVMGR_SMMU_CONTROL_0 + smmu_idx as u64,
+        };
+        cap_idx += 1;
+    }
+
+    // Device untypeds at slots 24+
     for (i, &slot) in device_untyped_slots
         .iter()
         .enumerate()

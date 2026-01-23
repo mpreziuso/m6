@@ -170,11 +170,34 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
         // For DeviceFrame with offset, use offset-based allocation
         let phys_addr = if target_type == ObjectType::DeviceFrame && device_offset != 0 {
             object_table::with_untyped(untyped_cap.obj_ref, |untyped| {
+                let size = untyped.size();
+                let is_dev = untyped.is_device;
+                log::debug!(
+                    "Retype: DeviceFrame offset={:#x} obj_size={:#x} untyped_phys={:#x} size={:#x} is_device={}",
+                    device_offset,
+                    obj_size,
+                    untyped.phys_base.as_u64(),
+                    size,
+                    is_dev
+                );
                 untyped
                     .try_allocate_at_offset(device_offset, obj_size)
-                    .map_err(|_| SyscallError::NoMemory)
+                    .map_err(|e| {
+                        log::debug!(
+                            "Retype: try_allocate_at_offset FAILED: {:?} (offset={:#x} + size={:#x} = {:#x}, untyped_size={:#x})",
+                            e,
+                            device_offset,
+                            obj_size,
+                            device_offset + obj_size as u64,
+                            size
+                        );
+                        SyscallError::NoMemory
+                    })
             })
-            .ok_or(SyscallError::InvalidCap)??
+            .ok_or_else(|| {
+                log::debug!("Retype: with_untyped returned None (invalid untyped cap for obj_ref {:?})", untyped_cap.obj_ref);
+                SyscallError::InvalidCap
+            })??
         } else {
             object_table::with_untyped_mut(untyped_cap.obj_ref, |untyped| {
                 untyped
@@ -185,7 +208,10 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
         };
 
         // Allocate object table entry
-        let obj_ref = object_table::alloc(kernel_type).ok_or(SyscallError::NoMemory)?;
+        let obj_ref = object_table::alloc(kernel_type).ok_or_else(|| {
+            log::debug!("Retype: object_table::alloc() failed - table full?");
+            SyscallError::NoMemory
+        })?;
 
         // Initialise object-specific data
         let init_result =
@@ -888,6 +914,39 @@ pub fn handle_frame_write(args: &SyscallArgs) -> SyscallResult {
     m6_arch::cpu::dsb_sy();
 
     Ok(len as i64)
+}
+
+/// Handle FrameGetPhys syscall.
+///
+/// Returns the physical address of a frame capability. This is needed for DMA
+/// on platforms without IOMMU, where the driver must program physical addresses
+/// directly into device registers.
+///
+/// # ABI
+///
+/// - x0: Frame capability pointer
+///
+/// # Returns
+///
+/// - Physical address on success (as positive i64)
+/// - Negative error code on failure
+pub fn handle_frame_get_phys(args: &SyscallArgs) -> SyscallResult {
+    let frame_cptr = args.arg0;
+
+    // Look up frame capability - accept both Frame and DeviceFrame
+    let frame_cap = ipc::lookup_cap(frame_cptr, ObjectType::Frame, CapRights::READ).or_else(|e| {
+        if matches!(e, SyscallError::TypeMismatch) {
+            ipc::lookup_cap(frame_cptr, ObjectType::DeviceFrame, CapRights::READ)
+        } else {
+            Err(e)
+        }
+    })?;
+
+    // Get frame physical address
+    let phys_addr = object_table::with_frame_mut(frame_cap.obj_ref, |frame| frame.phys_addr)
+        .ok_or(SyscallError::InvalidCap)?;
+
+    Ok(phys_addr.as_u64() as i64)
 }
 
 /// Convert physical address to kernel virtual address.
