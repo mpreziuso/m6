@@ -136,6 +136,11 @@ impl SyscallError {
     }
 }
 
+/// The minimum (most negative) syscall error code. Used by IPC recv/call
+/// to distinguish kernel error codes from valid IPC message labels.
+/// Must be kept in sync with the last variant of `SyscallError`.
+pub const MIN_SYSCALL_ERROR: i64 = SyscallError::NotMapped as i64; // -22
+
 /// Syscall result type for userspace.
 pub type SyscallResult<T = i64> = Result<T, SyscallError>;
 

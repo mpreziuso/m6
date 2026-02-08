@@ -257,6 +257,8 @@ pub struct Registry {
     pub subscriptions: [Subscription; MAX_SUBSCRIPTIONS],
     /// Next free capability slot for allocations
     pub next_free_slot: u64,
+    /// Maximum slot count (1 << cnode_radix)
+    pub max_slots: u64,
     /// Console endpoint slot (UART driver), for passing to other drivers
     pub console_ep_slot: Option<u64>,
     /// VirtIO probe frames - kept around for reuse when spawning drivers
@@ -268,8 +270,8 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// Create a new registry with the given first free slot.
-    pub fn new(first_free_slot: u64) -> Self {
+    /// Create a new registry with the given first free slot and CNode radix.
+    pub fn new(first_free_slot: u64, cnode_radix: u8) -> Self {
         Self {
             devices: [const { DeviceEntry::empty() }; MAX_DEVICES],
             device_count: 0,
@@ -277,6 +279,7 @@ impl Registry {
             driver_count: 0,
             subscriptions: [const { Subscription::empty() }; MAX_SUBSCRIPTIONS],
             next_free_slot: first_free_slot,
+            max_slots: 1u64 << cnode_radix,
             console_ep_slot: None,
             virtio_probe_frames: [const { VirtioProbeFrame::empty() }; MAX_VIRTIO_PROBE_FRAMES],
             additional_frame_cache: [const { AdditionalFrameEntry::empty() }; MAX_ADDITIONAL_FRAME_CACHE],
@@ -383,14 +386,30 @@ impl Registry {
     }
 
     /// Allocate a capability slot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the CNode is exhausted.
     pub fn alloc_slot(&mut self) -> u64 {
+        assert!(
+            self.next_free_slot < self.max_slots,
+            "CNode slot exhaustion"
+        );
         let slot = self.next_free_slot;
         self.next_free_slot += 1;
         slot
     }
 
     /// Allocate N consecutive capability slots.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the CNode is exhausted.
     pub fn alloc_slots(&mut self, count: u64) -> u64 {
+        assert!(
+            self.next_free_slot + count <= self.max_slots,
+            "CNode slot exhaustion"
+        );
         let first = self.next_free_slot;
         self.next_free_slot += count;
         first

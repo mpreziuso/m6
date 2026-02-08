@@ -3,7 +3,7 @@
 //! Provides panic handler and global allocator for system components.
 
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 use m6_cap::ObjectType;
 use m6_syscall::invoke::{debug_putc, sched_yield};
@@ -131,31 +131,71 @@ const UNTYPED_SLOT: u64 = 17;
 #[allow(dead_code)]
 static NEXT_FRAME_SLOT: AtomicU64 = AtomicU64::new(136);
 
+/// Free slot recycling pool. Freed slots are pushed here and popped
+/// before bumping NEXT_FRAME_SLOT, preventing CNode exhaustion.
+#[allow(dead_code)]
+const MAX_FREE_SLOTS: usize = 256;
+#[allow(dead_code)]
+static FREE_SLOT_POOL: [AtomicU64; MAX_FREE_SLOTS] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; MAX_FREE_SLOTS]
+};
+/// Number of slots in the free pool.
+#[allow(dead_code)]
+static FREE_SLOT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Try to reclaim a freed slot, or allocate a new one.
+#[allow(dead_code)]
+fn alloc_slot_range(count: usize) -> u64 {
+    // For single-page allocations, try the free pool first
+    if count == 1 {
+        let idx = FREE_SLOT_COUNT.load(Ordering::Acquire);
+        if idx > 0 {
+            // Try to pop from the free pool
+            let new_idx = idx - 1;
+            if FREE_SLOT_COUNT.compare_exchange(idx, new_idx, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                let slot = FREE_SLOT_POOL[new_idx as usize].load(Ordering::Acquire);
+                return slot;
+            }
+        }
+    }
+    // Fall back to bump allocator
+    NEXT_FRAME_SLOT.fetch_add(count as u64, Ordering::SeqCst)
+}
+
+/// Return a freed slot to the recycle pool.
+#[allow(dead_code)]
+fn free_slot(slot: u64) {
+    let idx = FREE_SLOT_COUNT.load(Ordering::Acquire);
+    if (idx as usize) < MAX_FREE_SLOTS {
+        FREE_SLOT_POOL[idx as usize].store(slot, Ordering::Release);
+        FREE_SLOT_COUNT.store(idx + 1, Ordering::Release);
+    }
+    // If pool is full, slot is leaked (acceptable — pool is large enough for normal use)
+}
+
 // -- Page tracking for DMA address translation
 
 /// Maximum number of heap pages we can track (256MB of heap / 4KB pages)
 const MAX_HEAP_PAGES: usize = 65536;
 
 /// Table mapping (vaddr_page - HEAP_BASE_PAGE) index to slot number.
-/// 0 means unmapped.
-static mut PAGE_SLOT_TABLE: [u16; MAX_HEAP_PAGES] = [0; MAX_HEAP_PAGES];
+/// 0 means unmapped. Uses AtomicU16 for safe concurrent access — the
+/// allocator may map pages during runtime (not just init).
+static PAGE_SLOT_TABLE: [AtomicU16; MAX_HEAP_PAGES] = {
+    const ZERO: AtomicU16 = AtomicU16::new(0);
+    [ZERO; MAX_HEAP_PAGES]
+};
 
 /// Heap base address (must match HEAP_BASE in init_allocator)
 const HEAP_BASE_FOR_TRACKING: u64 = 0x4000_0000;
 
 /// Track a page mapping for later physical address lookup.
-///
-/// # Safety
-///
-/// Must be called from single-threaded context during page mapping.
 #[allow(dead_code)]
-unsafe fn track_page_mapping(vaddr: u64, slot: u64) {
+fn track_page_mapping(vaddr: u64, slot: u64) {
     let page_index = ((vaddr - HEAP_BASE_FOR_TRACKING) / 4096) as usize;
     if page_index < MAX_HEAP_PAGES && slot < 65536 {
-        // SAFETY: Single-threaded access during mapping
-        unsafe {
-            PAGE_SLOT_TABLE[page_index] = slot as u16;
-        }
+        PAGE_SLOT_TABLE[page_index].store(slot as u16, Ordering::Release);
     }
 }
 
@@ -173,8 +213,7 @@ pub fn get_heap_phys_addr(vaddr: u64) -> Option<u64> {
         return None;
     }
 
-    // SAFETY: Reading from static, potential race but we only write during init
-    let slot = unsafe { PAGE_SLOT_TABLE[page_index] };
+    let slot = PAGE_SLOT_TABLE[page_index].load(Ordering::Acquire);
     if slot == 0 {
         return None;
     }
@@ -182,7 +221,6 @@ pub fn get_heap_phys_addr(vaddr: u64) -> Option<u64> {
     let frame_cptr = slot_to_cptr(slot as u64);
     match m6_syscall::invoke::frame_get_phys(frame_cptr) {
         Ok(phys) => {
-            // Add the page offset
             let page_offset = vaddr & 0xFFF;
             Some(phys as u64 + page_offset)
         }
@@ -221,10 +259,7 @@ impl VmProvider for M6VmProvider {
             // Track the mapping for physical address lookup (used by DMA HAL)
             // Extract slot from cptr (reverse of slot_to_cptr)
             let slot = frame_cptr >> (64 - CNODE_RADIX);
-            // SAFETY: Called during single-threaded allocation
-            unsafe {
-                track_page_mapping(vaddr as u64, slot);
-            }
+            track_page_mapping(vaddr as u64, slot);
             Ok(())
         } else {
             // Only log on error
@@ -265,8 +300,8 @@ impl PagePool for M6PagePool {
         let cnode_cptr = slot_to_cptr(ROOT_CNODE);
         let untyped_cptr = slot_to_cptr(UNTYPED_SLOT);
 
-        // Allocate a slot for the frame
-        let slot = NEXT_FRAME_SLOT.fetch_add(count as u64, Ordering::SeqCst);
+        // Allocate a slot for the frame (tries free pool first)
+        let slot = alloc_slot_range(count);
         let frame_cptr = slot_to_cptr(slot);
 
         // Retype untyped into frames at the given slot
@@ -309,6 +344,10 @@ impl PagePool for M6PagePool {
 
         let result = m6_syscall::invoke::cap_delete(cnode_cptr, slot, CNODE_RADIX as u64);
         if result.is_ok() {
+            // Recycle freed slot(s) so they can be reused by future allocations
+            for i in 0..pages.count as u64 {
+                free_slot(slot + i);
+            }
             Ok(())
         } else {
             Err(M6PoolError)

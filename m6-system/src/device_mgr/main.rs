@@ -42,8 +42,10 @@ use boot_info::DevMgrBootInfo;
 use registry::{DeviceState, Registry};
 use spawn::{DeviceInfo, DriverSpawnConfig};
 
-/// Static storage for boot info pointer (set at startup)
-static mut BOOT_INFO: *const DevMgrBootInfo = core::ptr::null();
+/// Static storage for boot info pointer (set at startup).
+/// Uses AtomicPtr to avoid `static mut` unsoundness.
+static BOOT_INFO: core::sync::atomic::AtomicPtr<DevMgrBootInfo> =
+    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
 
 /// Get a reference to the boot info.
 ///
@@ -52,7 +54,8 @@ static mut BOOT_INFO: *const DevMgrBootInfo = core::ptr::null();
 /// Must only be called after _start has initialised BOOT_INFO.
 #[inline]
 pub unsafe fn get_boot_info() -> &'static DevMgrBootInfo {
-    unsafe { &*BOOT_INFO }
+    // SAFETY: Caller guarantees _start has stored a valid pointer.
+    unsafe { &*BOOT_INFO.load(core::sync::atomic::Ordering::Relaxed) }
 }
 
 /// Entry point for device manager.
@@ -68,12 +71,11 @@ pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
     io::puts("[device-mgr] Starting\n");
 
     // Store boot info pointer
-    unsafe {
-        BOOT_INFO = boot_info_addr as *const DevMgrBootInfo;
-    }
+    BOOT_INFO.store(boot_info_addr as *mut DevMgrBootInfo, core::sync::atomic::Ordering::Relaxed);
 
     // Validate boot info
-    let boot_info = unsafe { &*BOOT_INFO };
+    // SAFETY: The pointer was just stored from init's valid boot_info_addr.
+    let boot_info = unsafe { get_boot_info() };
     if !boot_info.is_valid() {
         io::puts("[device-mgr] ERROR: Invalid boot info!\n");
         loop {
@@ -82,7 +84,7 @@ pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
     }
 
     // Initialise registry
-    let mut registry = Registry::new(slots::FIRST_FREE_SLOT);
+    let mut registry = Registry::new(slots::FIRST_FREE_SLOT, boot_info.cnode_radix);
 
     // Parse DTB and enumerate devices
     match init_dtb(&mut registry, boot_info) {
@@ -316,7 +318,11 @@ fn enumerate_pcie_devices(registry: &mut Registry, dtb_data: &[u8]) {
 
                 // Unmap config space
                 // Note: We keep individual device frames for later driver spawning
-                let _ = unmap_frame(cptr(config_slot));
+                if let Err(e) = unmap_frame(cptr(config_slot)) {
+                    io::puts("[device-mgr] WARN: unmap config frame failed: ");
+                    io::puts(e.name());
+                    io::puts("\n");
+                }
             }
             None => {
                 io::puts("[device-mgr] PCIe: failed to map config space\n");
@@ -349,7 +355,10 @@ fn check_rk3588_link_status(
 
     // Calculate offset within the untyped region (in pages)
     let aligned_base = apbdbg_base & !0xFFF;
-    let offset_in_untyped = aligned_base.saturating_sub(untyped_base);
+    if aligned_base < untyped_base {
+        return None;
+    }
+    let offset_in_untyped = aligned_base - untyped_base;
     let offset_in_pages = offset_in_untyped >> 12;
 
     // Retype to 4KB DeviceFrame
@@ -392,7 +401,11 @@ fn check_rk3588_link_status(
     };
 
     // Unmap
-    let _ = unmap_frame(cptr(frame_slot));
+    if let Err(e) = unmap_frame(cptr(frame_slot)) {
+        io::puts("[device-mgr] WARN: unmap APBDBG frame failed: ");
+        io::puts(e.name());
+        io::puts("\n");
+    }
 
     Some(link_up)
 }
@@ -764,7 +777,11 @@ fn probe_virtio_devices(registry: &mut Registry) {
 
     // Unmap frames from device-mgr's address space (but keep capabilities for reuse)
     for &slot in &frame_slots {
-        let _ = unmap_frame(cptr(slot));
+        if let Err(e) = unmap_frame(cptr(slot)) {
+            io::puts("[device-mgr] WARN: unmap VirtIO frame failed: ");
+            io::puts(e.name());
+            io::puts("\n");
+        }
     }
 
     // Store probe frame capabilities in registry for reuse when spawning drivers.
@@ -778,8 +795,8 @@ fn probe_virtio_devices(registry: &mut Registry) {
 
 /// Get the initrd data slice.
 fn get_initrd() -> Option<&'static [u8]> {
-    // SAFETY: We validated boot info at startup
-    let boot_info = unsafe { &*BOOT_INFO };
+    // SAFETY: _start has initialised BOOT_INFO
+    let boot_info = unsafe { get_boot_info() };
     if !boot_info.has_initrd() {
         return None;
     }
@@ -789,8 +806,8 @@ fn get_initrd() -> Option<&'static [u8]> {
 /// Main service loop - handles client requests.
 fn service_loop(registry: &mut Registry) -> ! {
     // Get CNode radix from boot info
-    // SAFETY: We validated boot info at startup
-    let boot_info = unsafe { &*BOOT_INFO };
+    // SAFETY: _start has initialised BOOT_INFO
+    let boot_info = unsafe { get_boot_info() };
     let radix = boot_info.cnode_radix;
 
     // Helper to convert slot to CPtr

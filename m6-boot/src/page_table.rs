@@ -68,9 +68,13 @@ impl BootPageAllocator {
             return None;
         }
 
-        // SAFETY: We're allocating from our reserved region
+        // SAFETY: We're allocating from our reserved region. The base pointer
+        // is valid for at least `self.size` bytes, we've checked that
+        // offset + PAGE_SIZE <= size, and the memory is properly aligned.
         let ptr = unsafe {
             let ptr = self.base.add(self.offset);
+            // SAFETY: The pointer is within our allocated region and PAGE_SIZE
+            // bytes are available. Zeroing ensures a clean page table.
             ptr::write_bytes(ptr, 0, PAGE_SIZE);
             ptr
         };
@@ -628,6 +632,11 @@ impl RamRegions {
         if self.count < MAX_RAM_REGIONS {
             self.regions[self.count] = RamRegion { start, end };
             self.count += 1;
+        } else {
+            log::warn!(
+                "RamRegions full ({} regions), dropping region {:#x}-{:#x}",
+                MAX_RAM_REGIONS, start, end
+            );
         }
     }
 

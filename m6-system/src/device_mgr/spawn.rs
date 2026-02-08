@@ -35,11 +35,10 @@ fn resolve_smmu_phandle_to_slot(phandle: u32) -> Option<u64> {
         0x191 => Some(slots::SMMU_CONTROL_1), // PHP SMMU (USB, etc.)
         0 => None, // No SMMU
         _ => {
-            // Unknown phandle - log warning and default to SMMU #0
             crate::io::puts("[device-mgr] WARN: Unknown SMMU phandle ");
             crate::io::put_hex(phandle as u64);
-            crate::io::puts(", defaulting to SMMU #0\n");
-            Some(slots::SMMU_CONTROL_0)
+            crate::io::puts(", refusing to bind\n");
+            None
         }
     }
 }

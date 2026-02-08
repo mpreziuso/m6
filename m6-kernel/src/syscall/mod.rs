@@ -205,9 +205,10 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
                 return Err(SyscallError::InvalidArg);
             }
 
-            // Validate pointer is in userspace range (TTBR0)
+            // Validate pointer is in userspace range (TTBR0: 0x0 to 0x0000_FFFF_FFFF_FFFF)
+            const USER_ADDR_LIMIT: u64 = 0x0001_0000_0000_0000;
             let addr = ptr as u64;
-            if addr >= 0x0001_0000_0000_0000 {
+            if addr >= USER_ADDR_LIMIT || addr.checked_add(len as u64).is_none_or(|end| end > USER_ADDR_LIMIT) {
                 return Err(SyscallError::Range);
             }
 

@@ -72,7 +72,10 @@ pub fn sleep_for(tcb_ref: ObjectRef, wakeup_ns: u64) {
     }
 
     let now_ticks = timer::read_counter();
-    let wakeup_ticks = now_ticks + (wakeup_ns * freq) / 1_000_000_000;
+    // Use u128 intermediate to avoid overflow: wakeup_ns * freq can exceed u64
+    // when wakeup_ns > ~575ms at typical ARM timer frequencies.
+    let delta_ticks = ((wakeup_ns as u128 * freq as u128) / 1_000_000_000) as u64;
+    let wakeup_ticks = now_ticks.saturating_add(delta_ticks);
 
     get_sleep_queue().lock().push(SleepEntry {
         wakeup_ticks,
@@ -172,7 +175,7 @@ pub fn time_until_next_wakeup() -> Option<u64> {
             let freq = timer::frequency();
             if freq > 0 {
                 let delta_ticks = entry.wakeup_ticks - now_ticks;
-                (delta_ticks * 1_000_000_000) / freq
+                ((delta_ticks as u128 * 1_000_000_000) / freq as u128) as u64
             } else {
                 0
             }
