@@ -511,8 +511,8 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         );
     });
 
-    // 8. Allocate untyped memory for init (8 MiB = 2^23 bytes = 2048 frames)
-    const UNTYPED_SIZE_BITS: u8 = 23; // 8 MiB
+    // 8. Allocate untyped memory for init (32 MiB = 2^25 bytes = 8192 frames)
+    const UNTYPED_SIZE_BITS: u8 = 25; // 32 MiB
     const UNTYPED_FRAMES: usize = 1 << (UNTYPED_SIZE_BITS - 12); // frames = size / 4K
     let untyped_phys = alloc_frames_zeroed(UNTYPED_FRAMES).ok_or(BootstrapError::OutOfMemory)?;
     log::info!(

@@ -139,6 +139,19 @@ fn parse_device_node(node: &fdt::node::FdtNode, compat: &str) -> Option<DeviceEn
     // Platform devices don't have PCIe BDF
     entry.pcie_bdf = None;
 
+    // For snps,dwc3, if interrupts property was not found on this node,
+    // fall back to hardcoded IRQ numbers based on base address.
+    // RK3588 USB3 OTG controllers use SPI interrupts 220-222.
+    if compat.contains("snps,dwc3") && entry.irq == 0 {
+        // RK3588 USB3 OTG IRQ numbers (SPI + 32 = GIC IRQ)
+        entry.irq = match entry.phys_base {
+            0xFC00_0000 => 220 + 32, // USB3OTG_0: SPI 220
+            0xFC40_0000 => 221 + 32, // USB3OTG_1: SPI 221
+            0xFCD0_0000 => 222 + 32, // USB3OTG_2: SPI 222
+            _ => 0,
+        };
+    }
+
     // Parse stream ID and SMMU phandle for devices with iommus property
     // The iommus property format is: [phandle, stream_id]
     // For RK3588 USB controllers, this indicates which SMMU stream ID to use

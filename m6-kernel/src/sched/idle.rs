@@ -64,8 +64,10 @@ pub fn create_idle_task(cpu_id: usize) -> Option<ObjectRef> {
         // the normal path. It's just a placeholder that indicates
         // "no real work to do".
         (*tcb_ptr).context.elr = idle_loop as *const () as usize as u64;
-        // EL1h (handler mode), IRQs enabled
-        (*tcb_ptr).context.spsr = 0x3c5;
+        // EL1h (handler mode), IRQs unmasked (I=0), FIQ/SError/Debug masked
+        // DAIF: D=1 A=1 I=0 F=1 = 0b1101 in bits [9:6] = 0x340
+        // M[4:0] = 0b00101 (EL1h) = 0x5
+        (*tcb_ptr).context.spsr = 0x345;
     }
 
     // 4. Store in object table

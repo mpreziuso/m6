@@ -266,6 +266,25 @@ pub fn handle_user_fault(
 ) -> bool {
     let fault_msg = build_fault_message(ctx, fault_type);
 
+    // Always print faults directly to console (log::warn only goes to
+    // the ring buffer after early console is disabled, making user thread
+    // terminations invisible on the serial output).
+    {
+        use core::fmt::Write;
+        struct ConsoleFmt;
+        impl Write for ConsoleFmt {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                m6_pal::console::puts(s);
+                Ok(())
+            }
+        }
+        let _ = write!(
+            ConsoleFmt,
+            "!!! USER FAULT: type={:?} pc={:#x} addr={:#x} esr={:#x}\n",
+            fault_type, ctx.elr, ctx.far, ctx.esr
+        );
+    }
+
     log::debug!(
         "User fault: type={:?} pc={:#x} addr={:#x} esr={:#x}",
         fault_type,
@@ -281,6 +300,21 @@ pub fn handle_user_fault(
         }
         Err(FaultDeliveryError::NoFaultEndpoint) => {
             // No fault handler - terminate the thread
+            {
+                use core::fmt::Write;
+                struct ConsoleFmt;
+                impl Write for ConsoleFmt {
+                    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                        m6_pal::console::puts(s);
+                        Ok(())
+                    }
+                }
+                let _ = write!(
+                    ConsoleFmt,
+                    "!!! THREAD {:?} TERMINATED (no fault handler) pc={:#x}\n",
+                    tcb_ref, ctx.elr
+                );
+            }
             log::warn!(
                 "No fault endpoint for thread {:?}, terminating. Fault: {:?} at {:#x}",
                 tcb_ref,
@@ -291,6 +325,21 @@ pub fn handle_user_fault(
             true
         }
         Err(e) => {
+            {
+                use core::fmt::Write;
+                struct ConsoleFmt;
+                impl Write for ConsoleFmt {
+                    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                        m6_pal::console::puts(s);
+                        Ok(())
+                    }
+                }
+                let _ = write!(
+                    ConsoleFmt,
+                    "!!! FAULT DELIVERY FAILED for {:?}: {:?}\n",
+                    tcb_ref, e
+                );
+            }
             log::error!("Failed to deliver fault: {:?}", e);
             terminate_thread(tcb_ref);
             true

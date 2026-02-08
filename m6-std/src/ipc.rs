@@ -26,7 +26,11 @@ use m6_syscall::error::SyscallError;
 use m6_syscall::invoke::{IpcRecvResult, retype};
 
 // Re-export syscall wrappers for direct IPC access
-pub use m6_syscall::invoke::{call, nb_recv, nb_send, poll, recv, reply_recv, send, signal, wait};
+pub use m6_syscall::invoke::{
+    call, ipc_get_recv_caps, ipc_set_recv_slots, nb_recv, nb_send, poll, recv, reply_recv, send,
+    signal, wait,
+};
+pub use m6_syscall::IpcBuffer;
 
 // -- Capability slot management
 

@@ -92,41 +92,42 @@ pub mod driver {
     pub const CONSOLE_EP: u64 = 20;
 
     /// First DMA buffer frame slot (for DMA-capable drivers)
-    /// Slots 21-28 contain pre-allocated frames for virtqueue and DMA buffers
+    /// Slots 21-36 contain pre-allocated frames for virtqueue and DMA buffers
     pub const DMA_BUFFER_START: u64 = 21;
     /// Number of DMA buffer frames provided to DMA-capable drivers
-    pub const DMA_BUFFER_COUNT: usize = 8;
+    /// 16 pages = 64KB, enough for xHCI structures + interrupt endpoint rings
+    pub const DMA_BUFFER_COUNT: usize = 16;
 
     /// Instance info frame for drivers that need instance-specific configuration
     /// Contains a u64 at offset 0 indicating instance index (0, 1, 2, etc.)
     /// Used by SMMU drivers to derive unique virtual addresses
-    pub const INSTANCE_INFO: u64 = 29;
+    pub const INSTANCE_INFO: u64 = 37;
 
     /// First additional frame slot (for GRF, CRU, PHY, etc.)
-    /// Slots 30-39 contain DeviceFrame caps for single-page additional MMIO regions
-    pub const ADDITIONAL_FRAME_START: u64 = 30;
+    /// Slots 38-47 contain DeviceFrame caps for single-page additional MMIO regions
+    pub const ADDITIONAL_FRAME_START: u64 = 38;
     /// Maximum number of single-page additional frames per driver
     pub const ADDITIONAL_FRAME_MAX: usize = 10;
 
-    /// First large additional frame slot (for multi-page regions like PHY MMIO)
-    /// Slots 64-127 contain DeviceFrame caps for large MMIO regions
-    pub const LARGE_FRAME_START: u64 = 64;
-    /// Maximum number of large additional frame pages per driver
-    pub const LARGE_FRAME_MAX: usize = 64;
-
     /// First MSI-X IRQHandler slot (for PCIe devices with MSI-X)
-    /// Slots 40-47 contain IRQHandler caps for MSI-X vectors 0-7
-    pub const MSIX_IRQ_START: u64 = 40;
+    /// Slots 48-55 contain IRQHandler caps for MSI-X vectors 0-7
+    pub const MSIX_IRQ_START: u64 = 48;
     /// Maximum number of MSI-X vectors we support per driver
     pub const MSIX_MAX_VECTORS: usize = 8;
 
     /// First extended MMIO frame slot (for devices with large MMIO regions)
-    /// Slots 48-63 contain DeviceFrame caps for pages beyond the first 4KB
+    /// Slots 56-71 contain DeviceFrame caps for pages beyond the first 4KB
     /// DEVICE_FRAME covers offset 0x0000-0x0FFF, these cover 0x1000+
-    pub const EXTENDED_MMIO_START: u64 = 48;
+    pub const EXTENDED_MMIO_START: u64 = 56;
     /// Maximum number of extended MMIO pages (plus 1 for DEVICE_FRAME = 17 pages = 68KB)
     pub const EXTENDED_MMIO_MAX: usize = 16;
 
+    /// First large additional frame slot (for multi-page regions like PHY MMIO)
+    /// Slots 72-135 contain DeviceFrame caps for large MMIO regions
+    pub const LARGE_FRAME_START: u64 = 72;
+    /// Maximum number of large additional frame pages per driver
+    pub const LARGE_FRAME_MAX: usize = 64;
+
     /// First free slot for driver's own allocations
-    pub const FIRST_FREE_SLOT: u64 = 64;
+    pub const FIRST_FREE_SLOT: u64 = 136;
 }

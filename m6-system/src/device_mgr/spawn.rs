@@ -303,9 +303,10 @@ pub fn spawn_driver(
     // Note: SmmuControl is at device-mgr's slot 18, we don't allocate a new slot for it
     let has_smmu_control = config.manifest.needs_iommu;
 
-    // Allocate DMA buffer frames for DMA-capable drivers (virtio, etc.)
+    // Allocate DMA buffer frames for DMA-capable drivers (USB, NVMe, VirtIO, etc.)
+    // Note: needs_dma can be true even when needs_iommu is false (e.g., when SMMU is broken)
     let dma_buffer_slots: Option<[u64; slots::driver::DMA_BUFFER_COUNT]> =
-        if config.manifest.needs_iommu {
+        if config.manifest.needs_dma || config.manifest.needs_iommu {
             let mut dma_slots = [0u64; slots::driver::DMA_BUFFER_COUNT];
             for slot in &mut dma_slots {
                 *slot = registry.alloc_slot();
@@ -402,7 +403,18 @@ pub fn spawn_driver(
 
     // Claim IRQ handler if needed
     if let Some(irq_slot) = irq_handler_slot {
+        crate::io::puts("[device-mgr] Claiming IRQ ");
+        crate::io::put_u64(config.device_info.irq as u64);
+        crate::io::puts(" for ");
+        crate::io::puts(config.manifest.compatible);
+        crate::io::newline();
         claim_irq(irq_slot, config.device_info.irq, &cptr)?;
+    } else if config.manifest.needs_irq {
+        crate::io::puts("[device-mgr] WARNING: needs_irq but irq=");
+        crate::io::put_u64(config.device_info.irq as u64);
+        crate::io::puts(" for ");
+        crate::io::puts(config.manifest.compatible);
+        crate::io::newline();
     }
 
     // Create notification for IRQ delivery if needed
@@ -422,7 +434,17 @@ pub fn spawn_driver(
     let iospace_created = if let Some(io_slot) = iospace_slot {
         let smmu_slot = if has_smmu_control {
             // Resolve device's SMMU phandle to the correct SmmuControl slot
-            resolve_smmu_phandle_to_slot(config.device_info.smmu_phandle)
+            let slot = resolve_smmu_phandle_to_slot(config.device_info.smmu_phandle);
+            crate::io::puts("[device-mgr] SMMU phandle ");
+            crate::io::put_hex(config.device_info.smmu_phandle as u64);
+            crate::io::puts(" -> slot ");
+            if let Some(s) = slot {
+                crate::io::put_u64(s);
+            } else {
+                crate::io::puts("None");
+            }
+            crate::io::newline();
+            slot
         } else {
             None
         };
@@ -706,8 +728,8 @@ pub fn spawn_driver(
     };
 
     // Install initial capabilities in driver's CSpace
-    let smmu_to_copy = if has_smmu_control {
-        // Resolve device's SMMU phandle to the correct SmmuControl slot
+    // Only copy SmmuControl if IOSpace was actually created (SMMU is available)
+    let smmu_to_copy = if iospace_created {
         resolve_smmu_phandle_to_slot(config.device_info.smmu_phandle)
     } else {
         None
@@ -1180,20 +1202,28 @@ fn create_iospace(
     }
 
     if let Err(e) = create_result {
-        if e == SyscallError::WouldBlock {
-            crate::io::puts("[device-mgr] WARN: IOSpace creation timed out (SMMU not ready?)\n");
-            crate::io::puts("[device-mgr] WARN: Driver will run WITHOUT IOMMU protection!\n");
-            return Ok(false);
+        // Handle various failure modes gracefully - fall back to no-IOMMU mode
+        match e {
+            SyscallError::WouldBlock => {
+                crate::io::puts("[device-mgr] WARN: IOSpace creation timed out (SMMU not ready?)\n");
+            }
+            SyscallError::AlreadyMapped => {
+                crate::io::puts("[device-mgr] IOSpace already configured by firmware\n");
+            }
+            SyscallError::NotSupported | SyscallError::InvalidCap | SyscallError::EmptySlot => {
+                // SMMU capability not available (kernel skipped SMMU init)
+                crate::io::puts("[device-mgr] WARN: SMMU not available (");
+                crate::io::puts(e.name());
+                crate::io::puts(")\n");
+            }
+            _ => {
+                crate::io::puts("[device-mgr] WARN: IOSpace creation failed: ");
+                crate::io::puts(e.name());
+                crate::io::newline();
+            }
         }
-        if e == SyscallError::AlreadyMapped {
-            // IOSpace already configured by firmware - we can't get the capability
-            // Fall back to physical address mode (no IOMMU translation)
-            crate::io::puts("[device-mgr] IOSpace already configured by firmware\n");
-            crate::io::puts("[device-mgr] WARN: Cannot reuse firmware IOSpace, using physical addresses\n");
-            return Ok(false);
-        } else {
-            return Err(SpawnError::RetypeFailed(e));
-        }
+        crate::io::puts("[device-mgr] WARN: Driver will run WITHOUT IOMMU protection!\n");
+        return Ok(false);
     }
 
     // Bind stream ID if device has one
@@ -2087,6 +2117,271 @@ pub fn install_msix_caps(
             .map_err(SpawnError::CapCopyFailed)?;
         }
     }
+
+    Ok(())
+}
+
+// -- Class driver slots (for drivers like USB HID that sit above device drivers)
+
+pub mod class_driver {
+    /// Service endpoint (for clients like shell) - slot 12
+    pub const SERVICE_EP: u64 = 12;
+    /// USB host endpoint (for communicating with USB host controller) - slot 13
+    pub const USB_HOST_EP: u64 = 13;
+    /// Notification for interrupt completions - slot 14
+    pub const INTERRUPT_NOTIF: u64 = 14;
+}
+
+/// Result of successful class driver spawn
+pub struct ClassDriverSpawnResult {
+    /// TCB capability slot
+    pub tcb_slot: u64,
+    /// VSpace capability slot
+    pub vspace_slot: u64,
+    /// CSpace capability slot
+    pub cspace_slot: u64,
+    /// Driver's service endpoint slot
+    pub endpoint_slot: u64,
+}
+
+/// Spawn a class driver (like USB HID) that sits above device drivers.
+///
+/// Class drivers don't bind to a specific device from DTB, instead they:
+/// - Communicate with another driver via an endpoint (e.g., USB host)
+/// - Provide a service endpoint for clients (e.g., shell)
+///
+/// Initial capabilities granted to class driver:
+/// - Slot 0: Root CNode (self-reference)
+/// - Slot 1: Root TCB
+/// - Slot 2: Root VSpace
+/// - Slot 12: Service endpoint (for clients)
+/// - Slot 13: USB host endpoint (for USB class drivers)
+/// - Slot 14: Interrupt notification (for async data)
+/// - Slot 17: RAM untyped (for heap allocation)
+pub fn spawn_class_driver(
+    registry: &mut Registry,
+    elf_data: &[u8],
+    usb_host_ep_slot: u64,
+) -> Result<ClassDriverSpawnResult, &'static str> {
+    // Get CNode radix for CPtr conversion
+    // SAFETY: Called after _start has initialised BOOT_INFO
+    let boot_info = unsafe { crate::get_boot_info() };
+    let cptr = |slot: u64| slot_to_cptr(slot, boot_info.cnode_radix);
+
+    // Parse ELF binary
+    let elf = Elf64::parse(elf_data).map_err(|_| "Invalid ELF")?;
+
+    // Allocate capability slots in device-mgr's CSpace
+    let vspace_slot = registry.alloc_slot();
+    let cspace_slot = registry.alloc_slot();
+    let tcb_slot = registry.alloc_slot();
+    let ipc_buf_slot = registry.alloc_slot();
+    let driver_ep_slot = registry.alloc_slot();
+
+    // Create VSpace (page table root)
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::VSpace as u64,
+        0,
+        cptr(slots::ROOT_CNODE),
+        vspace_slot,
+        1,
+    )
+    .map_err(|_| "VSpace retype failed")?;
+
+    asid_pool_assign(cptr(slots::ASID_POOL), cptr(vspace_slot))
+        .map_err(|_| "ASID assign failed")?;
+
+    // Create CSpace (radix 10 = 1024 slots for drivers)
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::CNode as u64,
+        10,
+        cptr(slots::ROOT_CNODE),
+        cspace_slot,
+        1,
+    )
+    .map_err(|_| "CSpace retype failed")?;
+
+    // Create TCB
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::TCB as u64,
+        0,
+        cptr(slots::ROOT_CNODE),
+        tcb_slot,
+        1,
+    )
+    .map_err(|_| "TCB retype failed")?;
+
+    // Create IPC buffer frame
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::Frame as u64,
+        12,
+        cptr(slots::ROOT_CNODE),
+        ipc_buf_slot,
+        1,
+    )
+    .map_err(|_| "IPC buffer retype failed")?;
+
+    // Create driver's service endpoint
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::Endpoint as u64,
+        0,
+        cptr(slots::ROOT_CNODE),
+        driver_ep_slot,
+        1,
+    )
+    .map_err(|_| "Endpoint retype failed")?;
+
+    // Load ELF and create stack
+    let entry = elf.entry();
+    let stack_top = load_elf_and_stack(vspace_slot, &elf, elf_data, registry, &cptr)
+        .map_err(|_| "ELF loading failed")?;
+
+    // Map IPC buffer
+    const IPC_BUFFER_ADDR: u64 = m6_syscall::IPC_BUFFER_ADDR;
+    ensure_page_tables(
+        vspace_slot,
+        IPC_BUFFER_ADDR,
+        IPC_BUFFER_ADDR + PAGE_SIZE as u64,
+        registry,
+        &cptr,
+    )
+    .map_err(|_| "Page table creation failed")?;
+
+    map_frame(
+        cptr(vspace_slot),
+        cptr(ipc_buf_slot),
+        IPC_BUFFER_ADDR,
+        MapRights::RW.to_bits(),
+        0,
+    )
+    .map_err(|_| "IPC buffer map failed")?;
+
+    // Ensure page tables exist for heap region
+    const HEAP_BASE: u64 = 0x4000_0000;
+    const HEAP_SIZE: u64 = 128 * 1024 * 1024;
+    ensure_page_tables(vspace_slot, HEAP_BASE, HEAP_BASE + HEAP_SIZE, registry, &cptr)
+        .map_err(|_| "Heap page table failed")?;
+
+    // Install capabilities into class driver's CSpace
+    install_class_driver_caps(
+        cptr(cspace_slot),
+        cptr(slots::ROOT_CNODE),
+        cspace_slot,
+        vspace_slot,
+        tcb_slot,
+        driver_ep_slot,
+        usb_host_ep_slot,
+    )
+    .map_err(|_| "Cap install failed")?;
+
+    // Configure TCB
+    tcb_configure(
+        cptr(tcb_slot),
+        0, // No fault endpoint for now
+        cptr(cspace_slot),
+        cptr(vspace_slot),
+        IPC_BUFFER_ADDR,
+        cptr(ipc_buf_slot),
+    )
+    .map_err(|_| "TCB configure failed")?;
+
+    // Set initial registers
+    tcb_write_registers(cptr(tcb_slot), entry, stack_top, 0)
+        .map_err(|_| "TCB write registers failed")?;
+
+    // Resume the driver
+    tcb_resume(cptr(tcb_slot)).map_err(|_| "TCB resume failed")?;
+
+    crate::io::puts("[device-mgr] Class driver spawned successfully\n");
+
+    Ok(ClassDriverSpawnResult {
+        tcb_slot,
+        vspace_slot,
+        cspace_slot,
+        endpoint_slot: driver_ep_slot,
+    })
+}
+
+/// Install initial capabilities into a class driver's CSpace.
+fn install_class_driver_caps(
+    child_cspace_cptr: u64,
+    src_cnode_cptr: u64,
+    cspace_slot: u64,
+    vspace_slot: u64,
+    tcb_slot: u64,
+    endpoint_slot: u64,
+    usb_host_ep_slot: u64,
+) -> Result<(), SpawnError> {
+    // Slot 0: CSpace self-reference
+    cap_copy(
+        child_cspace_cptr,
+        slots::driver::ROOT_CNODE,
+        0,
+        src_cnode_cptr,
+        cspace_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)?;
+
+    // Slot 1: TCB
+    cap_copy(
+        child_cspace_cptr,
+        slots::driver::ROOT_TCB,
+        0,
+        src_cnode_cptr,
+        tcb_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)?;
+
+    // Slot 2: VSpace
+    cap_copy(
+        child_cspace_cptr,
+        slots::driver::ROOT_VSPACE,
+        0,
+        src_cnode_cptr,
+        vspace_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)?;
+
+    // Slot 12: Service endpoint (for clients)
+    cap_copy(
+        child_cspace_cptr,
+        class_driver::SERVICE_EP,
+        0,
+        src_cnode_cptr,
+        endpoint_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)?;
+
+    // Slot 13: USB host endpoint (for communication with USB driver)
+    cap_copy(
+        child_cspace_cptr,
+        class_driver::USB_HOST_EP,
+        0,
+        src_cnode_cptr,
+        usb_host_ep_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)?;
+
+    // Slot 17: RAM untyped for heap allocation
+    cap_copy(
+        child_cspace_cptr,
+        slots::driver::RAM_UNTYPED,
+        0,
+        src_cnode_cptr,
+        slots::RAM_UNTYPED,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)?;
 
     Ok(())
 }

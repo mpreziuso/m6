@@ -71,7 +71,8 @@ const fn dma_buffer_frame(index: usize) -> u64 {
 
 // MSI-X slots (provided by device-mgr for PCIe devices with MSI-X)
 #[allow(dead_code)]
-const MSIX_IRQ_START: u64 = 40;
+// TODO: Import from shared slot constants crate
+const MSIX_IRQ_START: u64 = 48;
 const MSIX_NOTIF_START: u64 = 48;
 const MSIX_MAX_VECTORS: usize = 8;
 
@@ -275,35 +276,16 @@ fn map_dma_buffers() -> Result<DmaBuffers, &'static str> {
         let vaddr = DMA_BUFFER_VADDR + (i as u64) * PAGE_SIZE;
 
         // Map frame to driver's address space (RW, non-exec)
-        if let Err(e) = map_frame(ROOT_VSPACE, frame_cap, vaddr, 0b011, 0) {
-            io::puts("[drv-nvme] ERROR: Failed to map DMA frame ");
-            io::put_u64(i as u64);
-            io::puts(": ");
-            io::put_u64(e as u64);
-            io::newline();
+        if map_frame(ROOT_VSPACE, frame_cap, vaddr, 0b011, 0).is_err() {
             return Err("DMA frame map failed");
         }
 
         // Allocate IOVA for this page
-        let iova = match dma_pool_alloc(DMA_POOL, PAGE_SIZE, PAGE_SIZE) {
-            Ok(iova) => iova,
-            Err(e) => {
-                io::puts("[drv-nvme] ERROR: Failed to allocate IOVA for frame ");
-                io::put_u64(i as u64);
-                io::puts(": ");
-                io::put_u64(e as u64);
-                io::newline();
-                return Err("IOVA allocation failed");
-            }
-        };
+        let iova = dma_pool_alloc(DMA_POOL, PAGE_SIZE, PAGE_SIZE)
+            .map_err(|_| "IOVA allocation failed")?;
 
         // Map frame to IOSpace for device DMA access (RW)
-        if let Err(e) = iospace_map_frame(IOSPACE, frame_cap, iova, 0b11) {
-            io::puts("[drv-nvme] ERROR: Failed to map frame to IOSpace ");
-            io::put_u64(i as u64);
-            io::puts(": ");
-            io::put_u64(e as u64);
-            io::newline();
+        if iospace_map_frame(IOSPACE, frame_cap, iova, 0b11).is_err() {
             return Err("IOSpace map failed");
         }
 
@@ -318,10 +300,6 @@ fn map_dma_buffers() -> Result<DmaBuffers, &'static str> {
         }
     }
 
-    io::puts("[drv-nvme] Mapped ");
-    io::put_u64(dma.count as u64);
-    io::puts(" DMA buffer pages\n");
-
     Ok(dma)
 }
 
@@ -333,29 +311,15 @@ fn map_dma_buffers() -> Result<DmaBuffers, &'static str> {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
-    io::puts("\n\x1b[35m[drv-nvme] Starting NVMe driver\x1b[0m\n");
-
     // Map the DeviceFrame (BAR0) to our address space
-    match map_frame(ROOT_VSPACE, DEVICE_FRAME, NVME_MMIO_VADDR, 0b011, 0) {
-        Ok(_) => {
-            io::puts("[drv-nvme] Mapped MMIO at ");
-            io::put_hex(NVME_MMIO_VADDR);
-            io::newline();
-        }
-        Err(e) => {
-            io::puts("[drv-nvme] ERROR: Failed to map MMIO: ");
-            io::put_u64(e as u64);
-            io::newline();
-            halt();
-        }
+    if let Err(e) = map_frame(ROOT_VSPACE, DEVICE_FRAME, NVME_MMIO_VADDR, 0b011, 0) {
+        io::puts("[drv-nvme] ERROR: Failed to map MMIO: ");
+        io::put_u64(e as u64);
+        io::newline();
+        halt();
     }
 
     let device_addr = NVME_MMIO_VADDR + device_offset;
-    io::puts("[drv-nvme] Device at ");
-    io::put_hex(device_addr);
-    io::puts(" (offset ");
-    io::put_hex(device_offset);
-    io::puts(")\n");
 
     // Map DMA buffer frames
     let dma = match map_dma_buffers() {
@@ -372,36 +336,12 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     // SAFETY: We just mapped the device at this address
     let mut ctrl = unsafe { NvmeController::new(device_addr as usize) };
 
-    // Read and display capabilities
-    let cap = ctrl.capabilities();
-    let version = ctrl.read_version();
-    io::puts("[drv-nvme] Capabilities: ");
-    io::put_hex(cap);
-    io::puts(", Version: ");
-    io::put_u64(((version >> 16) & 0xFFFF) as u64);
-    io::puts(".");
-    io::put_u64(((version >> 8) & 0xFF) as u64);
-    io::puts(".");
-    io::put_u64((version & 0xFF) as u64);
-    io::newline();
-
-    io::puts("[drv-nvme] Admin SQ IOVA: ");
-    io::put_hex(dma.admin_sq_iova());
-    io::puts(", CQ IOVA: ");
-    io::put_hex(dma.admin_cq_iova());
-    io::newline();
-
     // Initialise controller with admin queues
-    match ctrl.init(dma.admin_sq_iova(), dma.admin_cq_iova(), QUEUE_DEPTH) {
-        Ok(()) => {
-            io::puts("[drv-nvme] Controller initialised\n");
-        }
-        Err(e) => {
-            io::puts("[drv-nvme] ERROR: Controller init failed: ");
-            io::puts(e);
-            io::newline();
-            halt();
-        }
+    if let Err(e) = ctrl.init(dma.admin_sq_iova(), dma.admin_cq_iova(), QUEUE_DEPTH) {
+        io::puts("[drv-nvme] ERROR: Controller init failed: ");
+        io::puts(e);
+        io::newline();
+        halt();
     }
 
     // Create admin queues
@@ -412,8 +352,6 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
         unsafe { NvmeCq::new(dma.admin_cq_vaddr(), dma.admin_cq_iova(), QUEUE_DEPTH, 0) };
 
     // Issue Identify Controller command
-    io::puts("[drv-nvme] Identifying controller...\n");
-
     let identify_ctrl = match identify_controller(&ctrl, &mut admin_sq, &mut admin_cq, &dma) {
         Some(id) => id,
         None => {
@@ -465,13 +403,6 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
 
     // Set up IRQ handling
     let irq_config = setup_irq();
-    if irq_config.enabled {
-        if irq_config.msix {
-            io::puts("[drv-nvme] IRQ handler configured (MSI-X)\n");
-        } else {
-            io::puts("[drv-nvme] IRQ handler configured (legacy)\n");
-        }
-    }
 
     // Create I/O queues via admin commands
     let (io_sq, io_cq) = match create_io_queues(&ctrl, &mut admin_sq, &mut admin_cq, &dma) {
@@ -481,9 +412,6 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
             halt();
         }
     };
-
-    io::puts("[drv-nvme] I/O queues created (QID=1)\n");
-    io::puts("[drv-nvme] Initialised, entering service loop\n");
 
     // Create device state
     let mut device = NvmeDevice {
@@ -624,7 +552,6 @@ fn create_io_queues(
         true,             // Interrupts enabled
     );
 
-    io::puts("[drv-nvme] Creating I/O CQ (QID=1)...\n");
     submit_admin_cmd(ctrl, admin_sq, admin_cq, cq_cmd)?;
 
     // Create I/O Submission Queue (QID=1, using CQ 1)
@@ -636,7 +563,6 @@ fn create_io_queues(
         1,                // Associated CQ ID
     );
 
-    io::puts("[drv-nvme] Creating I/O SQ (QID=1)...\n");
     submit_admin_cmd(ctrl, admin_sq, admin_cq, sq_cmd)?;
 
     // Create queue objects
@@ -690,9 +616,6 @@ fn setup_irq() -> IrqConfig {
 
     match poll(admin_msix_notif) {
         Ok(_) | Err(m6_syscall::error::SyscallError::WouldBlock) => {
-            // MSI-X notification exists and is valid
-            io::puts("[drv-nvme] Using MSI-X interrupts (vector 0 for admin)\n");
-
             // Count available vectors by checking slots
             let mut msix_vectors = 0;
             for i in 0..MSIX_MAX_VECTORS {
@@ -704,10 +627,6 @@ fn setup_irq() -> IrqConfig {
                 }
             }
 
-            io::puts("[drv-nvme] MSI-X vectors available: ");
-            io::put_u64(msix_vectors as u64);
-            io::newline();
-
             return IrqConfig {
                 enabled: true,
                 msix: true,
@@ -716,8 +635,7 @@ fn setup_irq() -> IrqConfig {
             };
         }
         Err(_) => {
-            // MSI-X not available, try legacy
-            io::puts("[drv-nvme] MSI-X not available, trying legacy IRQ\n");
+            // MSI-X not available, fall back to legacy
         }
     }
 
@@ -729,12 +647,7 @@ fn setup_irq() -> IrqConfig {
             msix_vectors: 0,
             admin_notif: IRQ_NOTIF,
         },
-        Err(e) => {
-            io::puts("[drv-nvme] irq_set_handler failed: ");
-            io::put_u64(e as u64);
-            io::newline();
-            IrqConfig::disabled()
-        }
+        Err(_) => IrqConfig::disabled(),
     }
 }
 
@@ -765,10 +678,7 @@ fn service_loop(device: &mut NvmeDevice) -> ! {
 
                 result = reply_recv(SERVICE_EP, response, 0, 0, 0);
             }
-            Err(err) => {
-                io::puts("[drv-nvme] IPC error: ");
-                io::put_u64(err as u64);
-                io::newline();
+            Err(_) => {
                 sched_yield();
                 result = recv(SERVICE_EP);
             }

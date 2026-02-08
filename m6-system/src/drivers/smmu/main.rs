@@ -48,7 +48,7 @@ mod slots {
     pub const IRQ_HANDLER: u64 = 11;
     pub const SERVICE_EP: u64 = 12;
     pub const NOTIF: u64 = 14;
-    pub const INSTANCE_INFO: u64 = 29;
+    pub const INSTANCE_INFO: u64 = 37;
 }
 
 /// Base SMMU MMIO virtual address (where DeviceFrame is mapped).

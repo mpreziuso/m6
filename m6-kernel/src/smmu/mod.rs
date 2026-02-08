@@ -198,15 +198,27 @@ impl SmmuInstance {
         self.submit_cmd(cmd)?;
         self.submit_cmd(CommandEntry::cmd_sync())?;
 
+        let expected_cons = self.cmdq.prod;
+
         // Poll for completion
         for _ in 0..10000 {
             // SAFETY: Reading CMDQ_CONS register.
             let cons = unsafe { self.read32(SMMU_CMDQ_CONS) };
-            if cons == self.cmdq.prod {
+            if cons == expected_cons {
                 return Ok(());
             }
             core::hint::spin_loop();
         }
+
+        // SAFETY: Reading CMDQ_CONS register for diagnostic.
+        let final_cons = unsafe { self.read32(SMMU_CMDQ_CONS) };
+        log::warn!(
+            "SMMU #{}: cmd_sync timeout - prod={} cons={} (expected cons={})",
+            self.index,
+            self.cmdq.prod,
+            final_cons,
+            expected_cons
+        );
 
         Err(SmmuError::Timeout)
     }
@@ -448,6 +460,129 @@ pub enum SmmuError {
     AllocFailed,
 }
 
+// -- RK3588 MMU600 clock/reset initialisation
+
+/// RK3588 MMU600 (PCIE) physical base address
+const RK3588_MMU600_PCIE_BASE: u64 = 0xFC90_0000;
+/// RK3588 MMU600 (PHP) physical base address
+const RK3588_MMU600_PHP_BASE: u64 = 0xFCB0_0000;
+/// RK3588 CRU (Clock & Reset Unit) physical base address
+const RK3588_CRU_BASE: u64 = 0xFD7C_0000;
+
+/// RK3588 PMU (Power Management Unit) physical base address
+const RK3588_PMU_BASE: u64 = 0xFD8D_0000;
+/// Power gate software control register 1 (bit 5 = pd_php_dwn_sftena)
+const PMU_PWR_GATE_SFTCON1_OFFSET: usize = 0x8150;
+/// Power gate status register 0 (bit 21 = pd_php_dwn_stat)
+const PMU_PWR_GATE_STS0_OFFSET: usize = 0x8180;
+
+/// Parent PHP clock gate register (bits 0,5,7,9 for pclk/aclk php root/biu)
+const CRU_GATE_CON32_OFFSET: usize = 0x0880;
+/// Parent PHP reset register (bits 5,9 for presetn/aresetn php biu)
+const CRU_SOFTRST_CON32_OFFSET: usize = 0x0A80;
+/// Clock gate register for MMU600 (bits 7-9)
+const CRU_GATE_CON34_OFFSET: usize = 0x0888;
+/// Soft reset register for MMU600 (bits 7-9)
+const CRU_SOFTRST_CON34_OFFSET: usize = 0x0A88;
+
+/// Initialise RK3588 MMU600 clocks and deassert resets.
+///
+/// The RK3588 MMU600 (ARM SMMU v3) requires clock and reset configuration
+/// via the CRU (Clock & Reset Unit) before the hardware responds to register
+/// reads. UEFI may not enable these clocks.
+///
+/// This function checks if the SMMU address matches RK3588's MMU600 addresses
+/// and enables the required clocks if so.
+///
+/// # CRU Register Format (RK3588)
+///
+/// RK3588 CRU uses a write-mask mechanism:
+/// - Bits [31:16]: Write mask (1 = allow write to corresponding bit in [15:0])
+/// - Bits [15:0]: Data value
+///
+/// To write 0 to bits 7-9 (enabling clocks / deasserting resets):
+/// - Set mask bits 23-25 (=7+16, 8+16, 9+16)
+/// - Set data bits 7-9 to 0
+///
+/// # Safety
+///
+/// Caller must ensure the CRU physical address is valid and can be mapped.
+unsafe fn init_rk3588_mmu_clocks(smmu_phys: u64) {
+    // Check if this is an RK3588 MMU600
+    let is_rk3588_mmu =
+        smmu_phys == RK3588_MMU600_PCIE_BASE || smmu_phys == RK3588_MMU600_PHP_BASE;
+
+    if !is_rk3588_mmu {
+        return;
+    }
+
+    log::info!("RK3588 MMU600 at {:#x}: enabling power domain and clocks", smmu_phys);
+
+    let pmu_virt = phys_to_virt(RK3588_PMU_BASE);
+    let cru_virt = phys_to_virt(RK3588_CRU_BASE);
+
+    // Step 0: Enable PD_PHP power domain
+    // SAFETY: PMU is mapped via phys_to_virt and read/write is within register bounds
+    unsafe {
+        let pwr_sts_ptr = (pmu_virt + PMU_PWR_GATE_STS0_OFFSET as u64) as *const u32;
+        let pwr_ctl_ptr = (pmu_virt + PMU_PWR_GATE_SFTCON1_OFFSET as u64) as *mut u32;
+
+        let pwr_sts = core::ptr::read_volatile(pwr_sts_ptr);
+        let php_powered_down = (pwr_sts >> 21) & 1 != 0;
+
+        if php_powered_down {
+            // Write enable bit 21 (5+16), data bit 5 = 0
+            let pwr_on_value: u32 = 1 << 21;
+            core::ptr::write_volatile(pwr_ctl_ptr, pwr_on_value);
+
+            core::sync::atomic::fence(Ordering::SeqCst);
+            for _ in 0..100000 {
+                core::hint::spin_loop();
+            }
+
+            let pwr_sts_after = core::ptr::read_volatile(pwr_sts_ptr);
+            if (pwr_sts_after >> 21) & 1 != 0 {
+                log::warn!("PD_PHP power domain failed to power on!");
+            }
+        }
+    }
+
+    // SAFETY: CRU is mapped via phys_to_virt and read/write is within register bounds
+    unsafe {
+        // Step 1: Enable parent PHP clocks (bits 0,5,7,9 of CRU_GATE_CON32)
+        let gate32_ptr = (cru_virt + CRU_GATE_CON32_OFFSET as u64) as *mut u32;
+        let reset32_ptr = (cru_virt + CRU_SOFTRST_CON32_OFFSET as u64) as *mut u32;
+
+        let php_gate_mask: u32 = (1 << 16) | (1 << 21) | (1 << 23) | (1 << 25);
+        core::ptr::write_volatile(gate32_ptr, php_gate_mask);
+
+        // Step 2: Deassert parent PHP resets (bits 5,9 of CRU_SOFTRST_CON32)
+        let php_reset_mask: u32 = (1 << 21) | (1 << 25);
+        core::ptr::write_volatile(reset32_ptr, php_reset_mask);
+
+        core::sync::atomic::fence(Ordering::SeqCst);
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+
+        // Step 3: Enable MMU600 clocks (bits 7-9 of CRU_GATE_CON34)
+        let gate34_ptr = (cru_virt + CRU_GATE_CON34_OFFSET as u64) as *mut u32;
+        let reset34_ptr = (cru_virt + CRU_SOFTRST_CON34_OFFSET as u64) as *mut u32;
+
+        let mmu_gate_mask: u32 = 0x0380_0000;
+        core::ptr::write_volatile(gate34_ptr, mmu_gate_mask);
+
+        // Step 4: Deassert MMU600 resets (bits 7-9 of CRU_SOFTRST_CON34)
+        let mmu_reset_mask: u32 = 0x0380_0000;
+        core::ptr::write_volatile(reset34_ptr, mmu_reset_mask);
+
+        core::sync::atomic::fence(Ordering::SeqCst);
+        for _ in 0..10000 {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 /// Initialise an SMMU instance.
 ///
 /// # Safety
@@ -465,6 +600,12 @@ pub unsafe fn init(
         return Err(SmmuError::InvalidConfig);
     }
 
+    // RK3588: Enable MMU600 clocks and deassert resets before accessing registers
+    // This must be done before any register access as the hardware won't respond
+    // without proper clock/reset configuration.
+    // SAFETY: Called during kernel init, CRU registers are accessible via phys_to_virt
+    unsafe { init_rk3588_mmu_clocks(smmu_phys) };
+
     let base = NonNull::new(smmu_virt as *mut u8).ok_or(SmmuError::NotAvailable)?;
 
     // Read identification registers
@@ -472,6 +613,18 @@ pub unsafe fn init(
     let idr0 = unsafe { (base.as_ptr().add(SMMU_IDR0) as *const u32).read_volatile() };
     let idr1 = unsafe { (base.as_ptr().add(SMMU_IDR1) as *const u32).read_volatile() };
     let idr5 = unsafe { (base.as_ptr().add(SMMU_IDR5) as *const u32).read_volatile() };
+
+    // Check if SMMU hardware is responding
+    // Reading 0xffffffff typically means the hardware is not clocked/powered
+    if idr0 == 0xffffffff || idr1 == 0xffffffff {
+        log::warn!(
+            "SMMU #{} at {:#x}: hardware not responding (IDR0={:#x} IDR1={:#x})",
+            index, smmu_phys, idr0, idr1
+        );
+        log::warn!("SMMU #{}: clocks may not be enabled - skipping initialization", index);
+        // Mark SMMU as not available by not storing an instance
+        return Err(SmmuError::NotAvailable);
+    }
 
     // Log detailed SMMU capabilities
     let ttf = (idr0 >> 2) & 0x3;
@@ -573,11 +726,17 @@ pub unsafe fn init(
         instance.write32(SMMU_CR0, 0);
 
         // Wait for CR0ACK
+        let mut cr0ack_ok = false;
         for _ in 0..10000 {
             if instance.read32(SMMU_CR0ACK) == 0 {
+                cr0ack_ok = true;
                 break;
             }
             core::hint::spin_loop();
+        }
+        if !cr0ack_ok {
+            let ack = instance.read32(SMMU_CR0ACK);
+            log::warn!("SMMU #{}: CR0ACK timeout on disable (expected 0, got {:#x})", index, ack);
         }
 
         // Configure stream table base (linear format)
@@ -603,11 +762,17 @@ pub unsafe fn init(
         instance.write32(SMMU_CR0, cr0);
 
         // Wait for CR0ACK
+        cr0ack_ok = false;
         for _ in 0..10000 {
             if instance.read32(SMMU_CR0ACK) == cr0 {
+                cr0ack_ok = true;
                 break;
             }
             core::hint::spin_loop();
+        }
+        if !cr0ack_ok {
+            let ack = instance.read32(SMMU_CR0ACK);
+            log::warn!("SMMU #{}: CR0ACK timeout on queue enable (expected {:#x}, got {:#x})", index, cr0, ack);
         }
 
         // Disable global bypass (abort transactions to unconfigured streams)
@@ -618,11 +783,19 @@ pub unsafe fn init(
         instance.write32(SMMU_CR0, cr0);
 
         // Wait for CR0ACK
+        cr0ack_ok = false;
         for _ in 0..10000 {
             if instance.read32(SMMU_CR0ACK) == cr0 {
+                cr0ack_ok = true;
                 break;
             }
             core::hint::spin_loop();
+        }
+        if !cr0ack_ok {
+            let ack = instance.read32(SMMU_CR0ACK);
+            log::warn!("SMMU #{}: CR0ACK timeout on SMMU enable (expected {:#x}, got {:#x})", index, cr0, ack);
+        } else {
+            log::info!("SMMU #{}: enabled (CR0={:#x} CR0ACK={:#x})", index, cr0, instance.read32(SMMU_CR0ACK));
         }
     }
 

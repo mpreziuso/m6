@@ -6,6 +6,14 @@
 //!
 //! Badge on receive identifies the sender.
 
+// -- Class IDs for service-based ENSURE requests
+// These are used when clients request a service by class rather than device path.
+
+pub mod class {
+    /// USB HID driver (keyboard/mouse input)
+    pub const USB_HID: u64 = 0x1001;
+}
+
 // -- Request labels (client -> device-mgr)
 
 pub mod request {

@@ -185,7 +185,7 @@ pub fn init_allocator(_boot_info_ptr: usize) -> Result<(), &'static str> {
     const ROOT_VSPACE_CPTR: u64 = 2 << 52; // Slot 2 with radix 12
     const UNTYPED_CPTR: u64 = 15 << 52; // First untyped at slot 15 with radix 12
     const CNODE_RADIX: u8 = 12; // 4096 slots (matches spawn_process)
-    const HEAP_SLOTS_START: u64 = 128; // Start allocating heap frames at slot 128
+    const HEAP_SLOTS_START: u64 = 136; // Start allocating heap frames at slot 136 (after LARGE_FRAME 72-135)
 
     // Try to get random - if this fails, we likely don't have proper capabilities
     // In that case, skip allocator init (process can't use heap but can still run)

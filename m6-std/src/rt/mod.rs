@@ -46,6 +46,20 @@ pub const DEFAULT_HEAP_SIZE: usize = 128 * 1024 * 1024;
 /// Whether the runtime has been initialised.
 static RUNTIME_INITIALISED: AtomicBool = AtomicBool::new(false);
 
+/// The x0 register value passed by the kernel at program start.
+/// This can be used to pass configuration to userspace programs.
+static mut STARTUP_X0: u64 = 0;
+
+/// Get the x0 register value that was passed by the kernel at program start.
+///
+/// This is typically used to pass configuration (like CNode radix) to
+/// userspace programs. The value is captured in `_start` before any
+/// function calls.
+pub fn startup_arg() -> u64 {
+    // SAFETY: STARTUP_X0 is only written once in _start before main is called
+    unsafe { STARTUP_X0 }
+}
+
 /// Check if the runtime has been initialised.
 #[inline]
 pub fn is_initialised() -> bool {
@@ -93,7 +107,7 @@ pub unsafe fn init(boot_info_ptr: usize) -> Result<(), &'static str> {
 
 #[cfg(feature = "entry-point")]
 mod entry {
-    use super::init;
+    use super::{init, STARTUP_X0};
     use crate::process::exit;
 
     unsafe extern "Rust" {
@@ -114,7 +128,13 @@ mod entry {
     /// The user must define a `main` function with `#[unsafe(no_mangle)]`.
     #[unsafe(no_mangle)]
     #[unsafe(link_section = ".text.entry")]
-    pub unsafe extern "C" fn _start() -> ! {
+    pub unsafe extern "C" fn _start(x0: u64) -> ! {
+        // Save x0 before any function calls clobber it
+        // SAFETY: Only written once here before main is called
+        unsafe {
+            STARTUP_X0 = x0;
+        }
+
         // Initialise runtime (boot_info_ptr is 0 for non-init processes)
         // SAFETY: Called once at program start
         unsafe {

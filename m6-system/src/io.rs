@@ -93,6 +93,7 @@ pub fn put_u64(mut n: u64) {
 }
 
 /// Print a hexadecimal number with 0x prefix.
+#[allow(dead_code)]
 pub fn put_hex(n: u64) {
     const HEX_CHARS: &[u8] = b"0123456789abcdef";
 

@@ -106,7 +106,7 @@ pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
 
     // Initialise exception vectors
     exceptions::init();
-    log::info!(
+    log::debug!(
         "Exception vectors installed at {:#x}",
         exceptions::vector_table_address()
     );
@@ -126,40 +126,22 @@ pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
 
     // Initialise all SMMUs if present
     let smmus = platform::platform().smmus();
-    if !smmus.is_empty() {
-        log::info!("Found {} SMMU(s) in device tree", smmus.len());
+    for (index, smmu_config) in smmus.iter().enumerate() {
+        let smmu_virt = memory::translate::phys_to_virt(smmu_config.base_addr);
 
-        for (index, smmu_config) in smmus.iter().enumerate() {
-            log::info!(
-                "SMMU #{} detected at {:#x}, size {:#x}, phandle {:#x}",
-                index,
-                smmu_config.base_addr,
-                smmu_config.size,
-                smmu_config.phandle
-            );
-
-            // Map SMMU registers to kernel address space
-            let smmu_virt = memory::translate::phys_to_virt(smmu_config.base_addr);
-
-            // SAFETY: Called during init with valid platform-provided SMMU address
-            match unsafe { m6_kernel::smmu::init(smmu_config.base_addr, smmu_virt, index as u8) } {
-                Ok(()) => {
-                    log::info!("SMMU #{} initialised successfully", index);
-
-                    // Register event queue IRQ handler
-                    let event_irq = smmu_config.event_irq;
-                    gic::register_handler(event_irq, smmu_event_irq_handler);
-                    gic::set_priority(event_irq, 0x90); // Lower priority than timer
-                    gic::enable_irq(event_irq);
-                    log::info!("SMMU #{} event IRQ {} enabled", index, event_irq);
-                }
-                Err(e) => {
-                    log::error!("SMMU #{} initialisation failed: {:?}", index, e);
-                }
+        // SAFETY: Called during init with valid platform-provided SMMU address
+        match unsafe { m6_kernel::smmu::init(smmu_config.base_addr, smmu_virt, index as u8) } {
+            Ok(()) => {
+                log::info!("SMMU #{} at {:#x} initialised", index, smmu_config.base_addr);
+                let event_irq = smmu_config.event_irq;
+                gic::register_handler(event_irq, smmu_event_irq_handler);
+                gic::set_priority(event_irq, 0x90);
+                gic::enable_irq(event_irq);
+            }
+            Err(e) => {
+                log::error!("SMMU #{} init failed: {:?}", index, e);
             }
         }
-    } else {
-        log::info!("No SMMU detected");
     }
 
     // Start secondary CPUs
@@ -180,7 +162,7 @@ pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
 
     // Register userspace IRQ dispatcher for capability-based interrupt delivery
     gic::register_userspace_dispatcher(m6_kernel::irq::dispatch_userspace_irq);
-    log::info!("Userspace IRQ dispatcher registered");
+    log::debug!("Userspace IRQ dispatcher registered");
 
     // Register IRQ dispatcher with exception system
     exceptions::set_irq_handler(irq_handler);
@@ -262,14 +244,25 @@ fn irq_handler(ctx: &mut exceptions::ExceptionContext) {
     // Dispatch to GIC (this calls timer_irq_handler, etc.)
     gic::dispatch_irq();
 
-    // After handling all interrupts, check if we need to reschedule
-    if m6_kernel::sched::should_reschedule() {
+    // Only reschedule if the interrupt came from userspace (EL0).
+    // If we interrupted kernel code (EL1), ctx contains a kernel context
+    // and doing a context switch would corrupt the TCB's saved userspace
+    // state and leave the kernel stack inconsistent.
+    let from_el0 = (ctx.spsr & 0b1111) == 0b0000; // SPSR.M[3:0] == EL0t
+    if from_el0 && m6_kernel::sched::should_reschedule() {
         m6_kernel::sched::timer_context_switch(ctx);
     }
 }
 
 /// Timer interrupt handler
 fn timer_irq_handler(_intid: u32) {
+    // One-time diagnostic to confirm timer is firing (direct console
+    // output since log::info! is invisible after early console is disabled)
+    static TIMER_FIRED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if !TIMER_FIRED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        console::puts("[kernel] Timer IRQ firing (first tick)\n");
+    }
+
     // Clear the timer interrupt
     timer::clear_timer();
 

@@ -55,6 +55,59 @@ pub mod request {
     /// x3: length
     /// Requires: Frame capability in IPC buffer for data
     pub const SUBMIT_INTERRUPT: u64 = 0x0032;
+
+    // -- HID-related requests
+
+    /// Get interface descriptors for a device
+    /// x1: device address
+    /// Returns: x1 = interface count, interface data in IPC buffer
+    pub const GET_INTERFACES: u64 = 0x0023;
+
+    /// Get specific interface info by index
+    /// x1: device address
+    /// x2: interface index (0-based)
+    /// Returns: label = OK | (class<<16) | (subclass<<24) | (protocol<<32) | (endpoint<<40) | (interval<<48)
+    pub const GET_INTERFACE_INFO: u64 = 0x0028;
+
+    /// Claim interface for exclusive use
+    /// x1: device address
+    /// x2: interface number
+    pub const CLAIM_INTERFACE: u64 = 0x0024;
+
+    /// Release a claimed interface
+    /// x1: device address
+    /// x2: interface number
+    pub const RELEASE_INTERFACE: u64 = 0x0025;
+
+    /// HID SET_PROTOCOL (boot/report protocol)
+    /// x1: device address
+    /// x2: interface number
+    /// x3: protocol (0 = boot, 1 = report)
+    pub const SET_PROTOCOL: u64 = 0x0026;
+
+    /// HID SET_IDLE rate
+    /// x1: device address
+    /// x2: interface number
+    /// x3: idle rate (duration in 4ms units, 0 = infinite)
+    pub const SET_IDLE: u64 = 0x0027;
+
+    /// Start interrupt transfer polling for an endpoint
+    /// x1: device address
+    /// x2: endpoint (with IN direction bit 0x80)
+    /// x3: interval (polling interval in ms)
+    /// x4: notification capability to signal on data
+    pub const START_INTERRUPT: u64 = 0x0040;
+
+    /// Stop interrupt transfer polling
+    /// x1: device address
+    /// x2: endpoint
+    pub const STOP_INTERRUPT: u64 = 0x0041;
+
+    /// Get pending interrupt transfer data
+    /// x1: device address
+    /// x2: endpoint
+    /// Returns: x1 = bytes available, data in IPC buffer
+    pub const GET_INTERRUPT_DATA: u64 = 0x0042;
 }
 
 /// IPC response codes
@@ -197,6 +250,83 @@ pub struct DeviceDescriptor {
     pub product_index: u8,
     pub serial_index: u8,
     pub num_configurations: u8,
+}
+
+/// USB class codes
+pub mod class {
+    /// Human Interface Device (HID)
+    pub const HID: u8 = 0x03;
+    /// Mass Storage
+    pub const MASS_STORAGE: u8 = 0x08;
+    /// Hub
+    pub const HUB: u8 = 0x09;
+    /// Vendor-specific
+    pub const VENDOR_SPECIFIC: u8 = 0xFF;
+}
+
+/// HID subclass codes
+pub mod hid_subclass {
+    /// No subclass
+    pub const NONE: u8 = 0x00;
+    /// Boot interface subclass
+    pub const BOOT: u8 = 0x01;
+}
+
+/// HID protocol codes (for boot subclass)
+pub mod hid_protocol {
+    /// No specific protocol
+    pub const NONE: u8 = 0x00;
+    /// Keyboard
+    pub const KEYBOARD: u8 = 0x01;
+    /// Mouse
+    pub const MOUSE: u8 = 0x02;
+}
+
+/// USB interface descriptor (standard 9-byte format)
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C, packed)]
+pub struct InterfaceDescriptor {
+    pub length: u8,
+    pub descriptor_type: u8,
+    pub interface_number: u8,
+    pub alternate_setting: u8,
+    pub num_endpoints: u8,
+    pub interface_class: u8,
+    pub interface_subclass: u8,
+    pub interface_protocol: u8,
+    pub interface_string: u8,
+}
+
+/// USB endpoint descriptor (standard 7-byte format)
+#[derive(Clone, Copy, Debug, Default)]
+#[repr(C, packed)]
+pub struct EndpointDescriptor {
+    pub length: u8,
+    pub descriptor_type: u8,
+    pub endpoint_address: u8,
+    pub attributes: u8,
+    pub max_packet_size: u16,
+    pub interval: u8,
+}
+
+impl EndpointDescriptor {
+    /// Check if this is an IN endpoint
+    #[inline]
+    pub const fn is_in(&self) -> bool {
+        (self.endpoint_address & 0x80) != 0
+    }
+
+    /// Get the endpoint number (0-15)
+    #[inline]
+    pub const fn number(&self) -> u8 {
+        self.endpoint_address & 0x0F
+    }
+
+    /// Check if this is an interrupt endpoint
+    #[inline]
+    pub const fn is_interrupt(&self) -> bool {
+        (self.attributes & 0x03) == 0x03
+    }
 }
 
 /// Badge values for port change notifications

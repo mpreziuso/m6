@@ -35,7 +35,7 @@ mod spawn;
 #[path = "../io.rs"]
 mod io;
 
-use m6_syscall::invoke::{ipc_set_send_caps, recv, reply_recv, sched_yield, signal};
+use m6_syscall::invoke::{call, ipc_set_send_caps, recv, reply_recv, sched_yield, signal};
 use m6_syscall::slot_to_cptr;
 
 use boot_info::DevMgrBootInfo;
@@ -65,7 +65,7 @@ pub unsafe fn get_boot_info() -> &'static DevMgrBootInfo {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
-    io::puts("\n\x1b[34m[device-mgr] Starting device manager\x1b[0m\n");
+    io::puts("[device-mgr] Starting\n");
 
     // Store boot info pointer
     unsafe {
@@ -81,42 +81,12 @@ pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
         }
     }
 
-    io::puts("[device-mgr] Boot info valid, DTB at ");
-    io::put_hex(boot_info.dtb_vaddr);
-    io::puts(" (");
-    io::put_u64(boot_info.dtb_size);
-    io::puts(" bytes)\n");
-
     // Initialise registry
     let mut registry = Registry::new(slots::FIRST_FREE_SLOT);
 
     // Parse DTB and enumerate devices
     match init_dtb(&mut registry, boot_info) {
-        Ok(count) => {
-            io::puts("[device-mgr] Enumerated ");
-            io::put_u64(count as u64);
-            io::puts(" devices\n");
-
-            // Print enumerated devices
-            for i in 0..registry.device_count {
-                let device = &registry.devices[i];
-                io::puts("  - ");
-                io::puts(device.path_str());
-                io::puts(" [");
-                io::puts(device.compatible_str());
-                if device.virtio_device_id != 0 {
-                    io::puts(":");
-                    io::puts(dtb::virtio_device_name(device.virtio_device_id));
-                }
-                io::puts("] @ ");
-                io::put_hex(device.phys_base);
-                if device.irq != 0 {
-                    io::puts(" IRQ ");
-                    io::put_u64(device.irq as u64);
-                }
-                io::newline();
-            }
-        }
+        Ok(_count) => {}
         Err(e) => {
             io::puts("[device-mgr] ERROR: Failed to parse DTB: ");
             io::puts(e);
@@ -128,7 +98,6 @@ pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
     spawn_platform_drivers(&mut registry);
 
     // Enter main service loop
-    io::puts("[device-mgr] Entering service loop\n");
     service_loop(&mut registry);
 }
 
@@ -163,29 +132,15 @@ fn spawn_platform_drivers(registry: &mut Registry) {
     let mut uart_count = 0;
     const MAX_UART_DRIVERS: usize = 1;
 
-    // -- Pass 1: Spawn SMMU drivers first (required for IOSpace)
-    let mut smmu_instance_count = 0u8;
+    // Note: SMMU is handled by the kernel directly via syscalls (iospace_create,
+    // iospace_bind_stream, etc.). The kernel creates SmmuControl capabilities during
+    // bootstrap, and device-mgr uses those via syscalls. No userspace SMMU driver needed.
+    //
+    // Mark SMMU devices as "handled by kernel" so we don't try to spawn drivers for them.
     for i in 0..registry.device_count {
-        if registry.devices[i].state != DeviceState::Unbound {
-            continue;
-        }
-
         let compat = registry.devices[i].compatible_str();
-        if !compat.contains("smmu") {
-            continue;
-        }
-
-        let virtio_id = registry.devices[i].virtio_device_id;
-        if let Some(manifest) = manifest::find_driver(compat, virtio_id) {
-            let has_binary = archive
-                .entries()
-                .any(|e| e.filename().as_str() == Ok(manifest.binary_name));
-            if has_binary {
-                // Store SMMU instance index in device entry for spawn function
-                registry.devices[i].smmu_instance = smmu_instance_count;
-                let _ = spawn_driver_for_device(registry, i);
-                smmu_instance_count += 1;
-            }
+        if compat.contains("smmu") {
+            registry.devices[i].state = DeviceState::Running; // Mark as handled
         }
     }
 
@@ -295,17 +250,6 @@ fn enumerate_pcie_devices(registry: &mut Registry, dtb_data: &[u8]) {
     let mut host_index = 0u64;
 
     for host in pcie_hosts.iter().flatten() {
-        // Print host bridge info
-        let host_type_str = match host.host_type {
-            pcie::PcieHostType::Ecam => "ECAM",
-            pcie::PcieHostType::DesignWareDwc => "DWC (RK3588)",
-        };
-        io::puts("[device-mgr] PCIe: found ");
-        io::puts(host_type_str);
-        io::puts(" host at ");
-        io::put_hex(host.config_base);
-        io::newline();
-
         // For RK3588 DWC: Check link status via APBDBG registers.
         // The main M.2 NVMe slots (pcie3x4, pcie3x2) are typically initialized by UEFI.
         // Secondary controllers (pcie2x1) may be powered off - check link status first.
@@ -319,46 +263,25 @@ fn enumerate_pcie_devices(registry: &mut Registry, dtb_data: &[u8]) {
         //
         // For now, we only enumerate controllers with link already up (UEFI-initialized).
         if host.host_type == pcie::PcieHostType::DesignWareDwc {
-            let controller_name = match host.config_base {
-                0xf000_0000 => "pcie3x4 (M.2 slot)",
-                0xf100_0000 => "pcie3x2 (M.2 slot)",
-                0xf200_0000 => "pcie2x1l0",
-                0xf300_0000 => "pcie2x1l1",
-                0xf400_0000 => "pcie2x1l2",
-                _ => "unknown",
-            };
-
-            io::puts("[device-mgr] PCIe: checking ");
-            io::puts(controller_name);
-            io::puts(" at ");
-            io::put_hex(host.config_base);
-            io::newline();
-
             // Check link status if APBDBG base is available
             if host.apbdbg_base != 0 {
                 match check_rk3588_link_status(host.apbdbg_base, registry, boot_info, &cptr) {
                     Some(link_up) => {
-                        if link_up {
-                            io::puts("[device-mgr] PCIe: link is up\n");
-                        } else {
-                            io::puts("[device-mgr] PCIe: link is down, skipping\n");
+                        if !link_up {
                             continue;
                         }
                     }
                     None => {
-                        // Could not map APBDBG - fall back to safe behavior
-                        // Only try main M.2 slots which UEFI typically initializes
+                        // Could not map APBDBG - fall back to safe behaviour
+                        // Only try main M.2 slots which UEFI typically initialises
                         if host.config_base != 0xf000_0000 && host.config_base != 0xf100_0000 {
-                            io::puts("[device-mgr] PCIe: cannot check link, skipping secondary\n");
                             continue;
                         }
-                        io::puts("[device-mgr] PCIe: assuming primary slot is initialized\n");
                     }
                 }
             } else {
                 // No APBDBG info - only try main M.2 slots
                 if host.config_base != 0xf000_0000 && host.config_base != 0xf100_0000 {
-                    io::puts("[device-mgr] PCIe: no APBDBG, skipping secondary\n");
                     continue;
                 }
             }
@@ -488,29 +411,9 @@ fn map_pcie_region(
     use m6_cap::ObjectType;
     use m6_syscall::invoke::{map_frame, map_page_table, retype};
 
-    io::puts("[device-mgr] PCIe: mapping region at ");
-    io::put_hex(phys_base);
-    io::newline();
-
     // Find device untyped covering this address
-    let (device_untyped_slot, untyped_size, untyped_base) =
-        match boot_info.find_device_untyped(phys_base) {
-            Some(v) => v,
-            None => {
-                io::puts("[device-mgr] PCIe: no device untyped for ");
-                io::put_hex(phys_base);
-                io::newline();
-                return None;
-            }
-        };
-
-    io::puts("[device-mgr] PCIe: found untyped slot ");
-    io::put_u64(device_untyped_slot);
-    io::puts(" base ");
-    io::put_hex(untyped_base);
-    io::puts(" size ");
-    io::put_u64(untyped_size);
-    io::newline();
+    let (device_untyped_slot, untyped_size, _untyped_base) =
+        boot_info.find_device_untyped(phys_base)?;
 
     // Virtual address for temporary mapping (PCIe probe region)
     // Each host uses a different 1GB region to avoid page table conflicts
@@ -542,8 +445,6 @@ fn map_pcie_region(
     let l3_slot = registry.alloc_slot(); // Only used for 4KB mapping
     let frame_slot = registry.alloc_slot();
 
-    io::puts("[device-mgr] PCIe: creating L1 page table\n");
-
     // Create page tables for probe address region
     // L1 table (covers 512GB)
     if retype(
@@ -556,13 +457,10 @@ fn map_pcie_region(
     )
     .is_err()
     {
-        io::puts("[device-mgr] PCIe: L1 retype failed\n");
         return None;
     }
     let l1_base = pcie_probe_vaddr & !(512 * 1024 * 1024 * 1024 - 1);
     let _ = map_page_table(cptr(slots::ROOT_VSPACE), cptr(l1_slot), l1_base, 1);
-
-    io::puts("[device-mgr] PCIe: creating L2 page table\n");
 
     // L2 table (covers 1GB)
     if retype(
@@ -575,7 +473,6 @@ fn map_pcie_region(
     )
     .is_err()
     {
-        io::puts("[device-mgr] PCIe: L2 retype failed\n");
         return None;
     }
     let l2_base = pcie_probe_vaddr & !(1024 * 1024 * 1024 - 1);
@@ -583,7 +480,6 @@ fn map_pcie_region(
 
     // L3 table only needed for 4KB mappings (2MB blocks go directly in L2)
     if !use_2mb {
-        io::puts("[device-mgr] PCIe: creating L3 page table\n");
         if retype(
             cptr(slots::RAM_UNTYPED),
             7, // PageTableL3
@@ -594,14 +490,11 @@ fn map_pcie_region(
         )
         .is_err()
         {
-            io::puts("[device-mgr] PCIe: L3 retype failed\n");
             return None;
         }
         let l3_base = pcie_probe_vaddr & !(2 * 1024 * 1024 - 1);
         let _ = map_page_table(cptr(slots::ROOT_VSPACE), cptr(l3_slot), l3_base, 3);
     }
-
-    io::puts("[device-mgr] PCIe: creating DeviceFrame\n");
 
     // Retype device untyped to DeviceFrame
     if retype(
@@ -614,11 +507,8 @@ fn map_pcie_region(
     )
     .is_err()
     {
-        io::puts("[device-mgr] PCIe: DeviceFrame retype failed\n");
         return None;
     }
-
-    io::puts("[device-mgr] PCIe: mapping frame\n");
 
     // Map the frame
     if map_frame(
@@ -630,11 +520,8 @@ fn map_pcie_region(
     )
     .is_err()
     {
-        io::puts("[device-mgr] PCIe: map_frame failed\n");
         return None;
     }
-
-    io::puts("[device-mgr] PCIe: mapping successful\n");
 
     Some((
         pcie_probe_vaddr as usize,
@@ -776,7 +663,7 @@ fn probe_virtio_devices(registry: &mut Registry) {
     )
     .is_err()
     {
-        io::puts("[device-mgr] Failed to create L1 table for probe\n");
+        io::puts("[device-mgr] ERROR: VirtIO probe L1 retype failed\n");
         return;
     }
     let l1_base = PROBE_VADDR & !(512 * 1024 * 1024 * 1024 - 1);
@@ -793,7 +680,7 @@ fn probe_virtio_devices(registry: &mut Registry) {
     )
     .is_err()
     {
-        io::puts("[device-mgr] Failed to create L2 table for probe\n");
+        io::puts("[device-mgr] ERROR: VirtIO probe L2 retype failed\n");
         return;
     }
     let l2_base = PROBE_VADDR & !(1024 * 1024 * 1024 - 1);
@@ -810,7 +697,7 @@ fn probe_virtio_devices(registry: &mut Registry) {
     )
     .is_err()
     {
-        io::puts("[device-mgr] Failed to create L3 table for probe\n");
+        io::puts("[device-mgr] ERROR: VirtIO probe L3 retype failed\n");
         return;
     }
     let l3_base = PROBE_VADDR & !(2 * 1024 * 1024 - 1);
@@ -827,19 +714,15 @@ fn probe_virtio_devices(registry: &mut Registry) {
     )
     .is_err()
     {
-        io::puts("[device-mgr] Failed to retype device untyped for VirtIO probe\n");
+        io::puts("[device-mgr] ERROR: VirtIO probe device retype failed\n");
         return;
     }
 
     // Map all frames contiguously
     for (i, &slot) in frame_slots.iter().enumerate() {
         let vaddr = PROBE_VADDR + (i * 4096) as u64;
-        if map_frame(cptr(slots::ROOT_VSPACE), cptr(slot), vaddr, 0b011, 0).is_err() {
-            io::puts("[device-mgr] Failed to map VirtIO frame ");
-            io::put_u64(i as u64);
-            io::puts(" for probing\n");
-            // Continue anyway, we may still probe some devices
-        }
+        // Continue on failure - we may still probe some devices
+        let _ = map_frame(cptr(slots::ROOT_VSPACE), cptr(slot), vaddr, 0b011, 0);
     }
 
     // Now probe each VirtIO device by its offset from the base
@@ -867,9 +750,6 @@ fn probe_virtio_devices(registry: &mut Registry) {
 
         // Check if within our mapped region (16KB)
         if offset >= (NUM_FRAMES * 4096) as u64 {
-            io::puts("[device-mgr] VirtIO device at ");
-            io::put_hex(phys_base);
-            io::puts(" is outside mapped probe region\n");
             continue;
         }
 
@@ -880,16 +760,6 @@ fn probe_virtio_devices(registry: &mut Registry) {
 
         // Store the device ID in the registry
         registry.devices[i].virtio_device_id = device_id;
-
-        if device_id != 0 {
-            io::puts("[device-mgr] VirtIO device at ");
-            io::put_hex(phys_base);
-            io::puts(" is type ");
-            io::put_u64(device_id as u64);
-            io::puts(" (");
-            io::puts(dtb::virtio_device_name(device_id));
-            io::puts(")\n");
-        }
     }
 
     // Unmap frames from device-mgr's address space (but keep capabilities for reuse)
@@ -928,10 +798,6 @@ fn service_loop(registry: &mut Registry) -> ! {
 
     let registry_cptr = cptr(slots::REGISTRY_EP);
 
-    io::puts("[device-mgr] Waiting for IPC on endpoint ");
-    io::put_hex(registry_cptr);
-    io::newline();
-
     // Wait for the first request
     let mut last_response: u64 = 0;
     let mut first_message = true;
@@ -952,23 +818,10 @@ fn service_loop(registry: &mut Registry) -> ! {
                 let label = ipc_result.label;
                 let msg = &ipc_result.msg;
 
-                io::puts("[device-mgr] Received IPC: label=");
-                io::put_u64(label);
-                io::puts(" badge=");
-                io::put_u64(sender_badge);
-                io::newline();
-
                 // Handle the request and store response for next reply_recv
                 last_response = handle_request(registry, sender_badge, label, msg);
-
-                io::puts("[device-mgr] Response: ");
-                io::put_u64(last_response);
-                io::newline();
             }
-            Err(err) => {
-                io::puts("[device-mgr] recv/reply_recv error: ");
-                io::put_u64(err as u64);
-                io::puts(" - yielding\n");
+            Err(_) => {
                 sched_yield();
                 first_message = true; // Reset to recv mode
             }
@@ -996,10 +849,20 @@ fn handle_request(registry: &mut Registry, badge: u64, label: u64, msg: &[u64; 4
 /// the existing endpoint.
 ///
 /// Arguments:
-///   msg[0]: device index (if non-zero, look up by index; otherwise use heuristics)
+///   msg[0]: device index (if non-zero, look up by index) OR class ID for service-based requests
+///
+/// Class IDs (values >= 0x1000) are used for service-based ENSURE:
+///   - CLASS_USB_HID (0x1001): Request USB HID driver for keyboard/mouse input
 fn handle_ensure(registry: &mut Registry, _badge: u64, msg: &[u64; 4]) -> u64 {
-    // msg[0] can contain a device index hint (0 = use heuristics)
-    let device_hint = msg[0] as usize;
+    let request_id = msg[0];
+
+    // Check if this is a class-based request (class IDs start at 0x1000)
+    if request_id >= 0x1000 {
+        return handle_class_ensure(registry, request_id);
+    }
+
+    // Device-based request
+    let device_hint = request_id as usize;
 
     // Find the device - either by hint or by heuristic
     let device_idx = if device_hint > 0 && device_hint <= registry.device_count {
@@ -1054,6 +917,143 @@ fn handle_ensure(registry: &mut Registry, _badge: u64, msg: &[u64; 4]) -> u64 {
             spawn_driver_for_device(registry, device_idx)
         }
     }
+}
+
+/// Handle class-based ENSURE request.
+///
+/// This spawns service drivers on demand based on class ID rather than device path.
+fn handle_class_ensure(registry: &mut Registry, class_id: u64) -> u64 {
+    match class_id {
+        ipc::class::USB_HID => handle_usb_hid_ensure(registry),
+        _ => {
+            io::puts("[device-mgr] Unknown class ID: ");
+            io::put_hex(class_id);
+            io::newline();
+            ipc::response::ERR_DEVICE_NOT_FOUND
+        }
+    }
+}
+
+/// Handle USB HID driver ENSURE request.
+///
+/// The HID driver is a class driver that sits above the USB host controller.
+/// It needs:
+/// - USB host driver endpoint (to communicate with USB devices)
+/// - Its own service endpoint (for clients like the shell)
+fn handle_usb_hid_ensure(registry: &mut Registry) -> u64 {
+    // Check if HID driver is already running
+    if let Some(endpoint_slot) = registry.hid_driver_endpoint {
+        // SAFETY: _start has initialised BOOT_INFO
+        let boot_info = unsafe { get_boot_info() };
+        let endpoint_cptr = slot_to_cptr(endpoint_slot, boot_info.cnode_radix);
+
+        // Transfer endpoint to client
+        unsafe {
+            ipc_set_send_caps(&[endpoint_cptr]);
+        }
+
+        return ipc::response::OK;
+    }
+
+    // Find USB host driver (xHCI or DWC3)
+    let usb_host_endpoint = find_usb_host_driver(registry);
+    if usb_host_endpoint.is_none() {
+        io::puts("[device-mgr] No USB host driver available for HID\n");
+        return ipc::response::ERR_NO_DRIVER;
+    }
+    let usb_host_ep_slot = usb_host_endpoint.unwrap();
+
+    // Spawn HID driver
+    match spawn_hid_driver(registry, usb_host_ep_slot) {
+        Ok(endpoint_slot) => {
+            registry.hid_driver_endpoint = Some(endpoint_slot);
+
+            // Transfer endpoint to client
+            // SAFETY: _start has initialised BOOT_INFO
+            let boot_info = unsafe { get_boot_info() };
+            let endpoint_cptr = slot_to_cptr(endpoint_slot, boot_info.cnode_radix);
+
+            unsafe {
+                ipc_set_send_caps(&[endpoint_cptr]);
+            }
+
+            ipc::response::OK
+        }
+        Err(e) => {
+            io::puts("[device-mgr] Failed to spawn HID driver: ");
+            io::puts(e);
+            io::newline();
+            ipc::response::ERR_SPAWN_FAILED
+        }
+    }
+}
+
+/// Find a running USB host driver (xHCI or DWC3) that has connected devices.
+///
+/// On platforms with multiple USB controllers (e.g. RK3588 with three DWC3),
+/// the keyboard may be on any of them. We query each running USB host via
+/// LIST_DEVICES IPC and return the first one that reports connected devices.
+/// Falls back to the first running USB host if none report devices yet.
+fn find_usb_host_driver(registry: &Registry) -> Option<u64> {
+    // SAFETY: _start has initialised BOOT_INFO
+    let boot_info = unsafe { get_boot_info() };
+    let cptr = |slot: u64| slot_to_cptr(slot, boot_info.cnode_radix);
+
+    // USB host IPC label for LIST_DEVICES
+    const LIST_DEVICES: u64 = 0x0020;
+
+    let mut fallback_slot: Option<u64> = None;
+
+    for i in 0..registry.device_count {
+        if registry.devices[i].state != DeviceState::Running {
+            continue;
+        }
+
+        let compat = registry.devices[i].compatible_str();
+        if !(compat.contains("xhci") || compat.contains("dwc3") || compat.contains("usb")) {
+            continue;
+        }
+
+        let driver_idx = registry.devices[i].driver_idx;
+        if driver_idx >= registry.driver_count {
+            continue;
+        }
+
+        let ep_slot = registry.drivers[driver_idx].endpoint_slot;
+
+        // Remember the first USB host as fallback
+        if fallback_slot.is_none() {
+            fallback_slot = Some(ep_slot);
+        }
+
+        // Query this USB host for connected device count
+        if let Ok(result) = call(cptr(ep_slot), LIST_DEVICES, 0, 0, 0) {
+            let device_count = (result.label >> 16) & 0xFFFF;
+            if device_count > 0 {
+                return Some(ep_slot);
+            }
+        }
+    }
+
+    fallback_slot
+}
+
+/// Spawn the USB HID driver.
+fn spawn_hid_driver(registry: &mut Registry, usb_host_ep_slot: u64) -> Result<u64, &'static str> {
+    // Find HID driver binary in initrd
+    let initrd = get_initrd().ok_or("No initrd available")?;
+    let archive = tar_no_std::TarArchiveRef::new(initrd).map_err(|_| "Failed to parse initrd")?;
+
+    let elf_data = archive
+        .entries()
+        .find(|e| e.filename().as_str() == Ok("drv-usb-hid"))
+        .map(|e| e.data())
+        .ok_or("HID driver binary not found")?;
+
+    // Spawn the HID driver as a class driver (no specific device)
+    let result = spawn::spawn_class_driver(registry, elf_data, usb_host_ep_slot)?;
+
+    Ok(result.endpoint_slot)
 }
 
 /// Find first unbound device that has a driver available in the initrd.
@@ -1326,16 +1326,6 @@ fn handle_list_devices(registry: &Registry, msg: &[u64; 4]) -> u64 {
     let returned = available.min(max_count);
 
     // In a full implementation, we would write device summaries to IPC buffer here
-    // For now, just log what would be returned
-    if returned > 0 {
-        io::puts("[device-mgr] list_devices: returning ");
-        io::put_u64(returned as u64);
-        io::puts(" of ");
-        io::put_u64(registry.device_count as u64);
-        io::puts(" devices (offset ");
-        io::put_u64(offset as u64);
-        io::puts(")\n");
-    }
 
     // Return format: total_count in low 32 bits, returned_count in high 32 bits
     ((returned as u64) << 32) | (registry.device_count as u64)
@@ -1366,14 +1356,6 @@ fn handle_get_device_info(registry: &Registry, msg: &[u64; 4]) -> u64 {
         DeviceState::Dead => ipc::device_state::DEAD,
     };
 
-    io::puts("[device-mgr] get_device_info: device ");
-    io::put_u64(device_index as u64);
-    io::puts(" state=");
-    io::put_u64(state);
-    io::puts(" phys=");
-    io::put_hex(device.phys_base);
-    io::newline();
-
     // Return format: response in low 16 bits, state in next 16, irq in high 32
     // Additional info (phys_base, size) would be in IPC buffer
     ipc::response::OK | (state << 16) | ((device.irq as u64) << 32)
@@ -1389,28 +1371,16 @@ fn handle_restart_decision(registry: &mut Registry, msg: &[u64; 4]) -> u64 {
     let action = msg[1];
 
     if driver_id >= registry.driver_count {
-        io::puts("[device-mgr] restart_decision: invalid driver_id ");
-        io::put_u64(driver_id as u64);
-        io::newline();
         return ipc::response::ERR_DEVICE_NOT_FOUND;
     }
 
     let driver = &registry.drivers[driver_id];
     if driver.alive {
-        // Driver is actually alive, nothing to restart
-        io::puts("[device-mgr] restart_decision: driver ");
-        io::put_u64(driver_id as u64);
-        io::puts(" is alive\n");
         return ipc::response::OK;
     }
 
     if action == 1 {
-        // Restart requested
-        io::puts("[device-mgr] restart_decision: restarting driver ");
-        io::put_u64(driver_id as u64);
-        io::newline();
-
-        // Find the device associated with this driver and respawn
+        // Restart requested - find the device associated with this driver and respawn
         for i in 0..driver.device_count {
             let device_idx = driver.device_indices[i];
             if device_idx < registry.device_count {
@@ -1419,20 +1389,9 @@ fn handle_restart_decision(registry: &mut Registry, msg: &[u64; 4]) -> u64 {
                 registry.devices[device_idx].driver_idx = usize::MAX;
 
                 // Attempt to spawn the driver again
-                let result = spawn_driver_for_device(registry, device_idx);
-                if result == ipc::response::OK {
-                    io::puts("[device-mgr] Driver restarted successfully\n");
-                    return ipc::response::OK;
-                } else {
-                    io::puts("[device-mgr] Driver restart failed\n");
-                    return result;
-                }
+                return spawn_driver_for_device(registry, device_idx);
             }
         }
-    } else {
-        io::puts("[device-mgr] restart_decision: not restarting driver ");
-        io::put_u64(driver_id as u64);
-        io::newline();
     }
 
     ipc::response::OK

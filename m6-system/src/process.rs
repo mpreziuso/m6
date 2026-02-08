@@ -736,99 +736,29 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
     )
     .map_err(SpawnError::FrameMapFailed)?;
 
-    crate::io::puts("[spawn] IPC buffer mapped\n");
+    // Ensure page tables exist for the start of the heap region so child
+    // processes can allocate memory. One L3 table covers 2MB which is enough
+    // for initial allocations. Additional L3 tables can be created on demand.
+    const HEAP_BASE: u64 = 0x4000_0000;
+    vspace_builder.ensure_page_tables(HEAP_BASE, HEAP_BASE + 0x1000)?;
 
     // Update next free slot
     next_slot = vspace_builder.next_free_slot;
 
-    // Grant initial capabilities to child's CSpace
-    crate::io::puts("[spawn] Copying initial caps...\n");
-
-    // Set up standard slots 0, 1, 2 for the child's own capabilities.
-    // These are critical for the child to be able to perform capability operations.
-
-    // Slot 0: CSpace self-reference
-    crate::io::puts("[spawn]   Setting up CNode self-reference at slot 0...");
-    let result = cap_copy(
-        cptr(cspace_slot),       // dest cnode (child's CSpace)
-        0,                       // dest index (slot 0)
-        0,                       // dest depth (auto)
-        cptr(config.root_cnode), // src cnode (parent's CNode)
-        cspace_slot,             // src index (where child's CSpace cap is in parent)
-        0,                       // src depth (auto)
-    );
-    match result {
-        Ok(_) => crate::io::puts(" OK\n"),
-        Err(e) => {
-            crate::io::puts(" FAILED: ");
-            crate::io::puts(e.name());
-            crate::io::newline();
-            return Err(SpawnError::CapCopyFailed(e));
-        }
-    }
-
-    // Slot 1: TCB
-    crate::io::puts("[spawn]   Setting up TCB at slot 1...");
-    let result = cap_copy(
-        cptr(cspace_slot),       // dest cnode (child's CSpace)
-        1,                       // dest index (slot 1)
-        0,                       // dest depth (auto)
-        cptr(config.root_cnode), // src cnode (parent's CNode)
-        tcb_slot,                // src index (where TCB cap is in parent)
-        0,                       // src depth (auto)
-    );
-    match result {
-        Ok(_) => crate::io::puts(" OK\n"),
-        Err(e) => {
-            crate::io::puts(" FAILED: ");
-            crate::io::puts(e.name());
-            crate::io::newline();
-            return Err(SpawnError::CapCopyFailed(e));
-        }
-    }
-
-    // Slot 2: VSpace
-    crate::io::puts("[spawn]   Setting up VSpace at slot 2...");
-    let result = cap_copy(
-        cptr(cspace_slot),       // dest cnode (child's CSpace)
-        2,                       // dest index (slot 2)
-        0,                       // dest depth (auto)
-        cptr(config.root_cnode), // src cnode (parent's CNode)
-        vspace_slot,             // src index (where VSpace cap is in parent)
-        0,                       // src depth (auto)
-    );
-    match result {
-        Ok(_) => crate::io::puts(" OK\n"),
-        Err(e) => {
-            crate::io::puts(" FAILED: ");
-            crate::io::puts(e.name());
-            crate::io::newline();
-            return Err(SpawnError::CapCopyFailed(e));
-        }
-    }
+    // Grant initial capabilities to child's CSpace (slots 0=CSpace, 1=TCB, 2=VSpace)
+    cap_copy(cptr(cspace_slot), 0, 0, cptr(config.root_cnode), cspace_slot, 0)
+        .map_err(SpawnError::CapCopyFailed)?;
+    cap_copy(cptr(cspace_slot), 1, 0, cptr(config.root_cnode), tcb_slot, 0)
+        .map_err(SpawnError::CapCopyFailed)?;
+    cap_copy(cptr(cspace_slot), 2, 0, cptr(config.root_cnode), vspace_slot, 0)
+        .map_err(SpawnError::CapCopyFailed)?;
 
     // Copy user-specified initial capabilities
     for cap in config.initial_caps {
-        let result = cap_copy(
-            cptr(cspace_slot),       // dest cnode
-            cap.dst_slot,            // dest index
-            0,                       // dest depth (auto)
-            cptr(config.root_cnode), // src cnode
-            cap.src_slot,            // src index
-            0,                       // src depth (auto)
-        );
-        match result {
-            Ok(_) => (),
-            Err(e) => {
-                crate::io::puts(" FAILED: ");
-                crate::io::puts(e.name());
-                crate::io::newline();
-                return Err(SpawnError::CapCopyFailed(e));
-            }
-        }
+        cap_copy(cptr(cspace_slot), cap.dst_slot, 0, cptr(config.root_cnode), cap.src_slot, 0)
+            .map_err(SpawnError::CapCopyFailed)?;
     }
 
-    crate::io::puts("[spawn] Configuring TCB...\n");
     // Configure TCB
     tcb_configure(
         cptr(tcb_slot),
@@ -840,24 +770,13 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
     )
     .map_err(SpawnError::TcbConfigureFailed)?;
 
-    crate::io::puts("[spawn] Writing registers: PC=0x");
-    // Set up initial registers
     let entry = elf.entry();
     let sp = stack_top;
-    crate::io::put_hex(entry);
-    crate::io::puts(" SP=0x");
-    crate::io::put_hex(sp);
-    crate::io::newline();
     tcb_write_registers(cptr(tcb_slot), entry, sp, config.x0)
         .map_err(SpawnError::TcbWriteRegistersFailed)?;
 
     if config.resume {
-        crate::io::puts("[spawn] Resuming TCB...\n");
-        // Resume the task
         tcb_resume(cptr(tcb_slot)).map_err(SpawnError::TcbResumeFailed)?;
-        crate::io::puts("[spawn] TCB resumed\n");
-    } else {
-        crate::io::puts("[spawn] TCB configured (not resumed)\n");
     }
 
     Ok(SpawnResult {

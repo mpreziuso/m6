@@ -31,6 +31,7 @@ cargo +nightly build \
     --package m6-std \
     --release \
     --target "$TARGET_SPEC" \
+    -Z json-target-spec \
     -Z build-std=core,alloc,compiler_builtins \
     -Z build-std-features=compiler-builtins-mem
 

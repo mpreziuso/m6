@@ -358,8 +358,9 @@ pub fn map_framebuffer(
 
 /// Map direct physical memory map into TTBR1
 ///
-/// Maps all physical memory into kernel virtual space at KERNEL_PHYS_MAP_BASE
-/// in 1GB chunks to use block mappings where possible.
+/// Maps all physical memory into kernel virtual space at KERNEL_PHYS_MAP_BASE.
+/// Uses 1GB block mappings for homogeneous chunks (all RAM or all MMIO).
+/// Uses 2MB block mappings for mixed chunks (containing both RAM and MMIO).
 ///
 /// Uses the RAM regions from UEFI memory map to determine which chunks
 /// are RAM (Normal memory) vs MMIO (Device memory).
@@ -369,6 +370,7 @@ fn map_direct_physmap(
     allocator: &mut BootPageAllocator,
 ) -> Option<()> {
     const GB: u64 = 0x4000_0000; // 1GB
+    const MB2: u64 = 0x20_0000;  // 2MB
 
     let max_phys_addr = ram_regions.max_addr();
     // Round up max_phys_addr to next 1GB boundary
@@ -385,37 +387,86 @@ fn map_direct_physmap(
         let phys_base = chunk as u64 * GB;
         let virt_base = KERNEL_PHYS_MAP_BASE + phys_base;
 
-        // Use UEFI memory map to determine if this chunk contains RAM
-        let (mem_type, type_str) = if ram_regions.chunk_is_ram(phys_base) {
-            (MemoryType::Normal, "Normal")
+        // Check if this chunk contains both RAM and MMIO
+        if ram_regions.chunk_is_mixed(phys_base) {
+            // Mixed chunk: use 2MB mappings to separate RAM from MMIO
+            log::debug!(
+                "Mapping Direct PhysMap chunk {} with 2MB granularity (mixed RAM/MMIO)",
+                chunk
+            );
+
+            let blocks_per_gb = (GB / MB2) as usize; // 512 blocks
+            for block in 0..blocks_per_gb {
+                let block_phys = phys_base + (block as u64 * MB2);
+                let block_virt = virt_base + (block as u64 * MB2);
+
+                let (mem_type, type_str) = if ram_regions.block_is_ram(block_phys) {
+                    (MemoryType::Normal, "N")
+                } else {
+                    (MemoryType::Device, "D")
+                };
+
+                let phys_region = PhysMemoryRegion::from_raw(block_phys, MB2 as usize);
+                let virt_region = VirtMemoryRegion::from_raw(block_virt, MB2 as usize);
+
+                // Only log first/last and transitions
+                if block == 0 || block == blocks_per_gb - 1 {
+                    log::debug!(
+                        "  Block {}: PA {:#x} -> VA {:#x} ({})",
+                        block, block_phys, block_virt, type_str
+                    );
+                }
+
+                if let Err(e) = map_range(
+                    ttbr1_l0,
+                    MapAttributes::new(
+                        phys_region,
+                        virt_region,
+                        mem_type,
+                        PtePermissions::rw(false),
+                    ),
+                    allocator,
+                ) {
+                    log::error!(
+                        "Failed to map Direct PhysMap block at {:#x}: {:?}",
+                        block_phys, e
+                    );
+                    return None;
+                }
+            }
         } else {
-            (MemoryType::Device, "Device")
-        };
+            // Homogeneous chunk: use 1GB block mapping
+            let (mem_type, type_str) = if ram_regions.chunk_is_ram(phys_base) {
+                (MemoryType::Normal, "Normal")
+            } else {
+                (MemoryType::Device, "Device")
+            };
 
-        let phys_region = PhysMemoryRegion::from_raw(phys_base, GB as usize);
-        let virt_region = VirtMemoryRegion::from_raw(virt_base, GB as usize);
+            let phys_region = PhysMemoryRegion::from_raw(phys_base, GB as usize);
+            let virt_region = VirtMemoryRegion::from_raw(virt_base, GB as usize);
 
-        log::debug!(
-            "Mapping Direct PhysMap chunk {}: VA {:#x}..{:#x} -> PA {:#x} ({})",
-            chunk,
-            virt_base,
-            virt_base + GB,
-            phys_base,
-            type_str
-        );
+            log::debug!(
+                "Mapping Direct PhysMap chunk {}: VA {:#x}..{:#x} -> PA {:#x} ({})",
+                chunk,
+                virt_base,
+                virt_base + GB,
+                phys_base,
+                type_str
+            );
 
-        if let Err(e) = map_range(
-            ttbr1_l0,
-            MapAttributes::new(
-                phys_region,
-                virt_region,
-                mem_type,
-                PtePermissions::rw(false), // Kernel-only, RW (no execute for safety)
-            ),
-            allocator,
-        ) {
-            log::error!("Failed to map Direct PhysMap chunk {}: {:?}", chunk, e);
-            return None;
+            if let Err(e) = map_range(
+                ttbr1_l0,
+                MapAttributes::new(
+                    phys_region,
+                    virt_region,
+                    mem_type,
+                    PtePermissions::rw(false),
+                ),
+                allocator,
+            ) {
+                log::error!("Failed to map Direct PhysMap chunk {}: {:?}", chunk, e);
+                return None;
+            }
         }
     }
 
@@ -429,11 +480,13 @@ fn map_direct_physmap(
 ///
 /// Uses the RAM regions from UEFI memory map to determine which chunks
 /// are RAM (Normal memory with RWX) vs MMIO (Device memory with RW).
+/// Uses 2MB mappings for mixed chunks to properly separate RAM from MMIO.
 fn setup_ttbr0_identity(
     ram_regions: &RamRegions,
     allocator: &mut BootPageAllocator,
 ) -> Option<TPA<L0Table>> {
     const GB: u64 = 0x4000_0000; // 1GB
+    const MB2: u64 = 0x20_0000;  // 2MB
 
     let ttbr0_pa: TPA<L0Table> = allocator.allocate_table()?;
     let mut ttbr0_l0 = unsafe { L0Table::from_pa(ttbr0_pa) };
@@ -453,33 +506,63 @@ fn setup_ttbr0_identity(
     for chunk in 0..num_chunks {
         let phys_base = chunk as u64 * GB;
 
-        // Use UEFI memory map to determine if this chunk contains RAM
-        // RAM chunks need RWX for bootloader code execution
-        // Non-RAM chunks (MMIO) use Device memory with RW only
-        let (mem_type, perms, type_str) = if ram_regions.chunk_is_ram(phys_base) {
-            (MemoryType::Normal, PtePermissions::rwx(false), "Normal")
+        // Check if this chunk contains both RAM and MMIO
+        if ram_regions.chunk_is_mixed(phys_base) {
+            // Mixed chunk: use 2MB mappings
+            log::debug!(
+                "Mapping TTBR0 chunk {} with 2MB granularity (mixed RAM/MMIO)",
+                chunk
+            );
+
+            let blocks_per_gb = (GB / MB2) as usize;
+            for block in 0..blocks_per_gb {
+                let block_phys = phys_base + (block as u64 * MB2);
+
+                let (mem_type, perms) = if ram_regions.block_is_ram(block_phys) {
+                    (MemoryType::Normal, PtePermissions::rwx(false))
+                } else {
+                    (MemoryType::Device, PtePermissions::rw(false))
+                };
+
+                let phys_region = PhysMemoryRegion::from_raw(block_phys, MB2 as usize);
+                let virt_region = VirtMemoryRegion::from_raw(block_phys, MB2 as usize);
+
+                if let Err(e) = map_range(
+                    &mut ttbr0_l0,
+                    MapAttributes::new(phys_region, virt_region, mem_type, perms),
+                    allocator,
+                ) {
+                    log::error!("Failed to map TTBR0 block at {:#x}: {:?}", block_phys, e);
+                    return None;
+                }
+            }
         } else {
-            (MemoryType::Device, PtePermissions::rw(false), "Device")
-        };
+            // Homogeneous chunk: use 1GB block mapping
+            let (mem_type, perms, type_str) = if ram_regions.chunk_is_ram(phys_base) {
+                (MemoryType::Normal, PtePermissions::rwx(false), "Normal")
+            } else {
+                (MemoryType::Device, PtePermissions::rw(false), "Device")
+            };
 
-        let phys_region = PhysMemoryRegion::from_raw(phys_base, GB as usize);
-        let virt_region = VirtMemoryRegion::from_raw(phys_base, GB as usize); // Identity mapping
+            let phys_region = PhysMemoryRegion::from_raw(phys_base, GB as usize);
+            let virt_region = VirtMemoryRegion::from_raw(phys_base, GB as usize);
 
-        log::debug!(
-            "Mapping TTBR0 chunk {}: {:#x}..{:#x} ({})",
-            chunk,
-            phys_base,
-            phys_base + GB,
-            type_str
-        );
+            log::debug!(
+                "Mapping TTBR0 chunk {}: {:#x}..{:#x} ({})",
+                chunk,
+                phys_base,
+                phys_base + GB,
+                type_str
+            );
 
-        if let Err(e) = map_range(
-            &mut ttbr0_l0,
-            MapAttributes::new(phys_region, virt_region, mem_type, perms),
-            allocator,
-        ) {
-            log::error!("Failed to map TTBR0 chunk {}: {:?}", chunk, e);
-            return None;
+            if let Err(e) = map_range(
+                &mut ttbr0_l0,
+                MapAttributes::new(phys_region, virt_region, mem_type, perms),
+                allocator,
+            ) {
+                log::error!("Failed to map TTBR0 chunk {}: {:?}", chunk, e);
+                return None;
+            }
         }
     }
 
@@ -581,6 +664,55 @@ impl RamRegions {
             max = max.max(self.regions[i].end);
         }
         max
+    }
+
+    /// Check if a 1GB chunk contains both RAM and MMIO (mixed content)
+    ///
+    /// Returns true if the chunk partially overlaps with RAM regions,
+    /// meaning some parts are RAM and some are MMIO.
+    pub fn chunk_is_mixed(&self, chunk_start: u64) -> bool {
+        const GB: u64 = 0x4000_0000;
+        let chunk_end = chunk_start + GB;
+
+        // Check if chunk overlaps with any RAM region
+        let mut has_ram = false;
+        let mut fully_covered = false;
+
+        for i in 0..self.count {
+            let r = &self.regions[i];
+            // Check if chunk overlaps with this RAM region
+            if chunk_start < r.end && chunk_end > r.start {
+                has_ram = true;
+                // Check if RAM region fully covers the chunk
+                if r.start <= chunk_start && r.end >= chunk_end {
+                    fully_covered = true;
+                    break;
+                }
+            }
+        }
+
+        // Mixed if has some RAM but isn't fully covered
+        has_ram && !fully_covered
+    }
+
+    /// Check if a 2MB block overlaps with any RAM region
+    ///
+    /// Returns true if any part of the block is in RAM. This errs on the side
+    /// of Normal memory to ensure code can execute (Device memory is not
+    /// executable). This is important for blocks at RAM boundaries where
+    /// RAM may not be 2MB-aligned.
+    pub fn block_is_ram(&self, block_start: u64) -> bool {
+        const MB2: u64 = 0x20_0000; // 2MB
+        let block_end = block_start + MB2;
+
+        for i in 0..self.count {
+            let r = &self.regions[i];
+            // Check if block overlaps with this RAM region (not just fully within)
+            if block_start < r.end && block_end > r.start {
+                return true;
+            }
+        }
+        false
     }
 }
 

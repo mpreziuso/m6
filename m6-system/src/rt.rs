@@ -129,7 +129,7 @@ const UNTYPED_SLOT: u64 = 17;
 
 /// First slot for heap frame allocations.
 #[allow(dead_code)]
-static NEXT_FRAME_SLOT: AtomicU64 = AtomicU64::new(128);
+static NEXT_FRAME_SLOT: AtomicU64 = AtomicU64::new(136);
 
 // -- Page tracking for DMA address translation
 
@@ -347,9 +347,6 @@ pub fn init_allocator() {
     const HEAP_BASE: usize = 0x4000_0000;
     const HEAP_SIZE: usize = 128 * 1024 * 1024;
 
-    // First, ensure page tables exist for the heap region (may fail if already exist)
-    let _ = ensure_heap_page_tables(HEAP_BASE as u64);
-
     // SAFETY: Called once at program start
     unsafe {
         if let Err(e) = m6_alloc::init(
@@ -398,72 +395,3 @@ pub fn init_allocator() {
     }
 }
 
-/// Ensure page tables exist for the heap region.
-/// Returns true if successful, false if failed.
-fn ensure_heap_page_tables(heap_base: u64) -> bool {
-    use m6_cap::ObjectType;
-
-    const L1_SIZE: u64 = 512 * 1024 * 1024 * 1024; // 512GB
-    const L2_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
-    const L3_SIZE: u64 = 2 * 1024 * 1024; // 2MB
-
-    let vspace_cptr = slot_to_cptr(ROOT_VSPACE);
-    let cnode_cptr = slot_to_cptr(ROOT_CNODE);
-    let untyped_cptr = slot_to_cptr(UNTYPED_SLOT);
-
-    // Allocate slots for page tables (use slots 64-66, before heap frames start at 128)
-    let l1_slot = 64u64;
-    let l2_slot = 65u64;
-    let l3_slot = 66u64;
-
-    // Create and map L1 page table
-    let l1_base = heap_base & !(L1_SIZE - 1);
-    if m6_syscall::invoke::retype(
-        untyped_cptr,
-        ObjectType::PageTableL1 as u64,
-        0,
-        cnode_cptr,
-        l1_slot,
-        1,
-    )
-    .is_err()
-    {
-        // Expected to fail if already exists
-        return false;
-    }
-    let _ = m6_syscall::invoke::map_page_table(vspace_cptr, slot_to_cptr(l1_slot), l1_base, 1);
-
-    // Create and map L2 page table
-    let l2_base = heap_base & !(L2_SIZE - 1);
-    if m6_syscall::invoke::retype(
-        untyped_cptr,
-        ObjectType::PageTableL2 as u64,
-        0,
-        cnode_cptr,
-        l2_slot,
-        1,
-    )
-    .is_err()
-    {
-        return false;
-    }
-    let _ = m6_syscall::invoke::map_page_table(vspace_cptr, slot_to_cptr(l2_slot), l2_base, 2);
-
-    // Create and map L3 page table
-    let l3_base = heap_base & !(L3_SIZE - 1);
-    if m6_syscall::invoke::retype(
-        untyped_cptr,
-        ObjectType::PageTableL3 as u64,
-        0,
-        cnode_cptr,
-        l3_slot,
-        1,
-    )
-    .is_err()
-    {
-        return false;
-    }
-    let _ = m6_syscall::invoke::map_page_table(vspace_cptr, slot_to_cptr(l3_slot), l3_base, 3);
-
-    true
-}

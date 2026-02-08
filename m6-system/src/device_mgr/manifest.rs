@@ -28,6 +28,8 @@ pub struct DriverManifest {
     pub needs_irq: bool,
     /// Whether driver needs IOMMU/IOSpace capability
     pub needs_iommu: bool,
+    /// Whether driver needs DMA buffers (can be true even with needs_iommu=false)
+    pub needs_dma: bool,
     /// Whether this is a platform device (vs PCIe)
     pub is_platform: bool,
     /// VirtIO device ID filter (0 = match any/non-virtio device)
@@ -113,6 +115,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-smmu",
         needs_irq: true,    // Event queue interrupt
         needs_iommu: false, // SMMU doesn't use itself
+        needs_dma: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -124,6 +127,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-uart-pl011",
         needs_irq: true,
         needs_iommu: false,
+        needs_dma: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -134,6 +138,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-uart-ns16550",
         needs_irq: true,
         needs_iommu: false,
+        needs_dma: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -144,6 +149,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-uart-dw",
         needs_irq: true,
         needs_iommu: false,
+        needs_dma: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -155,6 +161,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-virtio-blk",
         needs_irq: true,
         needs_iommu: true, // Block devices perform DMA
+        needs_dma: true,
         is_platform: true,
         virtio_device_id: 2, // VirtIO block device
         additional_frames: &[],
@@ -166,6 +173,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-virtio-mmio",
         needs_irq: true,
         needs_iommu: false,
+        needs_dma: false,
         is_platform: true,
         virtio_device_id: 0, // Match any (fallback)
         additional_frames: &[],
@@ -178,6 +186,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-nvme",
         needs_irq: true,
         needs_iommu: true,
+        needs_dma: true,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -189,6 +198,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-nvme",
         needs_irq: true,
         needs_iommu: true,
+        needs_dma: true,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -200,6 +210,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-ahci",
         needs_irq: true,
         needs_iommu: true,
+        needs_dma: true,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -212,6 +223,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-usb-xhci",
         needs_irq: true,
         needs_iommu: true,
+        needs_dma: true,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -223,6 +235,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-usb-xhci",
         needs_irq: true,
         needs_iommu: true,
+        needs_dma: true,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -237,11 +250,26 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "snps,dwc3",
         binary_name: "drv-usb-dwc3",
         needs_irq: true,
-        needs_iommu: true, // Now enabled - stream IDs are parsed from DTB
+        // FIXME: Disabled until SMMU command queue is fixed (cons returns garbage)
+        // When enabled, USB DMA gets blocked by SMMU causing HSE errors
+        needs_iommu: false,
+        needs_dma: true, // DMA buffers required even without IOMMU
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: DWC3_ADDITIONAL_FRAMES,
         mmio_pages: 16,
+    },
+    // -- USB HID class driver (no MMIO, uses USB host driver via IPC)
+    DriverManifest {
+        compatible: "usb-hid",
+        binary_name: "drv-usb-hid",
+        needs_irq: false,
+        needs_iommu: false,
+        needs_dma: false,
+        is_platform: false,
+        virtio_device_id: 0,
+        additional_frames: &[],
+        mmio_pages: 0,
     },
     // -- PCIe drivers
     DriverManifest {
@@ -249,6 +277,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-pcie-ecam",
         needs_irq: true,
         needs_iommu: false,
+        needs_dma: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -259,6 +288,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-pcie-ecam",
         needs_irq: true,
         needs_iommu: false,
+        needs_dma: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -269,6 +299,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-pcie-rk3588",
         needs_irq: true,
         needs_iommu: false,
+        needs_dma: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],

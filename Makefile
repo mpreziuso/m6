@@ -19,6 +19,7 @@ sysroot:
 # Build user applications (shell, utilities) with custom std
 user: sysroot
 	RUSTFLAGS="--sysroot=$(CURDIR)/target/sysroot" cargo +nightly build \
+		-Zjson-target-spec \
 		--package m6-user \
 		--target targets/aarch64-unknown-m6.json \
 		--release
@@ -27,7 +28,7 @@ user: sysroot
 initrd: system
 	@mkdir -p target/initrd
 	cd target/aarch64-unknown-none/release && \
-		tar --format=ustar -cf ../../../target/initrd/INITRD init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme drv-usb-xhci drv-usb-dwc3 svc-fat32
+		tar --format=ustar -cf ../../../target/initrd/INITRD init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme drv-usb-xhci drv-usb-dwc3 drv-usb-hid svc-fat32
 	@echo "Created initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
 	@echo "Contents:"
 	@tar -tvf target/initrd/INITRD
@@ -45,6 +46,7 @@ initrd-full: system user
 	@cp target/aarch64-unknown-none/release/drv-nvme target/initrd/
 	@cp target/aarch64-unknown-none/release/drv-usb-xhci target/initrd/
 	@cp target/aarch64-unknown-none/release/drv-usb-dwc3 target/initrd/
+	@cp target/aarch64-unknown-none/release/drv-usb-hid target/initrd/
 	@cp target/aarch64-unknown-none/release/svc-fat32 target/initrd/
 	@# Copy user binaries
 	@cp target/aarch64-unknown-m6/release/shell target/initrd/
@@ -56,7 +58,7 @@ initrd-full: system user
 	@# Create TAR archive
 	cd target/initrd && \
 		tar --format=ustar -cf INITRD \
-		init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme drv-usb-xhci drv-usb-dwc3 svc-fat32 \
+		init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme drv-usb-xhci drv-usb-dwc3 drv-usb-hid svc-fat32 \
 		shell ls cat cp echo mkdir
 	@echo "Created full initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
 	@echo "Contents:"
@@ -70,6 +72,7 @@ check:
 	cargo check --workspace --exclude m6-user
 	@# m6-user needs the custom sysroot
 	RUSTFLAGS="--sysroot=$(CURDIR)/target/sysroot" cargo +nightly check \
+		-Zjson-target-spec \
 		--package m6-user \
 		--target targets/aarch64-unknown-m6.json
 
@@ -77,6 +80,7 @@ clippy:
 	cargo clippy --workspace --exclude m6-user -- -D warnings
 	@# m6-user needs the custom sysroot
 	RUSTFLAGS="--sysroot=$(CURDIR)/target/sysroot" cargo +nightly clippy \
+		-Zjson-target-spec \
 		--package m6-user \
 		--target targets/aarch64-unknown-m6.json \
 		-- -D warnings

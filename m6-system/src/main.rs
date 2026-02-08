@@ -54,72 +54,17 @@ pub unsafe extern "C" fn _start() -> ! {
         }
     }
 
-    // Print banner
-    io::puts("\n");
-    io::puts("\x1b[32m"); // Green
-    io::puts("[init] M6 Init starting\n");
-    io::puts("\x1b[0m"); // Reset
-
-    // Print platform info
-    io::puts("[init] Platform ID: ");
-    io::put_u64(boot_info.platform_id as u64);
+    io::puts("[init] M6 ");
     match boot_info.platform_id {
-        1 => io::puts(" (QEMU ARM Virtual Machine)"),
-        2 => io::puts(" (Radxa Rock 5B+)"),
-        _ => io::puts(" (Unknown)"),
+        1 => io::puts("QEMU"),
+        2 => io::puts("RK3588"),
+        _ => io::puts("unknown"),
     }
-    io::newline();
-
-    // Print memory info
-    io::puts("[init] Memory: ");
+    io::puts(", ");
     io::put_u64(boot_info.free_memory / (1024 * 1024));
-    io::puts(" MiB free / ");
-    io::put_u64(boot_info.total_memory / (1024 * 1024));
-    io::puts(" MiB total\n");
-
-    // Print CPU info
-    io::puts("[init] CPUs: ");
+    io::puts(" MiB, ");
     io::put_u64(boot_info.cpu_count as u64);
-    io::newline();
-
-    // Print CNode info
-    io::puts("[init] CNode radix: ");
-    io::put_u64(boot_info.cnode_radix as u64);
-    io::puts(" (");
-    io::put_u64(1 << boot_info.cnode_radix);
-    io::puts(" slots)\n");
-
-    // Print untyped info
-    if boot_info.untyped_count > 0 {
-        io::puts("[init] Untyped regions: ");
-        io::put_u64(boot_info.untyped_count as u64);
-        io::puts(", first at ");
-        io::put_hex(boot_info.untyped_phys_base[0]);
-        io::puts(" (");
-        io::put_u64(1u64 << boot_info.untyped_size_bits[0]);
-        io::puts(" bytes)\n");
-    }
-
-    // Print DTB info
-    if boot_info.has_dtb() {
-        io::puts("[init] DTB mapped at ");
-        io::put_hex(boot_info.dtb_vaddr);
-        io::puts(" (");
-        io::put_u64(boot_info.dtb_size);
-        io::puts(" bytes)\n");
-    }
-
-    // Print initrd info
-    if boot_info.has_initrd() {
-        io::puts("[init] Initrd mapped at ");
-        io::put_hex(boot_info.initrd_vaddr);
-        io::puts(" (");
-        io::put_u64(boot_info.initrd_size);
-        io::puts(" bytes)\n");
-
-        // List initrd contents
-        list_initrd(boot_info);
-    }
+    io::puts(" CPUs\n");
 
     // Spawn device-mgr
     if boot_info.has_initrd() && boot_info.untyped_count > 0 {
@@ -135,36 +80,6 @@ pub unsafe extern "C" fn _start() -> ! {
     // For now, we just yield forever to let the idle task run
     loop {
         sched_yield();
-    }
-}
-
-/// List files in the initrd TAR archive.
-fn list_initrd(boot_info: &UserBootInfo) {
-    // SAFETY: Kernel guarantees initrd is mapped at this address
-    let initrd = unsafe {
-        core::slice::from_raw_parts(
-            boot_info.initrd_vaddr as *const u8,
-            boot_info.initrd_size as usize,
-        )
-    };
-
-    let archive = match tar_no_std::TarArchiveRef::new(initrd) {
-        Ok(a) => a,
-        Err(_) => {
-            io::puts("[init] Failed to parse initrd TAR\n");
-            return;
-        }
-    };
-
-    io::puts("[init] Initrd contents:\n");
-    for entry in archive.entries() {
-        if let Ok(name) = entry.filename().as_str() {
-            io::puts("  - ");
-            io::puts(name);
-            io::puts(" (");
-            io::put_u64(entry.size() as u64);
-            io::puts(" bytes)\n");
-        }
     }
 }
 
@@ -233,9 +148,6 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             return;
         }
     };
-    io::puts("[init] Found device-mgr: ");
-    io::put_u64(elf_data.len() as u64);
-    io::puts(" bytes\n");
 
     // Find device untypeds from boot_info
     let mut device_untyped_slots: [u64; MAX_DEVICE_UNTYPED] = [0; MAX_DEVICE_UNTYPED];
@@ -249,33 +161,14 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             device_untyped_slots[device_untyped_count] = slot;
             device_untyped_phys[device_untyped_count] = boot_info.untyped_phys_base[i];
             device_untyped_size_bits[device_untyped_count] = boot_info.untyped_size_bits[i];
-
-            // io::puts("[init] Device untyped ");
-            // io::put_u64(device_untyped_count as u64);
-            // io::puts(": slot ");
-            // io::put_u64(slot);
-            // io::puts(" phys ");
-            // io::put_hex(boot_info.untyped_phys_base[i]);
-            // io::puts(" size 2^");
-            // io::put_u64(boot_info.untyped_size_bits[i] as u64);
-            // io::newline();
-
             device_untyped_count += 1;
         }
     }
-
-    io::puts("[init] Found ");
-    io::put_u64(device_untyped_count as u64);
-    io::puts(" device untypeds\n");
 
     // Create registry endpoint for device-mgr
     let registry_ep_slot = FIRST_FREE_SLOT;
     let radix = boot_info.cnode_radix as u8;
     let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
-
-    io::puts("[init] Creating registry endpoint at slot ");
-    io::put_u64(registry_ep_slot);
-    io::newline();
 
     if let Err(e) = m6_syscall::invoke::retype(
         cptr(Slot::FirstUntyped as u64),
@@ -290,8 +183,6 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         io::newline();
         return;
     }
-
-    io::puts("[init] Registry endpoint created successfully\n");
 
     // Build initial capabilities list including device untypeds
     // Need: 5 standard caps + up to MAX_DEVICE_REGIONS device untypeds
@@ -512,19 +403,14 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         return;
     }
 
-    io::puts("[init] \x1b[32mdevice-mgr spawned successfully\x1b[0m\n");
-    io::puts("[init]   TCB slot: ");
-    io::put_u64(result.tcb_slot);
-    io::puts(", ASID: ");
-    io::put_u64(result.asid);
-    io::newline();
+    io::puts("[init] device-mgr spawned\n");
 
     // Request UART driver via ENSURE
     // This triggers device-mgr to spawn the PL011 driver
     request_uart_driver(registry_ep_slot, radix, &mut next_slot);
 
-    // Spawn the shell
-    spawn_shell(boot_info, &mut next_slot);
+    // Spawn the shell with registry endpoint for HID access
+    spawn_shell(boot_info, &mut next_slot, registry_ep_slot);
 }
 
 /// Request the UART driver from device-mgr.
@@ -560,14 +446,10 @@ fn request_uart_driver(registry_ep: u64, radix: u8, next_slot: &mut u64) {
                 let recv_count = ipc_buf.recv_extra_caps;
 
                 if recv_count > 0 {
-                    let recv_caps = unsafe { ipc_get_recv_caps() };
-                    io::puts("[init] Received UART endpoint at slot ");
-                    io::put_u64(recv_caps[0]);
-                    io::newline();
+                    let _recv_caps = unsafe { ipc_get_recv_caps() };
                     // Don't switch to IPC console for now - the spawned UART driver
                     // may be connected to a different UART than the kernel console.
                     // TODO: Pass UART address from device-mgr to spawn correct driver.
-                    io::puts("[init] UART driver available (not switching console)\n");
                 } else {
                     io::puts("[init] Warning: No endpoint received from device-mgr\n");
                 }
@@ -585,8 +467,8 @@ fn request_uart_driver(registry_ep: u64, radix: u8, next_slot: &mut u64) {
     }
 }
 
-/// Spawn the shell.
-fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64) {
+/// Spawn the shell with registry endpoint for HID access.
+fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64, registry_slot: u64) {
     let elf_data = match find_in_initrd(boot_info, "shell") {
         Some(data) => data,
         None => return,
@@ -595,6 +477,20 @@ fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64) {
     let radix = boot_info.cnode_radix as u8;
     let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
 
+    // Shell's capability slots:
+    // Slot 10: device-mgr registry endpoint (for ENSURE requests)
+    // Slot 15: RAM untyped for heap allocation (m6-std expects untyped at slot 15)
+    let initial_caps = [
+        InitialCap {
+            src_slot: registry_slot,
+            dst_slot: 10,
+        },
+        InitialCap {
+            src_slot: Slot::FirstUntyped as u64,
+            dst_slot: 15,
+        },
+    ];
+
     let config = SpawnConfig {
         elf_data,
         root_cnode: Slot::RootCNode as u64,
@@ -602,8 +498,8 @@ fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64) {
         ram_untyped: Slot::FirstUntyped as u64,
         asid_pool: Slot::AsidPool as u64,
         next_free_slot: *next_slot,
-        initial_caps: &[],
-        x0: 0,
+        initial_caps: &initial_caps,
+        x0: radix as u64, // Pass CNode radix to shell
         resume: false,
     };
 
@@ -614,6 +510,8 @@ fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64) {
 
     *next_slot = result.next_free_slot;
     let _ = m6_syscall::invoke::tcb_resume(cptr(result.tcb_slot));
+
+    io::puts("[init] Shell spawned with registry endpoint at slot 10\n");
 }
 
 fn print_spawn_error(e: process::SpawnError) {

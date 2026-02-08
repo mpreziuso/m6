@@ -251,9 +251,10 @@ pub fn recv(src: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
             options(nostack)
         );
     }
-    // If x0 is negative, it's an error code from the kernel
-    // If x0 is non-negative, the message was delivered
-    if x0 < 0 {
+    // Check if x0 is a kernel error code.
+    // Kernel errors are small negative numbers (-1 to -22).
+    // Valid IPC messages can have high bits set, so only treat known error codes as errors.
+    if x0 >= -22 && x0 < 0 {
         Err(crate::error::SyscallError::from_i64(x0)
             .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
@@ -307,9 +308,11 @@ pub fn call(
             options(nostack)
         );
     }
-    // If x0 is negative, it's an error code from the kernel
-    // If x0 is non-negative, the reply was delivered
-    if x0 < 0 {
+    // Check if x0 is a kernel error code.
+    // Kernel errors are small negative numbers (-1 to -22).
+    // Valid IPC messages can have high bits set (e.g., endpoint addresses),
+    // so we only treat known error codes as errors.
+    if x0 >= -22 && x0 < 0 {
         Err(crate::error::SyscallError::from_i64(x0)
             .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
@@ -362,9 +365,10 @@ pub fn reply_recv(
             options(nostack)
         );
     }
-    // If x0 is negative, it's an error code from the kernel
-    // If x0 is non-negative, the message was delivered
-    if x0 < 0 {
+    // Check if x0 is a kernel error code.
+    // Kernel errors are small negative numbers (-1 to -22).
+    // Valid IPC messages can have high bits set, so only treat known error codes as errors.
+    if x0 >= -22 && x0 < 0 {
         Err(crate::error::SyscallError::from_i64(x0)
             .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
@@ -409,9 +413,10 @@ pub fn nb_recv(src: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
             options(nostack)
         );
     }
-    // If x0 is negative, it's an error code from the kernel
-    // If x0 is non-negative, the message was delivered
-    if x0 < 0 {
+    // Check if x0 is a kernel error code.
+    // Kernel errors are small negative numbers (-1 to -22).
+    // Valid IPC messages can have high bits set, so only treat known error codes as errors.
+    if x0 >= -22 && x0 < 0 {
         Err(crate::error::SyscallError::from_i64(x0)
             .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {

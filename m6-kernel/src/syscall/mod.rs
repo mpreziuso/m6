@@ -27,7 +27,6 @@ pub mod numbers;
 pub mod tcb_ops;
 pub mod timer_ops;
 
-use m6_arch::cpu::cpu_id;
 use m6_arch::exceptions::ExceptionContext;
 use m6_arch::registers::{esr, spsr};
 use m6_cap::{CapRights, ObjectType};
@@ -116,28 +115,11 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
         Syscall::NBSend => handle_send(args, ctx, false),
         Syscall::NBRecv => handle_recv(args, ctx, false),
         Syscall::Yield => {
-            // Update current task's EEVDF times first, then check for other tasks
+            // Update current task's EEVDF times so other tasks become eligible.
+            // The reschedule flag is set, so the return-to-userspace path will
+            // pick the next task. If we're the only runnable task, we simply
+            // resume immediately — the idle task handles WFI when truly idle.
             crate::sched::yield_current();
-
-            // Check if there's another task to run
-            let dominated = {
-                let current = crate::sched::current_task();
-                let cpu_id = cpu_id();
-                let sched_state = crate::sched::get_sched_state();
-                let sched = sched_state[cpu_id].lock();
-                let next = crate::sched::eevdf::find_next_runnable(&sched);
-                next.is_none() || next == current
-            };
-
-            if dominated {
-                // No other task - wait for interrupt before returning
-                // This prevents busy-looping when we're the only task
-                // Must enable interrupts first or WFI returns immediately
-                m6_arch::cpu::enable_interrupts();
-                m6_arch::wait_for_interrupt();
-                // Note: interrupt handler will run, then we continue here
-            }
-
             Ok(0)
         }
 
