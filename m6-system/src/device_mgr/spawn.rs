@@ -654,7 +654,6 @@ pub fn spawn_driver(
     }
 
     // Ensure page tables exist for heap region (drivers use 0x4000_0000 for heap)
-    // This is needed for drivers that use the allocator (crab-usb, etc.)
     const HEAP_BASE: u64 = 0x4000_0000;
     const HEAP_SIZE: u64 = 128 * 1024 * 1024; // 128MB heap
     ensure_page_tables(vspace_slot, HEAP_BASE, HEAP_BASE + HEAP_SIZE, registry, &cptr)?;

@@ -91,7 +91,6 @@ static DWC3_ADDITIONAL_FRAMES: &[AdditionalFrame] = &[
         name: "CRU",
     },
     // USBDP PHY register regions (PMA/PCS registers, not just GRF configuration bits)
-    // These are required for crab-usb to poll PHY status and configure PHY settings
     AdditionalFrame {
         phys_addr: 0xFED7_0000,
         size: 0x2000, // 8KB - actual hardware region size from DTB

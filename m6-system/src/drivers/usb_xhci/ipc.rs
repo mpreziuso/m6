@@ -2,15 +2,6 @@
 //!
 //! Defines the message protocol for USB operations between clients
 //! and the USB host controller driver.
-//!
-//! # API Limitations
-//!
-//! Some operations are not currently supported due to crab-usb library constraints:
-//! - `GET_PORT_COUNT` returns hardcoded value (crab-usb doesn't expose HCSPARAMS1)
-//! - `GET_PORT_STATUS` returns ERR_UNSUPPORTED (crab-usb doesn't expose PORTSC)
-//! - `GET_DEVICE_DESCRIPTOR` has limited support (crab-usb DeviceInfo doesn't expose descriptor fields)
-//!
-//! Device enumeration works via `LIST_DEVICES` to get device count.
 
 #![allow(dead_code)]
 

@@ -1,9 +1,8 @@
 //! Direct xHCI Register Access Module
 //!
-//! Provides direct access to xHCI registers without going through crab-usb.
-//! This is used when firmware (UEFI) has already initialised the controller,
-//! allowing us to read hardware state directly rather than running a
-//! potentially blocking initialisation sequence.
+//! Provides direct access to xHCI registers for reading hardware state
+//! and managing the controller. This implementation handles full controller
+//! initialisation including HCRST, scratchpad buffer setup, and device enumeration.
 //!
 //! Based on the xHCI specification (eXtensible Host Controller Interface).
 
