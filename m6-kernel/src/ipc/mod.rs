@@ -59,23 +59,47 @@ pub struct CapLookupResult {
     pub rights: CapRights,
 }
 
+/// Capability lookup result with type information.
+///
+/// Used by the Invoke dispatcher to resolve a capability without
+/// constraining the expected object type.
+pub struct CapLookupResultWithType {
+    /// Object reference.
+    pub obj_ref: ObjectRef,
+    /// Object type.
+    pub obj_type: ObjectType,
+    /// Badge from the capability.
+    pub badge: u64,
+    /// Rights from the capability.
+    pub rights: CapRights,
+}
+
+/// Look up a capability by CPtr without type checking.
+///
+/// Resolves the CPtr through the hierarchical CSpace, returning full
+/// capability information including object type. The caller is responsible
+/// for checking type and rights as needed.
+pub fn lookup_cap_any(cptr: u64) -> Result<CapLookupResultWithType, SyscallError> {
+    let loc = cspace::resolve_cptr(cptr, 0)?;
+
+    cspace::with_slot(&loc, |slot| {
+        if slot.is_empty() {
+            return Err(SyscallError::EmptySlot);
+        }
+
+        Ok(CapLookupResultWithType {
+            obj_ref: slot.object_ref(),
+            obj_type: slot.cap_type(),
+            badge: slot.badge().value(),
+            rights: slot.rights(),
+        })
+    })
+}
+
 /// Look up a capability by CPtr for IPC operations.
 ///
 /// Resolves the CPtr through the hierarchical CSpace using guard-based
 /// addressing, then validates the capability type and rights.
-///
-/// # Arguments
-///
-/// * `cptr` - Capability pointer resolved through CNode hierarchy
-/// * `expected_type` - Expected object type (Endpoint or Notification)
-/// * `required_rights` - Rights required for the operation
-///
-/// # Returns
-///
-/// * `Ok(CapLookupResult)` - Capability found with required rights
-/// * `Err(InvalidCap)` - Capability not found or invalid
-/// * `Err(NoRights)` - Insufficient rights
-/// * `Err(TypeMismatch)` - Wrong object type
 pub fn lookup_cap(
     cptr: u64,
     expected_type: ObjectType,

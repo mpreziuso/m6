@@ -19,6 +19,7 @@ pub mod asid_ops;
 pub mod cache_ops;
 pub mod cap_ops;
 pub mod error;
+pub mod invoke;
 pub mod iommu_ops;
 pub mod irq_ops;
 pub mod mem_ops;
@@ -53,7 +54,7 @@ pub fn handle_syscall(ctx: &mut ExceptionContext) {
     // Extract syscall number from x7
     let syscall_num = ctx.gpr[7];
 
-    // Extract arguments from x0-x5
+    // Extract arguments from x0-x6
     let args = SyscallArgs {
         arg0: ctx.gpr[0],
         arg1: ctx.gpr[1],
@@ -61,6 +62,7 @@ pub fn handle_syscall(ctx: &mut ExceptionContext) {
         arg3: ctx.gpr[3],
         arg4: ctx.gpr[4],
         arg5: ctx.gpr[5],
+        arg6: ctx.gpr[6],
     };
 
     // Dispatch and get result
@@ -86,6 +88,7 @@ pub struct SyscallArgs {
     pub arg3: u64,
     pub arg4: u64,
     pub arg5: u64,
+    pub arg6: u64,
 }
 
 /// Dispatch a syscall to its handler.
@@ -107,7 +110,7 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
     );
 
     match syscall {
-        // IPC operations
+        // -- IPC operations
         Syscall::Send => handle_send(args, ctx, true),
         Syscall::Recv => handle_recv(args, ctx, true),
         Syscall::Call => handle_call(args, ctx),
@@ -123,79 +126,15 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
             Ok(0)
         }
 
-        // Notification operations
+        // -- Notification operations
         Syscall::Signal => handle_signal(args),
         Syscall::Wait => handle_wait(args, ctx),
         Syscall::Poll => handle_poll(args, ctx),
 
-        // Capability operations
-        Syscall::CapCopy => cap_ops::handle_cap_copy(args),
-        Syscall::CapMove => cap_ops::handle_cap_move(args),
-        Syscall::CapMint => cap_ops::handle_cap_mint(args),
-        Syscall::CapDelete => cap_ops::handle_cap_delete(args),
-        Syscall::CapRevoke => cap_ops::handle_cap_revoke(args),
-        Syscall::CapMutate => cap_ops::handle_cap_mutate(args),
-        Syscall::CapRotate => cap_ops::handle_cap_rotate(args),
+        // -- Object invocation (central dispatcher for all cap operations)
+        Syscall::Invoke => invoke::handle_invoke(args, ctx),
 
-        // Object invocation (stub)
-        Syscall::Invoke => todo_syscall("Invoke"),
-
-        // Memory operations
-        Syscall::Retype => mem_ops::handle_retype(args),
-        Syscall::MapFrame => mem_ops::handle_map_frame(args),
-        Syscall::UnmapFrame => mem_ops::handle_unmap_frame(args),
-        Syscall::MapPageTable => mem_ops::handle_map_page_table(args),
-        Syscall::AsidPoolAssign => asid_ops::handle_asid_pool_assign(args),
-        Syscall::FrameWrite => mem_ops::handle_frame_write(args),
-        Syscall::FrameGetPhys => mem_ops::handle_frame_get_phys(args),
-
-        // TCB operations
-        Syscall::TcbConfigure => tcb_ops::handle_tcb_configure(args),
-        Syscall::TcbWriteRegisters => tcb_ops::handle_tcb_write_registers(args, ctx),
-        Syscall::TcbReadRegisters => tcb_ops::handle_tcb_read_registers(args, ctx),
-        Syscall::TcbResume => tcb_ops::handle_tcb_resume(args),
-        Syscall::TcbSuspend => tcb_ops::handle_tcb_suspend(args),
-        Syscall::TcbSetPriority => tcb_ops::handle_tcb_set_priority(args),
-        Syscall::TcbBindNotification => tcb_ops::handle_tcb_bind_notification(args),
-        Syscall::TcbExit => tcb_ops::handle_tcb_exit(args),
-        Syscall::TcbSleep => tcb_ops::handle_tcb_sleep(args),
-
-        // IRQ operations
-        Syscall::IrqAck => irq_ops::handle_irq_ack(args),
-        Syscall::IrqSetHandler => irq_ops::handle_irq_set_handler(args),
-        Syscall::IrqClearHandler => irq_ops::handle_irq_clear_handler(args),
-        Syscall::IrqControlGet => irq_ops::handle_irq_control_get(args),
-
-        // Timer operations
-        Syscall::TimerControlGet => timer_ops::handle_timer_control_get(args),
-        Syscall::TimerBind => timer_ops::handle_timer_bind(args),
-        Syscall::TimerArm => timer_ops::handle_timer_arm(args),
-        Syscall::TimerCancel => timer_ops::handle_timer_cancel(args),
-        Syscall::TimerClear => timer_ops::handle_timer_clear(args),
-
-        // MSI operations
-        Syscall::MsiAllocate => irq_ops::handle_msi_allocate(args, ctx),
-
-        // IOMMU operations
-        Syscall::IOSpaceCreate => iommu_ops::handle_iospace_create(args),
-        Syscall::IOSpaceMapFrame => iommu_ops::handle_iospace_map_frame(args),
-        Syscall::IOSpaceUnmapFrame => iommu_ops::handle_iospace_unmap_frame(args),
-        Syscall::IOSpaceBindStream => iommu_ops::handle_iospace_bind_stream(args),
-        Syscall::IOSpaceUnbindStream => iommu_ops::handle_iospace_unbind_stream(args),
-        Syscall::IOSpaceSetFaultHandler => iommu_ops::handle_iospace_set_fault_handler(args),
-        Syscall::DmaPoolCreate => iommu_ops::handle_dma_pool_create(args),
-        Syscall::DmaPoolAlloc => iommu_ops::handle_dma_pool_alloc(args),
-        Syscall::DmaPoolFree => iommu_ops::handle_dma_pool_free(args),
-
-        // Miscellaneous operations
-        Syscall::GetRandom => misc_ops::handle_get_random(args),
-
-        // Cache maintenance operations
-        Syscall::CacheClean => cache_ops::handle_cache_clean(args),
-        Syscall::CacheInvalidate => cache_ops::handle_cache_invalidate(args),
-        Syscall::CacheFlush => cache_ops::handle_cache_flush(args),
-
-        // Debug syscalls
+        // -- Debug syscalls
         Syscall::DebugPuts => {
             let ptr = args.arg0 as *const u8;
             let len = args.arg1 as usize;
@@ -274,12 +213,6 @@ fn probe_user_read(vaddr: u64) -> bool {
     }
     // PAR_EL1.F (bit 0) = 0 means the translation succeeded.
     par & 1 == 0
-}
-
-/// Placeholder for unimplemented syscalls.
-fn todo_syscall(name: &str) -> SyscallResult {
-    log::warn!("Syscall {} not yet implemented", name);
-    Err(SyscallError::NotSupported)
 }
 
 // -- IPC syscall handlers

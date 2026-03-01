@@ -16,7 +16,7 @@
 
 use crate::IpcBuffer;
 use crate::error::{SyscallResult, check_result};
-use crate::numbers::Syscall;
+use crate::numbers::{SELF_CAP, Syscall, method};
 
 /// Result of an IPC receive operation.
 ///
@@ -93,43 +93,6 @@ pub fn syscall2(num: Syscall, arg0: u64, arg1: u64) -> i64 {
     ret
 }
 
-/// Raw syscall with 3 arguments.
-#[inline]
-pub fn syscall3(num: Syscall, arg0: u64, arg1: u64, arg2: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Inline assembly for syscall.
-    unsafe {
-        core::arch::asm!(
-            "svc #0",
-            in("x7") num as u64,
-            inlateout("x0") arg0 as i64 => ret,
-            in("x1") arg1,
-            in("x2") arg2,
-            options(nostack)
-        );
-    }
-    ret
-}
-
-/// Raw syscall with 4 arguments.
-#[inline]
-pub fn syscall4(num: Syscall, arg0: u64, arg1: u64, arg2: u64, arg3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Inline assembly for syscall.
-    unsafe {
-        core::arch::asm!(
-            "svc #0",
-            in("x7") num as u64,
-            inlateout("x0") arg0 as i64 => ret,
-            in("x1") arg1,
-            in("x2") arg2,
-            in("x3") arg3,
-            options(nostack)
-        );
-    }
-    ret
-}
-
 /// Raw syscall with 5 arguments.
 #[inline]
 pub fn syscall5(num: Syscall, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64) -> i64 {
@@ -150,9 +113,12 @@ pub fn syscall5(num: Syscall, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: 
     ret
 }
 
-/// Raw syscall with 6 arguments.
+/// Raw syscall with 7 arguments (x0-x6 data + x7 syscall number).
+///
+/// Used by the Invoke syscall: x0=cap, x1=label, x2-x6=args, x7=32.
 #[inline]
-pub fn syscall6(
+#[allow(clippy::too_many_arguments)]
+pub fn syscall7(
     num: Syscall,
     arg0: u64,
     arg1: u64,
@@ -160,9 +126,10 @@ pub fn syscall6(
     arg3: u64,
     arg4: u64,
     arg5: u64,
+    arg6: u64,
 ) -> i64 {
     let ret: i64;
-    // SAFETY: Inline assembly for syscall.
+    // SAFETY: Inline assembly for syscall with all 7 data registers.
     unsafe {
         core::arch::asm!(
             "svc #0",
@@ -173,10 +140,45 @@ pub fn syscall6(
             in("x3") arg3,
             in("x4") arg4,
             in("x5") arg5,
+            in("x6") arg6,
             options(nostack)
         );
     }
     ret
+}
+
+// -- Invoke syscall (x7=32)
+//
+// All object-manipulation operations go through a single Invoke syscall.
+// x0 = cap_cptr, x1 = method_label, x2-x6 = args.
+// Self-invocations use x0 = 0 as a sentinel for "current thread context".
+
+/// Generic invoke: x0=cap, x1=label, x2-x6 = a0..a4.
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn invoke(cap: u64, label: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
+    syscall7(Syscall::Invoke, cap, label, a0, a1, a2, a3, a4)
+}
+
+/// Invoke with fewer trailing args (fills rest with 0).
+#[inline]
+fn invoke5(cap: u64, label: u64, a0: u64, a1: u64, a2: u64) -> i64 {
+    invoke(cap, label, a0, a1, a2, 0, 0)
+}
+
+#[inline]
+fn invoke4(cap: u64, label: u64, a0: u64, a1: u64) -> i64 {
+    invoke(cap, label, a0, a1, 0, 0, 0)
+}
+
+#[inline]
+fn invoke3(cap: u64, label: u64, a0: u64) -> i64 {
+    invoke(cap, label, a0, 0, 0, 0, 0)
+}
+
+#[inline]
+fn invoke2(cap: u64, label: u64) -> i64 {
+    invoke(cap, label, 0, 0, 0, 0, 0)
 }
 
 // === Convenience Functions ===
@@ -476,13 +478,13 @@ pub fn cap_copy(
     src_index: u64,
     src_depth: u64,
 ) -> SyscallResult {
-    check_result(syscall6(
-        Syscall::CapCopy,
+    check_result(invoke(
         dest_cnode,
+        method::cnode::COPY,
         dest_index,
-        dest_depth,
         src_cnode,
         src_index,
+        dest_depth,
         src_depth,
     ))
 }
@@ -504,13 +506,13 @@ pub fn cap_move(
     src_index: u64,
     src_depth: u64,
 ) -> SyscallResult {
-    check_result(syscall6(
-        Syscall::CapMove,
+    check_result(invoke(
         dest_cnode,
+        method::cnode::MOVE,
         dest_index,
-        dest_depth,
         src_cnode,
         src_index,
+        dest_depth,
         src_depth,
     ))
 }
@@ -542,13 +544,7 @@ pub fn cap_move(
 /// - `badge_value` - Badge value (only used if set_badge != 0)
 #[inline]
 pub fn cap_mint(dest_cnode: u64, dest_index: u64, src_cnode: u64, src_index: u64) -> SyscallResult {
-    check_result(syscall4(
-        Syscall::CapMint,
-        dest_cnode,
-        dest_index,
-        src_cnode,
-        src_index,
-    ))
+    check_result(invoke5(dest_cnode, method::cnode::MINT, dest_index, src_cnode, src_index))
 }
 
 /// Delete a capability from a slot.
@@ -563,7 +559,7 @@ pub fn cap_mint(dest_cnode: u64, dest_index: u64, src_cnode: u64, src_index: u64
 /// * `depth` - Bits to consume resolving CNode (0 = auto)
 #[inline]
 pub fn cap_delete(cnode: u64, index: u64, depth: u64) -> SyscallResult {
-    check_result(syscall3(Syscall::CapDelete, cnode, index, depth))
+    check_result(invoke4(cnode, method::cnode::DELETE, index, depth))
 }
 
 /// Revoke a capability and all its derivatives.
@@ -582,7 +578,7 @@ pub fn cap_delete(cnode: u64, index: u64, depth: u64) -> SyscallResult {
 /// On success, returns the number of capabilities revoked (including the target).
 #[inline]
 pub fn cap_revoke(cnode: u64, index: u64, depth: u64) -> SyscallResult {
-    check_result(syscall3(Syscall::CapRevoke, cnode, index, depth))
+    check_result(invoke4(cnode, method::cnode::REVOKE, index, depth))
 }
 
 /// Reduce the rights of a capability in-place.
@@ -598,13 +594,7 @@ pub fn cap_revoke(cnode: u64, index: u64, depth: u64) -> SyscallResult {
 /// * `new_rights` - New rights (must be subset of current)
 #[inline]
 pub fn cap_mutate(cnode: u64, index: u64, depth: u64, new_rights: u64) -> SyscallResult {
-    check_result(syscall4(
-        Syscall::CapMutate,
-        cnode,
-        index,
-        depth,
-        new_rights,
-    ))
+    check_result(invoke5(cnode, method::cnode::MUTATE, index, depth, new_rights))
 }
 
 /// Atomically rotate capabilities between three slots.
@@ -625,14 +615,7 @@ pub fn cap_mutate(cnode: u64, index: u64, depth: u64, new_rights: u64) -> Syscal
 /// * `depth` - Bits to consume resolving CNode (0 = auto)
 #[inline]
 pub fn cap_rotate(cnode: u64, slot1: u64, slot2: u64, slot3: u64, depth: u64) -> SyscallResult {
-    check_result(syscall5(
-        Syscall::CapRotate,
-        cnode,
-        slot1,
-        slot2,
-        slot3,
-        depth,
-    ))
+    check_result(invoke(cnode, method::cnode::ROTATE, slot1, slot2, slot3, depth, 0))
 }
 
 // -- Memory Operations
@@ -663,9 +646,9 @@ pub fn retype(
     dest_index: u64,
     count: u64,
 ) -> SyscallResult {
-    check_result(syscall6(
-        Syscall::Retype,
+    check_result(invoke(
         untyped,
+        method::untyped::RETYPE,
         object_type,
         size_bits,
         dest_cnode,
@@ -689,13 +672,14 @@ pub fn retype(
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn map_frame(vspace: u64, frame: u64, vaddr: u64, rights: u64, attr: u64) -> SyscallResult {
-    check_result(syscall5(
-        Syscall::MapFrame,
+    check_result(invoke(
         vspace,
+        method::vspace::MAP_FRAME,
         frame,
         vaddr,
         rights,
         attr,
+        0,
     ))
 }
 
@@ -710,7 +694,7 @@ pub fn map_frame(vspace: u64, frame: u64, vaddr: u64, rights: u64, attr: u64) ->
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn unmap_frame(frame: u64) -> SyscallResult {
-    check_result(syscall1(Syscall::UnmapFrame, frame))
+    check_result(invoke2(frame, method::vspace::UNMAP_FRAME))
 }
 
 /// Map a page table into a VSpace.
@@ -727,13 +711,7 @@ pub fn unmap_frame(frame: u64) -> SyscallResult {
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn map_page_table(vspace: u64, page_table: u64, vaddr: u64, level: u64) -> SyscallResult {
-    check_result(syscall4(
-        Syscall::MapPageTable,
-        vspace,
-        page_table,
-        vaddr,
-        level,
-    ))
+    check_result(invoke5(vspace, method::vspace::MAP_PAGE_TABLE, page_table, vaddr, level))
 }
 
 /// Assign an ASID from a pool to a VSpace.
@@ -748,7 +726,7 @@ pub fn map_page_table(vspace: u64, page_table: u64, vaddr: u64, level: u64) -> S
 /// The assigned ASID on success, negative error code on failure.
 #[inline]
 pub fn asid_pool_assign(asid_pool: u64, vspace: u64) -> SyscallResult {
-    check_result(syscall2(Syscall::AsidPoolAssign, asid_pool, vspace))
+    check_result(invoke3(asid_pool, method::asid_pool::ASSIGN, vspace))
 }
 
 /// Write data from userspace into a frame capability.
@@ -769,13 +747,7 @@ pub fn asid_pool_assign(asid_pool: u64, vspace: u64) -> SyscallResult {
 /// Number of bytes written on success, negative error code on failure.
 #[inline]
 pub fn frame_write(frame: u64, offset: u64, src: *const u8, len: usize) -> SyscallResult {
-    check_result(syscall4(
-        Syscall::FrameWrite,
-        frame,
-        offset,
-        src as u64,
-        len as u64,
-    ))
+    check_result(invoke5(frame, method::frame::WRITE, offset, src as u64, len as u64))
 }
 
 /// Get the physical address of a frame.
@@ -792,7 +764,7 @@ pub fn frame_write(frame: u64, offset: u64, src: *const u8, len: usize) -> Sysca
 /// Physical address of the frame on success, or error code on failure.
 #[inline]
 pub fn frame_get_phys(frame: u64) -> SyscallResult {
-    check_result(syscall1(Syscall::FrameGetPhys, frame))
+    check_result(invoke2(frame, method::frame::GET_PHYS))
 }
 
 // -- TCB Operations
@@ -823,9 +795,9 @@ pub fn tcb_configure(
     ipc_buf_addr: u64,
     ipc_buf_frame: u64,
 ) -> SyscallResult {
-    check_result(syscall6(
-        Syscall::TcbConfigure,
+    check_result(invoke(
         tcb,
+        method::tcb::CONFIGURE,
         fault_ep,
         cspace,
         vspace,
@@ -866,13 +838,14 @@ pub fn tcb_write_registers(tcb: u64, pc: u64, sp: u64, arg0: u64) -> SyscallResu
     // x2: arch flags (reserved, must be 0)
     // x3: number of registers
     // x4: buffer address
-    check_result(syscall5(
-        Syscall::TcbWriteRegisters,
+    check_result(invoke(
         tcb,
+        method::tcb::WRITE_REGS,
         0,                    // resume = false
         0,                    // arch_flags = 0
         34,                   // count = 34 registers
         regs.as_ptr() as u64, // buffer address
+        0,
     ))
 }
 
@@ -889,7 +862,7 @@ pub fn tcb_write_registers(tcb: u64, pc: u64, sp: u64, arg0: u64) -> SyscallResu
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn tcb_resume(tcb: u64) -> SyscallResult {
-    check_result(syscall1(Syscall::TcbResume, tcb))
+    check_result(invoke2(tcb, method::tcb::RESUME))
 }
 
 /// Suspend a TCB, removing it from the scheduler.
@@ -903,7 +876,7 @@ pub fn tcb_resume(tcb: u64) -> SyscallResult {
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn tcb_suspend(tcb: u64) -> SyscallResult {
-    check_result(syscall1(Syscall::TcbSuspend, tcb))
+    check_result(invoke2(tcb, method::tcb::SUSPEND))
 }
 
 /// Exit the current thread with an exit code.
@@ -919,7 +892,7 @@ pub fn tcb_suspend(tcb: u64) -> SyscallResult {
 /// * `code` - Exit code (conventionally 0 = success, non-zero = failure)
 #[inline]
 pub fn tcb_exit(code: i32) -> ! {
-    syscall1(Syscall::TcbExit, code as u64);
+    invoke3(SELF_CAP, method::current::EXIT, code as u64);
     // The syscall should never return, but in case of an error,
     // loop indefinitely (the kernel should have removed us from the scheduler)
     loop {
@@ -941,7 +914,7 @@ pub fn tcb_exit(code: i32) -> ! {
 /// Returns `Ok(())` on success, or an error if the syscall fails.
 #[inline]
 pub fn tcb_sleep(nanoseconds: u64) -> SyscallResult {
-    check_result(syscall1(Syscall::TcbSleep, nanoseconds))
+    check_result(invoke3(SELF_CAP, method::current::SLEEP, nanoseconds))
 }
 
 /// Bind a notification to a TCB for combined IPC + notification waiting.
@@ -956,7 +929,7 @@ pub fn tcb_sleep(nanoseconds: u64) -> SyscallResult {
 /// * `notif` - CPtr to the notification capability (requires READ right), or 0 to unbind
 #[inline]
 pub fn tcb_bind_notification(tcb: u64, notif: u64) -> SyscallResult {
-    check_result(syscall2(Syscall::TcbBindNotification, tcb, notif))
+    check_result(invoke3(tcb, method::tcb::BIND_NOTIF, notif))
 }
 
 // -- IRQ Operations
@@ -985,13 +958,14 @@ pub fn irq_control_get(
     dest_index: u64,
     depth: u64,
 ) -> SyscallResult {
-    check_result(syscall5(
-        Syscall::IrqControlGet,
+    check_result(invoke(
         irq_control,
+        method::irq_control::GET,
         irq as u64,
         dest_cnode,
         dest_index,
         depth,
+        0,
     ))
 }
 
@@ -1011,12 +985,7 @@ pub fn irq_control_get(
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn irq_set_handler(irq_handler: u64, notification: u64, badge: u64) -> SyscallResult {
-    check_result(syscall3(
-        Syscall::IrqSetHandler,
-        irq_handler,
-        notification,
-        badge,
-    ))
+    check_result(invoke4(irq_handler, method::irq_handler::SET_HANDLER, notification, badge))
 }
 
 /// Acknowledge an IRQ, allowing it to fire again.
@@ -1034,7 +1003,7 @@ pub fn irq_set_handler(irq_handler: u64, notification: u64, badge: u64) -> Sysca
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn irq_ack(irq_handler: u64) -> SyscallResult {
-    check_result(syscall1(Syscall::IrqAck, irq_handler))
+    check_result(invoke2(irq_handler, method::irq_handler::ACK))
 }
 
 /// Unbind an IRQ handler from its notification.
@@ -1051,7 +1020,7 @@ pub fn irq_ack(irq_handler: u64) -> SyscallResult {
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn irq_clear_handler(irq_handler: u64) -> SyscallResult {
-    check_result(syscall1(Syscall::IrqClearHandler, irq_handler))
+    check_result(invoke2(irq_handler, method::irq_handler::CLEAR_HANDLER))
 }
 
 /// Result of MSI allocation.
@@ -1088,14 +1057,16 @@ pub fn msi_allocate(
     let x1: u64;
     let x2: u64;
     let x3: u64;
-    // SAFETY: Inline assembly for syscall. Capture all return registers.
+    // SAFETY: Inline assembly for Invoke syscall with multi-return.
+    // x0=irq_control, x1=MSI_ALLOCATE label, x2=vector_count, x7=Invoke.
+    // Returns: x0=result, x1=target_addr, x2=base_spi, x3=actual_count.
     unsafe {
         core::arch::asm!(
             "svc #0",
-            in("x7") Syscall::MsiAllocate as u64,
+            in("x7") Syscall::Invoke as u64,
             inlateout("x0") irq_control as i64 => x0,
-            inlateout("x1") vector_count as u64 => x1,
-            lateout("x2") x2,
+            inlateout("x1") method::irq_control::MSI_ALLOCATE => x1,
+            inlateout("x2") vector_count as u64 => x2,
             lateout("x3") x3,
             options(nostack)
         );
@@ -1138,13 +1109,14 @@ pub fn iospace_create(
     dest_index: u64,
     dest_depth: u64,
 ) -> SyscallResult {
-    check_result(syscall5(
-        Syscall::IOSpaceCreate,
+    check_result(invoke(
         smmu_control,
+        method::smmu_control::CREATE_IOSPACE,
         untyped,
         dest_cnode,
         dest_index,
         dest_depth,
+        0,
     ))
 }
 
@@ -1165,13 +1137,7 @@ pub fn iospace_create(
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn iospace_map_frame(iospace: u64, frame: u64, iova: u64, rights: u64) -> SyscallResult {
-    check_result(syscall4(
-        Syscall::IOSpaceMapFrame,
-        iospace,
-        frame,
-        iova,
-        rights,
-    ))
+    check_result(invoke5(iospace, method::iospace::MAP_FRAME, frame, iova, rights))
 }
 
 /// Unmap a frame from an IOSpace.
@@ -1188,7 +1154,7 @@ pub fn iospace_map_frame(iospace: u64, frame: u64, iova: u64, rights: u64) -> Sy
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn iospace_unmap_frame(iospace: u64, iova: u64) -> SyscallResult {
-    check_result(syscall2(Syscall::IOSpaceUnmapFrame, iospace, iova))
+    check_result(invoke3(iospace, method::iospace::UNMAP_FRAME, iova))
 }
 
 /// Bind a PCIe stream ID to an IOSpace.
@@ -1208,12 +1174,7 @@ pub fn iospace_unmap_frame(iospace: u64, iova: u64) -> SyscallResult {
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn iospace_bind_stream(iospace: u64, smmu_control: u64, stream_id: u32) -> SyscallResult {
-    check_result(syscall3(
-        Syscall::IOSpaceBindStream,
-        iospace,
-        smmu_control,
-        stream_id as u64,
-    ))
+    check_result(invoke4(iospace, method::iospace::BIND_STREAM, smmu_control, stream_id as u64))
 }
 
 /// Unbind a PCIe stream ID from an IOSpace.
@@ -1231,12 +1192,7 @@ pub fn iospace_bind_stream(iospace: u64, smmu_control: u64, stream_id: u32) -> S
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn iospace_unbind_stream(iospace: u64, smmu_control: u64, stream_id: u32) -> SyscallResult {
-    check_result(syscall3(
-        Syscall::IOSpaceUnbindStream,
-        iospace,
-        smmu_control,
-        stream_id as u64,
-    ))
+    check_result(invoke4(iospace, method::iospace::UNBIND_STREAM, smmu_control, stream_id as u64))
 }
 
 /// Create a DmaPool for IOVA allocation.
@@ -1265,9 +1221,9 @@ pub fn dma_pool_create(
     dest_index: u64,
     dest_depth: u64,
 ) -> SyscallResult {
-    check_result(syscall6(
-        Syscall::DmaPoolCreate,
+    check_result(invoke(
         iospace,
+        method::iospace::CREATE_DMA_POOL,
         iova_base,
         iova_size,
         dest_cnode,
@@ -1297,7 +1253,7 @@ pub fn dma_pool_alloc(
     size: u64,
     alignment: u64,
 ) -> Result<u64, crate::error::SyscallError> {
-    let result = syscall3(Syscall::DmaPoolAlloc, dma_pool, size, alignment);
+    let result = invoke4(dma_pool, method::dma_pool::ALLOC, size, alignment);
     if result < 0 {
         Err(crate::error::SyscallError::from_i64(result)
             .unwrap_or(crate::error::SyscallError::InvalidSyscall))
@@ -1322,7 +1278,7 @@ pub fn dma_pool_alloc(
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn dma_pool_free(dma_pool: u64, iova: u64, size: u64) -> SyscallResult {
-    check_result(syscall3(Syscall::DmaPoolFree, dma_pool, iova, size))
+    check_result(invoke4(dma_pool, method::dma_pool::FREE, iova, size))
 }
 
 // -- IPC Buffer Helpers
@@ -1431,11 +1387,7 @@ pub fn get_random(buf: &mut [u8]) -> SyscallResult {
     if buf.len() > 256 {
         return Err(crate::error::SyscallError::InvalidArg);
     }
-    check_result(syscall2(
-        Syscall::GetRandom,
-        buf.as_mut_ptr() as u64,
-        buf.len() as u64,
-    ))
+    check_result(invoke4(SELF_CAP, method::current::GET_RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64))
 }
 
 // -- Cache Maintenance Operations
@@ -1470,7 +1422,7 @@ pub enum DmaDirection {
 /// * `Range` - Address is outside userspace range
 #[inline]
 pub fn cache_clean(vaddr: u64, size: usize) -> SyscallResult {
-    check_result(syscall2(Syscall::CacheClean, vaddr, size as u64))
+    check_result(invoke4(SELF_CAP, method::current::CACHE_CLEAN, vaddr, size as u64))
 }
 
 /// Invalidate cache range (discard cache lines without writing back).
@@ -1497,7 +1449,7 @@ pub fn cache_clean(vaddr: u64, size: usize) -> SyscallResult {
 /// Typically used after a device has written new data via DMA.
 #[inline]
 pub fn cache_invalidate(vaddr: u64, size: usize) -> SyscallResult {
-    check_result(syscall2(Syscall::CacheInvalidate, vaddr, size as u64))
+    check_result(invoke4(SELF_CAP, method::current::CACHE_INVALIDATE, vaddr, size as u64))
 }
 
 /// Flush cache range (clean + invalidate).
@@ -1519,7 +1471,7 @@ pub fn cache_invalidate(vaddr: u64, size: usize) -> SyscallResult {
 /// * `Range` - Address is outside userspace range
 #[inline]
 pub fn cache_flush(vaddr: u64, size: usize) -> SyscallResult {
-    check_result(syscall2(Syscall::CacheFlush, vaddr, size as u64))
+    check_result(invoke4(SELF_CAP, method::current::CACHE_FLUSH, vaddr, size as u64))
 }
 
 /// Synchronise cache for DMA with direction awareness.
