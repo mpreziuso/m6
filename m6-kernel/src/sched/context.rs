@@ -116,12 +116,13 @@ pub fn switch_vspace(vspace_ref: Option<ObjectRef>) {
             //    switching to a newly created VSpace
             invalidate_tlb_by_asid(asid);
 
-            // DSB ensures all prior page table writes are visible to the
-            // hardware page table walker before we switch to the new TTBR0.
-            // Without this, the walker might see stale/invalid entries.
+            // DSB ISH (full inner-shareable) ensures all prior loads and stores
+            // are visible to the hardware page-table walker before TTBR0 is
+            // written.  The weaker ISHST (store-only) is insufficient per the
+            // ARM ARM D8.10: outstanding loads may still be in flight.
             // SAFETY: DSB is always safe to execute.
             unsafe {
-                core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
             }
 
             mmu().set_ttbr0(ttbr0_with_asid);

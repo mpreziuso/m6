@@ -39,7 +39,7 @@ pub fn do_send(
     // Determine action inside endpoint lock, execute outside
     enum Action {
         DeliverTo(ObjectRef),
-        BlockInSendQueue,
+        BlockInSendQueue { old_tail: ObjectRef },
         WouldBlock,
     }
 
@@ -57,7 +57,7 @@ pub fn do_send(
                 if !blocking {
                     Action::WouldBlock
                 } else {
-                    Action::BlockInSendQueue
+                    Action::BlockInSendQueue { old_tail: endpoint.queue_tail }
                 }
             }
         }
@@ -106,39 +106,69 @@ pub fn do_send(
             Ok(true)
         }
 
-        Action::BlockInSendQueue => {
-            // Store message in sender's TCB
+        Action::BlockInSendQueue { old_tail } => {
+            // Store message and block sender before touching the queue.
             store_pending_message(sender_ref, msg, badge);
-
-            // Block sender
             block_thread(sender_ref, ep_ref, ThreadState::BlockedOnSend);
 
-            // Get current queue tail
-            let old_tail = object_table::with_endpoint_mut(ep_ref, |endpoint| endpoint.queue_tail)
-                .ok_or(SyscallError::InvalidCap)?;
-
-            // Set up sender's queue links
+            // Set up sender's TCB queue links using old_tail captured atomically
+            // with the state decision above.
             let _: () = object_table::with_tcb_mut(sender_ref, |tcb| {
                 tcb.ipc_prev = old_tail;
                 tcb.ipc_next = ObjectRef::NULL;
             });
 
-            // Link old tail to sender
             if old_tail.is_valid() {
                 let _: () = object_table::with_tcb_mut(old_tail, |old_tail_tcb| {
                     old_tail_tcb.ipc_next = sender_ref;
                 });
             }
 
-            // Update endpoint queue
+            // Commit to the endpoint. An IRQ between the initial state read and here
+            // could have changed the endpoint to RecvQueue. Handle both cases.
             object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                endpoint.state = EndpointState::SendQueue;
-                if old_tail.is_valid() {
-                    endpoint.queue_tail = sender_ref;
-                } else {
-                    // Queue was empty
-                    endpoint.queue_head = sender_ref;
-                    endpoint.queue_tail = sender_ref;
+                match endpoint.state {
+                    EndpointState::Idle | EndpointState::SendQueue => {
+                        // No concurrent receiver appeared — enqueue normally.
+                        endpoint.state = EndpointState::SendQueue;
+                        if old_tail.is_valid() {
+                            endpoint.queue_tail = sender_ref;
+                        } else {
+                            endpoint.queue_head = sender_ref;
+                            endpoint.queue_tail = sender_ref;
+                        }
+                    }
+                    EndpointState::RecvQueue => {
+                        // A receiver arrived while we were setting up TCB links.
+                        // Undo the TCB link to old_tail — leave old_tail->ipc_next
+                        // as sender_ref for now; the receiver path will clear it
+                        // when it dequeues us after we transition to Running below.
+                        // Deliver the message directly to the receiver instead.
+                        let receiver_ref = endpoint.queue_head;
+                        if receiver_ref.is_valid() {
+                            // Dequeue receiver
+                            let next: ObjectRef = object_table::with_tcb_mut(receiver_ref, |tcb| {
+                                let n = tcb.ipc_next;
+                                tcb.clear_ipc_links();
+                                n
+                            });
+                            endpoint.queue_head = next;
+                            if !next.is_valid() {
+                                endpoint.queue_tail = ObjectRef::NULL;
+                                endpoint.state = EndpointState::Idle;
+                            }
+                            // Unblock sender immediately (message delivered)
+                            object_table::with_tcb_mut(sender_ref, |tcb| {
+                                tcb.tcb.state = ThreadState::Running;
+                                tcb.ipc_blocked_on = ObjectRef::NULL;
+                                tcb.clear_ipc_state();
+                            });
+                            crate::sched::insert_task(sender_ref);
+                            // Transfer message and wake receiver
+                            transfer_message(receiver_ref, msg, badge);
+                            wake_thread(receiver_ref);
+                        }
+                    }
                 }
             });
 
@@ -189,7 +219,7 @@ pub fn do_recv(
     // Determine action inside endpoint lock, execute outside
     enum Action {
         ReceiveFrom(ObjectRef),
-        Block,
+        Block { old_tail: ObjectRef },
         WouldBlock,
     }
 
@@ -209,7 +239,7 @@ pub fn do_recv(
                 if !blocking {
                     Action::WouldBlock
                 } else {
-                    Action::Block
+                    Action::Block { old_tail: endpoint.queue_tail }
                 }
             }
         }
@@ -285,38 +315,63 @@ pub fn do_recv(
             Ok(Some((badge, msg)))
         }
 
-        Action::Block => {
-            // Block the receiver
+        Action::Block { old_tail } => {
             block_thread(receiver_ref, ep_ref, ThreadState::BlockedOnRecv);
 
-            // Get current queue state
-            let (_old_head, old_tail) = object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                (endpoint.queue_head, endpoint.queue_tail)
-            })
-            .ok_or(SyscallError::InvalidCap)?;
-
-            // Update TCB queue links (this locks TCBs, not endpoint)
+            // Set up receiver's TCB queue links using old_tail captured atomically
+            // with the state decision above.
             let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
                 tcb.ipc_prev = old_tail;
                 tcb.ipc_next = ObjectRef::NULL;
             });
 
             if old_tail.is_valid() {
-                // Link old tail to new entry
                 let _: () = object_table::with_tcb_mut(old_tail, |old_tail_tcb| {
                     old_tail_tcb.ipc_next = receiver_ref;
                 });
             }
 
-            // Now update endpoint with new queue state
+            // Commit to the endpoint. An IRQ between the initial state read and here
+            // could have changed the endpoint to SendQueue. Handle both cases.
             object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                endpoint.state = EndpointState::RecvQueue;
-                if old_tail.is_valid() {
-                    endpoint.queue_tail = receiver_ref;
-                } else {
-                    // Queue was empty - new entry is both head and tail
-                    endpoint.queue_head = receiver_ref;
-                    endpoint.queue_tail = receiver_ref;
+                match endpoint.state {
+                    EndpointState::Idle | EndpointState::RecvQueue => {
+                        // No concurrent sender appeared — enqueue normally.
+                        endpoint.state = EndpointState::RecvQueue;
+                        if old_tail.is_valid() {
+                            endpoint.queue_tail = receiver_ref;
+                        } else {
+                            endpoint.queue_head = receiver_ref;
+                            endpoint.queue_tail = receiver_ref;
+                        }
+                    }
+                    EndpointState::SendQueue => {
+                        // A sender arrived concurrently. Deliver immediately.
+                        let sender_ref = endpoint.queue_head;
+                        if sender_ref.is_valid() {
+                            let next: ObjectRef = object_table::with_tcb_mut(sender_ref, |tcb| {
+                                let n = tcb.ipc_next;
+                                tcb.clear_ipc_links();
+                                n
+                            });
+                            endpoint.queue_head = next;
+                            if !next.is_valid() {
+                                endpoint.queue_tail = ObjectRef::NULL;
+                                endpoint.state = EndpointState::Idle;
+                            }
+                            // Unblock receiver
+                            object_table::with_tcb_mut(receiver_ref, |tcb| {
+                                tcb.tcb.state = ThreadState::Running;
+                                tcb.ipc_blocked_on = ObjectRef::NULL;
+                                tcb.clear_ipc_state();
+                            });
+                            crate::sched::insert_task(receiver_ref);
+                            // Transfer message from sender
+                            let (pending_msg, badge) = get_pending_message(sender_ref);
+                            transfer_message(receiver_ref, &pending_msg, badge);
+                            wake_thread(sender_ref);
+                        }
+                    }
                 }
             })
             .ok_or(SyscallError::InvalidCap)?;
@@ -363,7 +418,7 @@ pub fn do_call(
     // Determine action inside endpoint lock, execute outside
     enum Action {
         DeliverTo(ObjectRef),
-        BlockInSendQueue,
+        BlockInSendQueue { old_tail: ObjectRef },
     }
 
     let action = object_table::with_endpoint_mut(ep_ref, |endpoint| {
@@ -376,7 +431,9 @@ pub fn do_call(
                 }
                 Action::DeliverTo(receiver_ref)
             }
-            EndpointState::Idle | EndpointState::SendQueue => Action::BlockInSendQueue,
+            EndpointState::Idle | EndpointState::SendQueue => {
+                Action::BlockInSendQueue { old_tail: endpoint.queue_tail }
+            }
         }
     })
     .ok_or(SyscallError::InvalidCap)?;
@@ -431,37 +488,28 @@ pub fn do_call(
             Ok(true)
         }
 
-        Action::BlockInSendQueue => {
-            // Store message in caller's TCB
+        Action::BlockInSendQueue { old_tail } => {
             store_pending_message(caller_ref, msg, badge);
-
-            // Block caller
             block_thread(caller_ref, ep_ref, ThreadState::BlockedOnSend);
 
-            // Get current queue tail
-            let old_tail = object_table::with_endpoint_mut(ep_ref, |endpoint| endpoint.queue_tail)
-                .ok_or(SyscallError::InvalidCap)?;
-
-            // Set up caller's queue links
+            // Set up caller's TCB queue links using old_tail captured atomically
+            // with the state decision above.
             let _: () = object_table::with_tcb_mut(caller_ref, |tcb| {
                 tcb.ipc_prev = old_tail;
                 tcb.ipc_next = ObjectRef::NULL;
             });
 
-            // Link old tail to caller
             if old_tail.is_valid() {
                 let _: () = object_table::with_tcb_mut(old_tail, |old_tail_tcb| {
                     old_tail_tcb.ipc_next = caller_ref;
                 });
             }
 
-            // Update endpoint queue
             object_table::with_endpoint_mut(ep_ref, |endpoint| {
                 endpoint.state = EndpointState::SendQueue;
                 if old_tail.is_valid() {
                     endpoint.queue_tail = caller_ref;
                 } else {
-                    // Queue was empty
                     endpoint.queue_head = caller_ref;
                     endpoint.queue_tail = caller_ref;
                 }

@@ -25,6 +25,16 @@ pub struct ExceptionContext {
     pub esr: u64,
     /// Fault Address Register
     pub far: u64,
+    /// Thread pointer register for TLS (TPIDR_EL0)
+    pub tpidr_el0: u64,
+    /// Floating-point control register
+    pub fpcr: u64,
+    /// Floating-point status register
+    pub fpsr: u64,
+    /// Explicit padding so fp_regs is 16-byte aligned (offset 320)
+    _fp_pad: u64,
+    /// FP/NEON registers V0-V31
+    pub fp_regs: [u128; 32],
 }
 
 impl ExceptionContext {
@@ -181,18 +191,23 @@ fn default_serror_handler(ctx: &mut ExceptionContext) {
 /// This stub saves all context and branches to a continuation handler.
 /// ARM64 exception vectors require each entry to be exactly 128 bytes.
 ///
-/// Stack frame layout (36 * 8 = 288 bytes):
+/// Stack frame layout (832 bytes):
 /// - x0-x30 (31 regs): offsets 0-240 (using stp pairs + str for x30)
-/// - SP_EL0: offset 248 (31 * 8)
-/// - ELR_EL1: offset 256 (32 * 8)
-/// - SPSR_EL1: offset 264 (33 * 8)
-/// - ESR_EL1: offset 272 (34 * 8)
-/// - FAR_EL1: offset 280 (35 * 8)
+/// - SP_EL0:    offset 248
+/// - ELR_EL1:   offset 256
+/// - SPSR_EL1:  offset 264
+/// - ESR_EL1:   offset 272
+/// - FAR_EL1:   offset 280
+/// - TPIDR_EL0: offset 288
+/// - FPCR:      offset 296  (saved in continuation)
+/// - FPSR:      offset 304  (saved in continuation)
+/// - _fp_pad:   offset 312  (padding)
+/// - V0-V31:    offset 320  (saved in continuation)
 macro_rules! exception_stub {
     ($continuation:ident) => {
         concat!(
-            // Allocate 36 * 8 = 288 bytes for full exception context (1 instruction)
-            "sub sp, sp, #(36 * 8)\n",
+            // Allocate 832 bytes for full exception context (1 instruction)
+            "sub sp, sp, #832\n",
             // Save all general purpose registers (16 instructions)
             "stp x0, x1, [sp, #(0 * 16)]\n",
             "stp x2, x3, [sp, #(1 * 16)]\n",
@@ -210,18 +225,19 @@ macro_rules! exception_stub {
             "stp x26, x27, [sp, #(13 * 16)]\n",
             "stp x28, x29, [sp, #(14 * 16)]\n",
             "str x30, [sp, #(15 * 16)]\n",
-            // Read system registers (5 instructions)
+            // Read system registers (6 instructions)
             "mrs x0, sp_el0\n",
             "mrs x1, elr_el1\n",
             "mrs x2, spsr_el1\n",
             "mrs x3, esr_el1\n",
             "mrs x4, far_el1\n",
+            "mrs x5, tpidr_el0\n",
             // Save system registers (3 instructions)
-            "stp x0, x1, [sp, #(31 * 8)]\n",
-            "stp x2, x3, [sp, #(33 * 8)]\n",
-            "str x4, [sp, #(35 * 8)]\n",
+            "stp x0, x1, [sp, #248]\n",   // sp_el0, elr_el1
+            "stp x2, x3, [sp, #264]\n",   // spsr_el1, esr_el1
+            "stp x4, x5, [sp, #280]\n",   // far_el1, tpidr_el0
             // Branch to continuation handler (1 instruction)
-            // Total: 1 + 16 + 5 + 3 + 1 = 26 instructions
+            // Total: 1 + 16 + 6 + 3 + 1 = 27 instructions = 108 bytes
             "b ",
             stringify!($continuation),
             "\n",
@@ -236,17 +252,59 @@ macro_rules! exception_stub {
 macro_rules! exception_continuation {
     ($handler:ident) => {
         concat!(
+            // Save FP/NEON registers (19 instructions)
+            "mrs x0, fpcr\n",
+            "mrs x1, fpsr\n",
+            "stp x0, x1, [sp, #296]\n",       // fpcr=296, fpsr=304
+            "stp q0, q1, [sp, #320]\n",
+            "stp q2, q3, [sp, #352]\n",
+            "stp q4, q5, [sp, #384]\n",
+            "stp q6, q7, [sp, #416]\n",
+            "stp q8, q9, [sp, #448]\n",
+            "stp q10, q11, [sp, #480]\n",
+            "stp q12, q13, [sp, #512]\n",
+            "stp q14, q15, [sp, #544]\n",
+            "stp q16, q17, [sp, #576]\n",
+            "stp q18, q19, [sp, #608]\n",
+            "stp q20, q21, [sp, #640]\n",
+            "stp q22, q23, [sp, #672]\n",
+            "stp q24, q25, [sp, #704]\n",
+            "stp q26, q27, [sp, #736]\n",
+            "stp q28, q29, [sp, #768]\n",
+            "stp q30, q31, [sp, #800]\n",
             // Call handler with context pointer
             "mov x0, sp\n",
             "bl ",
             stringify!($handler),
             "\n",
-            // Restore SP, ELR, SPSR
-            "ldp x0, x1, [sp, #(31 * 8)]\n",
-            "ldr x2, [sp, #(33 * 8)]\n",
+            // Restore SP, ELR, SPSR, TPIDR_EL0
+            "ldp x0, x1, [sp, #248]\n",   // sp_el0, elr_el1
+            "ldp x2, x3, [sp, #264]\n",   // spsr_el1, esr_el1 (x3 discarded — esr is read-only)
+            "ldp x4, x5, [sp, #280]\n",   // far_el1, tpidr_el0 (x4 discarded — far is read-only)
             "msr sp_el0, x0\n",
             "msr elr_el1, x1\n",
             "msr spsr_el1, x2\n",
+            "msr tpidr_el0, x5\n",
+            // Restore FP/NEON registers (reuse x0-x1 as scratch; GPRs not yet restored)
+            "ldp x0, x1, [sp, #296]\n",   // fpcr, fpsr
+            "msr fpcr, x0\n",
+            "msr fpsr, x1\n",
+            "ldp q0, q1, [sp, #320]\n",
+            "ldp q2, q3, [sp, #352]\n",
+            "ldp q4, q5, [sp, #384]\n",
+            "ldp q6, q7, [sp, #416]\n",
+            "ldp q8, q9, [sp, #448]\n",
+            "ldp q10, q11, [sp, #480]\n",
+            "ldp q12, q13, [sp, #512]\n",
+            "ldp q14, q15, [sp, #544]\n",
+            "ldp q16, q17, [sp, #576]\n",
+            "ldp q18, q19, [sp, #608]\n",
+            "ldp q20, q21, [sp, #640]\n",
+            "ldp q22, q23, [sp, #672]\n",
+            "ldp q24, q25, [sp, #704]\n",
+            "ldp q26, q27, [sp, #736]\n",
+            "ldp q28, q29, [sp, #768]\n",
+            "ldp q30, q31, [sp, #800]\n",
             // Restore general purpose registers
             "ldp x0, x1, [sp, #(0 * 16)]\n",
             "ldp x2, x3, [sp, #(1 * 16)]\n",
@@ -264,7 +322,7 @@ macro_rules! exception_continuation {
             "ldp x26, x27, [sp, #(13 * 16)]\n",
             "ldp x28, x29, [sp, #(14 * 16)]\n",
             "ldr x30, [sp, #(15 * 16)]\n",
-            "add sp, sp, #(36 * 8)\n",
+            "add sp, sp, #832\n",
             "eret\n"
         )
     };
