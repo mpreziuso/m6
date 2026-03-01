@@ -34,4 +34,6 @@ pub use error::SyscallError;
 pub use invoke::IpcRecvResult;
 pub use ipc_buffer::{IPC_BUFFER_ADDR, IPC_BUFFER_SIZE, IpcBuffer, MintArgs};
 pub use m6_cap::root_slots;
+pub use numbers::SELF_CAP;
 pub use numbers::Syscall;
+pub use numbers::method;
