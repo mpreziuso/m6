@@ -37,7 +37,10 @@ mod ipc;
 #[path = "../usb_xhci/xhci.rs"]
 mod xhci;
 
-use m6_syscall::invoke::{frame_get_phys, irq_ack, irq_set_handler, map_frame, recv, reply_recv, sched_yield};
+use m6_syscall::invoke::{
+    frame_get_phys, irq_ack, irq_set_handler, map_frame, recv, reply_recv, sched_yield, signal,
+    tcb_bind_notification,
+};
 
 use ipc::{request, response, status};
 
@@ -125,6 +128,20 @@ fn check_dma_buffers(controller_idx: usize) -> Option<DmaBuffers> {
         Ok(paddr) => paddr as u64,
         Err(_) => return None,
     };
+
+    // Verify physical contiguity of all DMA buffer frames.
+    // The xHCI driver assumes base_paddr + offset for all DMA addresses.
+    // If frames aren't physically contiguous, interrupt endpoint rings at
+    // offset 0x8000+ would point to wrong physical memory.
+    for i in 1..DMA_BUFFER_COUNT {
+        let frame_cap = dma_buffer_frame(i);
+        if let Ok(paddr) = frame_get_phys(frame_cap) {
+            let expected = base_paddr + (i as u64) * PAGE_SIZE;
+            if paddr as u64 != expected {
+                return None;
+            }
+        }
+    }
 
     // Zero all DMA buffer pages
     for i in 0..DMA_BUFFER_COUNT {
@@ -262,8 +279,9 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
 
     let ctrl_addr = layout.mmio + page_offset;
 
-    // Set up IRQ handling
+    // Set up IRQ handling and bind notification to TCB for combined wait
     setup_irq();
+    let _ = tcb_bind_notification(cptr(1), IRQ_NOTIF);
 
     // Verify hardware is responding
     const GSNPSID_OFFSET: u64 = 0xC120;
@@ -531,7 +549,23 @@ fn try_initialize_xhci(device: &mut Dwc3Device) -> Result<(), &'static str> {
     device.xhci_ctrl.clear_error_status();
 
     // Re-apply DWC3 global registers — HCRST may reset them to defaults.
+    // ALL registers listed in CLAUDE.md memory must be re-applied.
     let ctrl_addr = device.xhci_ctrl.mmio_base;
+
+    // GCTL — critical: SCALEDOWN must be clear for correct periodic scheduler timing
+    {
+        let reg = unsafe { core::ptr::read_volatile((ctrl_addr + 0xC110) as *const u32) };
+        let mut expected = reg;
+        expected |= 1u32 << 0;              // DSBLCLKGTNG: disable clock gating
+        expected &= !(1u32 << 1);           // Clear GBLHIBERNATIONEN
+        expected &= !(0x3u32 << 4);         // Clear SCALEDOWN
+        expected &= !(0x3u32 << 12);        // Clear PRTCAP
+        expected |= 0x1u32 << 12;           // Set PRTCAP = Host
+        if expected != reg {
+            unsafe { core::ptr::write_volatile((ctrl_addr + 0xC110) as *mut u32, expected); }
+            for _ in 0..10_000 { core::hint::spin_loop(); }
+        }
+    }
 
     // GUSB2PHYCFG
     {
@@ -576,6 +610,16 @@ fn try_initialize_xhci(device: &mut Dwc3Device) -> Result<(), &'static str> {
         }
     }
 
+    // GUSB3PIPECTL — clear SUSPHY to prevent USB3 PHY from suspending
+    {
+        let reg = unsafe { core::ptr::read_volatile((ctrl_addr + 0xC2C0) as *const u32) };
+        if (reg & (1u32 << 17)) != 0 {
+            let expected = reg & !(1u32 << 17);
+            unsafe { core::ptr::write_volatile((ctrl_addr + 0xC2C0) as *mut u32, expected); }
+            for _ in 0..50_000 { core::hint::spin_loop(); }
+        }
+    }
+
     // Set up DWC3 event buffer
     {
         const EVT_BUF_OFFSET: u64 = 0xB000;
@@ -589,7 +633,11 @@ fn try_initialize_xhci(device: &mut Dwc3Device) -> Result<(), &'static str> {
         unsafe {
             core::ptr::write_volatile((ctrl_addr + 0xC400) as *mut u32, evt_iova as u32);
             core::ptr::write_volatile((ctrl_addr + 0xC404) as *mut u32, (evt_iova >> 32) as u32);
-            core::ptr::write_volatile((ctrl_addr + 0xC408) as *mut u32, EVT_BUF_SIZE);
+            // Mask DWC3 internal events (bit 31) while keeping the buffer.
+            // Without the mask, DWC3 events trigger IRQs continuously,
+            // creating a flood that monopolises the CPU and starves other
+            // tasks. xHCI interrupter events still trigger IRQs via IMAN.
+            core::ptr::write_volatile((ctrl_addr + 0xC408) as *mut u32, EVT_BUF_SIZE | (1u32 << 31));
             let cnt = core::ptr::read_volatile((ctrl_addr + 0xC40C) as *const u32);
             core::ptr::write_volatile((ctrl_addr + 0xC40C) as *mut u32, cnt);
         }
@@ -678,47 +726,63 @@ fn service_loop(device: &mut Dwc3Device) -> ! {
 
         match result {
             Ok(ipc_result) => {
-                // Check if this is an IRQ notification
-                if ipc_result.badge == IRQ_BADGE {
+                if ipc_result.label == 0 && ipc_result.badge != 0 {
+                    // Bound notification — IRQ woke us
                     process_xhci_interrupts(device);
+                    signal_client_notifications();
                     let _ = irq_ack(IRQ_HANDLER);
-
-                    // Don't send reply for IRQ notification
                     first_message = true;
                 } else {
-                    // Handle IPC request
                     last_response = handle_request(device, ipc_result.label, &ipc_result.msg);
                 }
             }
             Err(_) => {
-                sched_yield();
                 first_message = true;
             }
         }
     }
 }
 
+/// Signal all client notifications that have pending data.
+fn signal_client_notifications() {
+    // SAFETY: Single-threaded driver
+    let transfers = unsafe { &*(&raw const INTERRUPT_TRANSFERS) };
+
+    for transfer in transfers.iter() {
+        if transfer.active && transfer.has_pending_data && transfer.client_notif_cptr != 0 {
+            let _ = signal(transfer.client_notif_cptr);
+        }
+    }
+}
+
 /// Process xHCI transfer events triggered by IRQ.
 fn process_xhci_interrupts(device: &mut Dwc3Device) {
+    // Drain the xHCI event ring to clear IMAN.IP/EINT/EHB.
+    // Transfer Events are dispatched to their interrupt endpoints.
+    device.xhci_ctrl.process_transfer_events();
+
     // SAFETY: Single-threaded driver
     let transfers = unsafe { &mut *(&raw mut INTERRUPT_TRANSFERS) };
 
-    // Poll all active interrupt endpoints for data
+    // Check all active interrupt endpoints for data dispatched above
     for transfer in transfers.iter_mut() {
         if transfer.active && transfer.configured {
             if let Some((data, len)) = device.xhci_ctrl.poll_interrupt_data(
                 transfer.slot_id,
                 transfer.ep_idx,
             ) {
-                // Store data in buffer for later retrieval.
-                // Do NOT re-queue here — handle_get_interrupt_data re-queues
-                // when the data is actually consumed. Re-queueing in both places
-                // creates an extra TRB per cycle, wasting ring entries.
                 for i in 0..len.min(8) {
                     transfer.buffer[i] = data[i];
                 }
                 transfer.buffer_len = len as u8;
                 transfer.has_pending_data = true;
+
+                // Re-queue immediately so the endpoint always has a TRB
+                // ready for the next IN token.
+                let _ = device.xhci_ctrl.queue_interrupt_transfer(
+                    transfer.slot_id,
+                    transfer.ep_idx,
+                );
             }
         }
     }
@@ -1048,7 +1112,9 @@ struct InterruptTransfer {
     slot_id: u8,
     interface: u8,
     ep_idx: usize,
-    notif_cptr: u64,
+    /// Client notification CPtr (received via IPC cap transfer).
+    /// When non-zero, we signal this notification when data arrives.
+    client_notif_cptr: u64,
     interval_ms: u16,
     buffer: [u8; 8],
     buffer_len: u8,
@@ -1065,7 +1131,7 @@ impl InterruptTransfer {
             slot_id: 0,
             interface: 0,
             ep_idx: 0,
-            notif_cptr: 0,
+            client_notif_cptr: 0,
             interval_ms: 0,
             buffer: [0; 8],
             buffer_len: 0,
@@ -1085,7 +1151,7 @@ fn handle_start_interrupt(
     device: &mut Dwc3Device,
     device_addr: u8,
     endpoint: u8,
-    notif_cptr: u64,
+    _notif_cptr: u64,
     interval_ms: u16,
 ) -> u64 {
     // Check endpoint is IN direction
@@ -1123,13 +1189,25 @@ fn handle_start_interrupt(
     let transfers = unsafe { &mut *(&raw mut INTERRUPT_TRANSFERS) };
     let slot = transfers.iter_mut().find(|t| !t.active);
 
+    // Check if client sent a notification capability via IPC cap transfer
+    // SAFETY: IPC buffer is mapped and accessible; single-threaded driver
+    let client_notif_cptr = unsafe {
+        let recv_caps = m6_syscall::invoke::ipc_get_recv_caps();
+        let ipc_buf = m6_syscall::IpcBuffer::get();
+        if ipc_buf.recv_extra_caps > 0 && recv_caps[0] != 0 {
+            cptr(recv_caps[0])
+        } else {
+            0
+        }
+    };
+
     match slot {
         Some(transfer) => {
             transfer.device_addr = device_addr;
             transfer.endpoint = endpoint;
             transfer.slot_id = slot_id;
             transfer.interface = ep_interface;
-            transfer.notif_cptr = notif_cptr;
+            transfer.client_notif_cptr = client_notif_cptr;
             transfer.interval_ms = if interval_ms == 0 { 10 } else { interval_ms };
             transfer.buffer = [0; 8];
             transfer.buffer_len = 0;
@@ -1137,7 +1215,6 @@ fn handle_start_interrupt(
             transfer.active = true;
             transfer.configured = false;
 
-            // Configure the interrupt endpoint in xHCI
             match device.xhci_ctrl.configure_interrupt_endpoint(
                 slot_id,
                 endpoint,
@@ -1179,41 +1256,30 @@ fn handle_get_interrupt_data(device: &mut Dwc3Device, device_addr: u8, endpoint:
 
     for transfer in transfers.iter_mut() {
         if transfer.active && transfer.device_addr == device_addr && transfer.endpoint == endpoint {
-            // First check if we already have pending data in our buffer
+            // Check if we already have pending data from IRQ handler
             if transfer.has_pending_data {
                 let packed_all = u64::from_le_bytes(transfer.buffer);
                 let count = transfer.buffer_len;
                 transfer.has_pending_data = false;
                 transfer.buffer_len = 0;
-
-                // Re-queue the transfer for the next data
-                if transfer.configured {
-                    let _ = device.xhci_ctrl.queue_interrupt_transfer(
-                        transfer.slot_id,
-                        transfer.ep_idx,
-                    );
-                }
-
+                // TRB was already re-queued by process_xhci_interrupts
                 return IpcResponse {
                     label: response::OK | ((count as u64) << 16),
                     msg: [packed_all, 0, 0, 0],
                 };
             }
 
-            // No pending data in buffer, poll xHCI for new data
+            // No pending data — poll xHCI event ring directly
             if transfer.configured {
                 if let Some((data, len)) = device.xhci_ctrl.poll_interrupt_data(
                     transfer.slot_id,
                     transfer.ep_idx,
                 ) {
                     let packed_all = u64::from_le_bytes(data);
-
-                    // Re-queue the transfer for the next data
                     let _ = device.xhci_ctrl.queue_interrupt_transfer(
                         transfer.slot_id,
                         transfer.ep_idx,
                     );
-
                     return IpcResponse {
                         label: response::OK | ((len as u64) << 16),
                         msg: [packed_all, 0, 0, 0],
@@ -1221,8 +1287,6 @@ fn handle_get_interrupt_data(device: &mut Dwc3Device, device_addr: u8, endpoint:
                 }
             }
 
-            // No data available — interrupt endpoint data arrives via
-            // process_transfer_events and is returned on the next poll.
             return IpcResponse::simple(response::OK);
         }
     }

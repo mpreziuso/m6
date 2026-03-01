@@ -412,7 +412,15 @@ pub fn handle_tcb_bind_notification(args: &SyscallArgs) -> SyscallResult {
     let tcb_cap = ipc::lookup_cap(tcb_cptr, ObjectType::TCB, CapRights::WRITE)?;
 
     if notification_cptr == 0 {
-        // Unbind
+        // Unbind: clear reverse link on old notification, then clear TCB
+        let old_notif = object_table::with_tcb(tcb_cap.obj_ref, |tcb_full| {
+            tcb_full.tcb.bound_notification
+        });
+        if old_notif.is_valid() {
+            object_table::with_notification_mut(old_notif, |notif| {
+                notif.bound_tcb = m6_cap::ObjectRef::NULL;
+            });
+        }
         let _: () = object_table::with_tcb_mut(tcb_cap.obj_ref, |tcb_full| {
             tcb_full.tcb.bound_notification = m6_cap::ObjectRef::NULL;
         });
@@ -422,17 +430,30 @@ pub fn handle_tcb_bind_notification(args: &SyscallArgs) -> SyscallResult {
     // Look up notification capability with READ right
     let notif_cap = ipc::lookup_cap(notification_cptr, ObjectType::Notification, CapRights::READ)?;
 
-    // Check if already bound
-    let is_bound = object_table::with_tcb(tcb_cap.obj_ref, |tcb_full| {
+    // Check if TCB already has a bound notification
+    let tcb_already_bound = object_table::with_tcb(tcb_cap.obj_ref, |tcb_full| {
         tcb_full.tcb.bound_notification.is_valid()
     });
-    if is_bound {
+    if tcb_already_bound {
         return Err(SyscallError::InvalidState);
     }
 
-    // Bind the notification
+    // Check if notification is already bound to another TCB
+    let notif_already_bound =
+        object_table::with_notification_mut(notif_cap.obj_ref, |notif| notif.bound_tcb.is_valid())
+            .unwrap_or(false);
+    if notif_already_bound {
+        return Err(SyscallError::InvalidState);
+    }
+
+    // Bind: set forward link (TCB → notification)
     let _: () = object_table::with_tcb_mut(tcb_cap.obj_ref, |tcb_full| {
         tcb_full.tcb.bound_notification = notif_cap.obj_ref;
+    });
+
+    // Bind: set reverse link (notification → TCB)
+    object_table::with_notification_mut(notif_cap.obj_ref, |notif| {
+        notif.bound_tcb = tcb_cap.obj_ref;
     });
 
     Ok(0)

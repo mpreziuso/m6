@@ -1898,6 +1898,18 @@ impl XhciController {
         // SAFETY: DMA region is mapped and ring_offset is within bounds
         unsafe {
             core::ptr::write_bytes(ring_vaddr as *mut u8, 0, 0x1000);
+
+            // Place Link TRB at TRANSFER_RING_SIZE-1 pointing back to ring start.
+            // DWC3 may pre-fetch beyond the enqueue pointer, so the Link TRB
+            // must be present from the start — not just at wrap-around time.
+            let link_addr = ring_vaddr + ((TRANSFER_RING_SIZE - 1) * 16) as u64;
+            let link_trb = Trb {
+                param: ring_iova,
+                status: 0,
+                control: (trb_type::LINK as u32) << 10
+                    | (1 << 1), // Toggle Cycle; C=0 (initial cycle is 1, link has 0 to stop pre-fetch)
+            };
+            write_volatile(link_addr as *mut Trb, link_trb);
         }
 
         // Invalidate CPU cache for the output device context before reading it.
@@ -1983,11 +1995,11 @@ impl XhciController {
         };
         slot.interrupt_ep_count += 1;
 
-        // Standard Linux xHCI flow: queue the first TRB AFTER Configure
-        // Endpoint succeeds, then ring the doorbell. The pre-queue approach
-        // (TRB on ring before Configure Endpoint) may confuse DWC3's
-        // periodic scheduler initialisation.
-        self.queue_interrupt_transfer(slot_id, ep_idx)?;
+        // DWC3 quirk: the periodic scheduler may not pick up a newly configured
+        // endpoint after Configure Endpoint + doorbell alone. Bounce through
+        // Stop EP → Set TR Dequeue → re-queue → doorbell to force the
+        // controller to initialise its internal scheduling state.
+        self.restart_interrupt_endpoint(slot_id, ep_idx)?;
 
         Ok(ep_idx)
     }
@@ -2129,10 +2141,19 @@ impl XhciController {
             }
         }
 
-        // 2. Zero the transfer ring and flush to physical memory
+        // 2. Zero the transfer ring, place Link TRB, and flush to physical memory
         // SAFETY: ring_vaddr is mapped DMA memory
         unsafe {
             core::ptr::write_bytes(ring_vaddr as *mut u8, 0, 0x1000);
+
+            // Re-place Link TRB at end of ring (DWC3 may pre-fetch)
+            let link_addr = ring_vaddr + ((TRANSFER_RING_SIZE - 1) * 16) as u64;
+            let link_trb = Trb {
+                param: ring_iova,
+                status: 0,
+                control: (trb_type::LINK as u32) << 10 | (1 << 1), // TC=1, C=0
+            };
+            write_volatile(link_addr as *mut Trb, link_trb);
         }
         let _ = cache_clean(ring_vaddr, 0x1000);
 

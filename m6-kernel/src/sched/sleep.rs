@@ -125,10 +125,8 @@ pub fn process_wakeups() {
         }
     }
 
-    for slot in &to_wake[..count] {
-        if let Some(tcb_ref) = slot {
-            wake_sleeping_task(*tcb_ref);
-        }
+    for tcb_ref in to_wake[..count].iter().flatten() {
+        wake_sleeping_task(*tcb_ref);
     }
 }
 

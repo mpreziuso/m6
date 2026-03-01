@@ -408,51 +408,51 @@ fn parse_smmus(fdt: &Fdt) -> ([SmmuConfig; MAX_SMMUS], usize) {
 
         if let Some(compatible) = node.compatible() {
             // Check for ARM SMMUv3
-            if compatible.all().any(|c| c == "arm,smmu-v3") {
-                if let Some(reg) = node.reg().and_then(|mut r| r.next()) {
-                    let base_addr = reg.starting_address as u64;
-                    let size = reg.size.unwrap_or(0x20000) as u64;
+            if compatible.all().any(|c| c == "arm,smmu-v3")
+                && let Some(reg) = node.reg().and_then(|mut r| r.next())
+            {
+                let base_addr = reg.starting_address as u64;
+                let size = reg.size.unwrap_or(0x20000) as u64;
 
-                    // Parse phandle for this SMMU node
-                    let phandle = if let Some(prop) = node.property("phandle") {
-                        let data = prop.value;
-                        if data.len() >= 4 {
-                            u32::from_be_bytes([data[0], data[1], data[2], data[3]])
-                        } else {
-                            0
-                        }
+                // Parse phandle for this SMMU node
+                let phandle = if let Some(prop) = node.property("phandle") {
+                    let data = prop.value;
+                    if data.len() >= 4 {
+                        u32::from_be_bytes([data[0], data[1], data[2], data[3]])
                     } else {
                         0
-                    };
-
-                    // Parse interrupts (SMMUv3 typically has: eventq, gerror, cmdq-sync)
-                    // The interrupt property format depends on the interrupt controller
-                    let mut event_irq = 0u32;
-                    let mut gerror_irq = 0u32;
-                    let mut cmdq_sync_irq = 0u32;
-
-                    if let Some(mut interrupts) = node.interrupts() {
-                        if let Some(irq) = interrupts.next() {
-                            event_irq = irq as u32;
-                        }
-                        if let Some(irq) = interrupts.next() {
-                            gerror_irq = irq as u32;
-                        }
-                        if let Some(irq) = interrupts.next() {
-                            cmdq_sync_irq = irq as u32;
-                        }
                     }
+                } else {
+                    0
+                };
 
-                    smmus[count] = SmmuConfig {
-                        base_addr,
-                        size,
-                        event_irq,
-                        gerror_irq,
-                        cmdq_sync_irq,
-                        phandle,
-                    };
-                    count += 1;
+                // Parse interrupts (SMMUv3 typically has: eventq, gerror, cmdq-sync)
+                // The interrupt property format depends on the interrupt controller
+                let mut event_irq = 0u32;
+                let mut gerror_irq = 0u32;
+                let mut cmdq_sync_irq = 0u32;
+
+                if let Some(mut interrupts) = node.interrupts() {
+                    if let Some(irq) = interrupts.next() {
+                        event_irq = irq as u32;
+                    }
+                    if let Some(irq) = interrupts.next() {
+                        gerror_irq = irq as u32;
+                    }
+                    if let Some(irq) = interrupts.next() {
+                        cmdq_sync_irq = irq as u32;
+                    }
                 }
+
+                smmus[count] = SmmuConfig {
+                    base_addr,
+                    size,
+                    event_irq,
+                    gerror_irq,
+                    cmdq_sync_irq,
+                    phandle,
+                };
+                count += 1;
             }
         }
     }

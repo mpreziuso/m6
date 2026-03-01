@@ -75,20 +75,20 @@ const THREAD_SLOT_BASE: u64 = 256;
 /// Global counter for allocating thread resource slots.
 static NEXT_THREAD_SLOT: AtomicU64 = AtomicU64::new(THREAD_SLOT_BASE);
 
-/// CNode radix (matches the root CNode setup).
-const CNODE_RADIX: u8 = 10;
+/// CNode radix (4096 slots, matches spawn_process).
+const CNODE_RADIX: u8 = 12;
 
 /// Root CNode CPtr (self-reference at slot 0).
 const ROOT_CNODE_CPTR: u64 = 0;
 
-/// Root VSpace CPtr (slot 2).
-const ROOT_VSPACE_CPTR: u64 = 2 << 54;
+/// Root VSpace CPtr (slot 2, radix 12).
+const ROOT_VSPACE_CPTR: u64 = 2 << 52;
 
 /// First untyped capability slot.
-const UNTYPED_SLOT: u64 = 9;
+const UNTYPED_SLOT: u64 = 15;
 
-/// Untyped capability CPtr.
-const UNTYPED_CPTR: u64 = UNTYPED_SLOT << 54;
+/// Untyped capability CPtr (slot 15, radix 12).
+const UNTYPED_CPTR: u64 = UNTYPED_SLOT << 52;
 
 // -- Thread spawning
 

@@ -135,7 +135,7 @@ static NEXT_FRAME_SLOT: AtomicU64 = AtomicU64::new(136);
 /// before bumping NEXT_FRAME_SLOT, preventing CNode exhaustion.
 #[allow(dead_code)]
 const MAX_FREE_SLOTS: usize = 256;
-#[allow(dead_code)]
+#[allow(dead_code, clippy::declare_interior_mutable_const)]
 static FREE_SLOT_POOL: [AtomicU64; MAX_FREE_SLOTS] = {
     const ZERO: AtomicU64 = AtomicU64::new(0);
     [ZERO; MAX_FREE_SLOTS]
@@ -182,6 +182,7 @@ const MAX_HEAP_PAGES: usize = 65536;
 /// Table mapping (vaddr_page - HEAP_BASE_PAGE) index to slot number.
 /// 0 means unmapped. Uses AtomicU16 for safe concurrent access — the
 /// allocator may map pages during runtime (not just init).
+#[allow(clippy::declare_interior_mutable_const)]
 static PAGE_SLOT_TABLE: [AtomicU16; MAX_HEAP_PAGES] = {
     const ZERO: AtomicU16 = AtomicU16::new(0);
     [ZERO; MAX_HEAP_PAGES]

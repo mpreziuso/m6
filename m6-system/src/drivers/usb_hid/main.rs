@@ -43,7 +43,7 @@ use alloc::vec::Vec;
 use device::{HidDeviceConfig, HidDeviceManager, HidDeviceType};
 use input_event::InputEvent;
 
-use m6_syscall::invoke::{poll, recv, reply_recv, sched_yield};
+use m6_syscall::invoke::{recv, reply_recv, signal, tcb_bind_notification};
 
 // Import USB host IPC protocol (shared with xHCI/DWC3)
 #[path = "../usb_xhci/ipc.rs"]
@@ -79,6 +79,8 @@ struct Subscription {
     device_mask: u64,
     /// Active flag
     active: bool,
+    /// Client's notification CPtr (for signalling events)
+    client_notif_cptr: u64,
 }
 
 impl Subscription {
@@ -87,6 +89,7 @@ impl Subscription {
             id: 0,
             device_mask: 0,
             active: false,
+            client_notif_cptr: 0,
         }
     }
 }
@@ -297,13 +300,22 @@ impl HidDriver {
             | ((device.config.endpoint_in as u64) << 8)
             | ((device.config.interval_ms as u64) << 16);
 
+        // Transfer INTERRUPT_NOTIF capability to USB host via IPC cap transfer
+        // SAFETY: IPC buffer is mapped and accessible; single-threaded driver
+        unsafe { m6_syscall::invoke::ipc_set_send_caps(&[INTERRUPT_NOTIF]); }
+
         let result = m6_syscall::invoke::call(
             USB_HOST_EP,
             usb_ipc::request::START_INTERRUPT,
             packed_arg,
-            INTERRUPT_NOTIF,
+            0,
             0,
         );
+
+        // Clear extra caps after send
+        // SAFETY: IPC buffer is mapped and accessible; single-threaded driver
+        unsafe { m6_syscall::IpcBuffer::get_mut().extra_caps = 0; }
+
         match result {
             Ok(r) => {
                 let code = r.label & 0xFFFF;
@@ -322,9 +334,13 @@ impl HidDriver {
     }
 
     /// Handle interrupt data from USB host
-    fn handle_interrupt_data(&mut self) {
+    /// Poll USB host for interrupt data and process any reports.
+    /// Returns `true` if at least one report was received.
+    fn handle_interrupt_data(&mut self) -> bool {
         static mut TIMESTAMP: u64 = 0;
         static mut DATA_LOG_COUNT: u64 = 0;
+        let mut got_data = false;
+
         // SAFETY: Single-threaded driver
         let timestamp_ns = unsafe {
             TIMESTAMP = TIMESTAMP.wrapping_add(1_000_000);
@@ -370,13 +386,16 @@ impl HidDriver {
                     let actual_len = byte_count.min(8);
 
                     self.devices.process_report(device_addr, endpoint, &report[..actual_len], timestamp_ns);
+                    got_data = true;
                 }
             }
         }
+
+        got_data
     }
 
     /// Create a subscription
-    fn subscribe(&mut self, device_mask: u64) -> Option<u16> {
+    fn subscribe(&mut self, device_mask: u64, client_notif_cptr: u64) -> Option<u16> {
         // Find an empty slot
         for sub in &mut self.subscriptions {
             if !sub.active {
@@ -389,6 +408,7 @@ impl HidDriver {
                 sub.id = id;
                 sub.device_mask = device_mask;
                 sub.active = true;
+                sub.client_notif_cptr = client_notif_cptr;
                 return Some(id);
             }
         }
@@ -473,6 +493,9 @@ pub unsafe extern "C" fn _start() -> ! {
     // Initialise heap allocator before any heap allocations
     rt::init_allocator();
 
+    // Bind interrupt notification to our TCB for combined recv/notification wait
+    let _ = tcb_bind_notification(cptr(1), INTERRUPT_NOTIF);
+
     let mut driver = HidDriver::new();
 
     // Enter service loop immediately - don't block on USB host availability
@@ -492,41 +515,58 @@ impl IpcResponse {
 }
 
 /// Main service loop
+///
+/// Uses seL4-style bound notification: INTERRUPT_NOTIF is bound to our TCB,
+/// so recv/reply_recv on SERVICE_EP will also wake when the USB host signals
+/// us. Bound notifications arrive with label=0 and badge=signal_word.
 fn service_loop(driver: &mut HidDriver) -> ! {
-    let mut result = recv(SERVICE_EP);
-    let mut poll_counter = 0u32;
+    let mut last_response = IpcResponse::simple(0);
+    let mut first_message = true;
 
     loop {
+        let result = if first_message {
+            first_message = false;
+            recv(SERVICE_EP)
+        } else {
+            reply_recv(
+                SERVICE_EP,
+                last_response.label,
+                last_response.msg[0],
+                last_response.msg[1],
+                last_response.msg[2],
+            )
+        };
+
         match result {
             Ok(ipc_result) => {
-                let response = handle_request(driver, ipc_result.label, &ipc_result.msg);
-                result = reply_recv(
-                    SERVICE_EP,
-                    response.label,
-                    response.msg[0],
-                    response.msg[1],
-                    response.msg[2],
-                );
+                // Bound notification: USB host signalled us with interrupt data
+                if ipc_result.label == 0 && ipc_result.badge != 0 {
+                    let got_data = if driver.devices.device_count() > 0 {
+                        driver.handle_interrupt_data()
+                    } else {
+                        false
+                    };
+                    if got_data {
+                        signal_subscribers(driver);
+                    }
+                    first_message = true;
+                } else {
+                    last_response =
+                        handle_request(driver, ipc_result.label, &ipc_result.msg);
+                }
             }
             Err(_) => {
-                // Check for interrupt notifications
-                if driver.devices.device_count() > 0 {
-                    if let Ok(badge) = poll(INTERRUPT_NOTIF) {
-                        if badge != 0 {
-                            driver.handle_interrupt_data();
-                        }
-                    }
-                }
-
-                // Periodic polling fallback
-                poll_counter = poll_counter.wrapping_add(1);
-                if poll_counter % 100 == 0 && driver.devices.device_count() > 0 {
-                    driver.handle_interrupt_data();
-                }
-
-                sched_yield();
-                result = recv(SERVICE_EP);
+                first_message = true;
             }
+        }
+    }
+}
+
+/// Signal all active subscribers that have a notification capability.
+fn signal_subscribers(driver: &HidDriver) {
+    for sub in &driver.subscriptions {
+        if sub.active && sub.client_notif_cptr != 0 {
+            let _ = signal(sub.client_notif_cptr);
         }
     }
 }
@@ -546,20 +586,32 @@ fn handle_request(driver: &mut HidDriver, label: u64, msg: &[u64; 4]) -> IpcResp
 
 /// Handle SUBSCRIBE request
 fn handle_subscribe(driver: &mut HidDriver, device_mask: u64) -> u64 {
+    // Read received caps FIRST, before any IPC calls that would overwrite the IPC buffer.
+    // The kernel wrote recv_extra_caps and caps_or_badges during cap transfer,
+    // but start_device_polling() below does ipc_set_send_caps + call() which clobbers them.
+    // SAFETY: IPC buffer is mapped and accessible; single-threaded driver
+    let client_notif_cptr = unsafe {
+        let recv_caps = m6_syscall::invoke::ipc_get_recv_caps();
+        let ipc_buf = m6_syscall::IpcBuffer::get();
+        if ipc_buf.recv_extra_caps > 0 && recv_caps[0] != 0 {
+            cptr(recv_caps[0])
+        } else {
+            0
+        }
+    };
+
     // Lazily discover HID devices on first subscription
-    if driver.devices.device_count() == 0 && !driver.usb_available {
-        if driver.check_usb_host() {
-            let count = driver.enumerate_devices();
-            io::puts("[drv-usb-hid] ");
-            io::put_u64(count as u64);
-            io::puts(" HID device(s)\n");
-            for i in 0..count {
-                driver.start_device_polling(i);
-            }
+    if driver.devices.device_count() == 0 && !driver.usb_available && driver.check_usb_host() {
+        let count = driver.enumerate_devices();
+        io::puts("[drv-usb-hid] ");
+        io::put_u64(count as u64);
+        io::puts(" HID device(s)\n");
+        for i in 0..count {
+            driver.start_device_polling(i);
         }
     }
 
-    match driver.subscribe(device_mask) {
+    match driver.subscribe(device_mask, client_notif_cptr) {
         Some(sub_id) => ipc::response::OK | ((sub_id as u64) << 16),
         None => ipc::response::ERR_BUSY,
     }
@@ -604,13 +656,20 @@ fn handle_get_events(driver: &mut HidDriver, sub_id: u16, max_events: usize) -> 
 
 /// Handle POLL_EVENTS request
 fn handle_poll_events(driver: &mut HidDriver, sub_id: u16) -> u64 {
-    // Fetch any pending USB data before checking event count
-    if driver.devices.device_count() > 0 {
-        driver.handle_interrupt_data();
-    }
-
+    // Check for already-buffered events first
     match driver.poll_events(sub_id) {
-        Some(count) => ipc::response::OK | ((count as u64) << 16),
+        Some(count) if count > 0 => ipc::response::OK | ((count as u64) << 16),
+        Some(_) => {
+            // No buffered events — poll USB host for fresh data.
+            // This triggers the DWC3 to drain its xHCI event ring,
+            // ensuring Transfer Events are processed even if xHCI
+            // interrupter IRQs don't reach the GIC.
+            driver.handle_interrupt_data();
+            match driver.poll_events(sub_id) {
+                Some(count) => ipc::response::OK | ((count as u64) << 16),
+                None => ipc::response::ERR_INVALID_SUB,
+            }
+        }
         None => ipc::response::ERR_INVALID_SUB,
     }
 }

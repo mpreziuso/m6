@@ -155,11 +155,11 @@ impl Platform for DtbPlatform {
     }
 
     fn smmu_base(&self) -> Option<u64> {
-        self.smmus.get(0).filter(|c| c.is_valid()).map(|c| c.base_addr)
+        self.smmus.first().filter(|c| c.is_valid()).map(|c| c.base_addr)
     }
 
     fn smmu_config(&self) -> Option<&SmmuConfig> {
-        self.smmus.get(0).filter(|c| c.is_valid())
+        self.smmus.first().filter(|c| c.is_valid())
     }
 
     fn smmus(&self) -> &[SmmuConfig] {

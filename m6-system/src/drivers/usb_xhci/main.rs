@@ -27,7 +27,8 @@ mod ipc;
 mod xhci;
 
 use m6_syscall::invoke::{
-    frame_get_phys, irq_set_handler, map_frame, poll, recv, reply_recv, sched_yield,
+    frame_get_phys, irq_set_handler, map_frame, poll, recv, reply_recv, sched_yield, signal,
+    tcb_bind_notification,
 };
 
 use ipc::{request, response, status};
@@ -145,8 +146,9 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
     let page_offset = device_phys_addr & 0xFFF;
     let device_addr = XHCI_MMIO_VADDR + page_offset;
 
-    // Set up IRQ handling
+    // Set up IRQ handling and bind notification to TCB for combined wait
     setup_irq();
+    let _ = tcb_bind_notification(cptr(1), IRQ_NOTIF);
 
     // Create xHCI controller for direct register access
     // SAFETY: device_addr is mapped
@@ -199,26 +201,54 @@ fn halt() -> ! {
 
 /// Main service loop
 fn service_loop(device: &mut XhciDevice) -> ! {
-    let mut result = recv(SERVICE_EP);
-    let mut poll_counter = 0u32;
+    let mut last_response = IpcResponse::simple(0);
+    let mut first_message = true;
 
     loop {
+        let result = if first_message {
+            first_message = false;
+            recv(SERVICE_EP)
+        } else {
+            reply_recv(
+                SERVICE_EP,
+                last_response.label,
+                last_response.msg[0],
+                last_response.msg[1],
+                last_response.msg[2],
+            )
+        };
+
         match result {
             Ok(ipc_result) => {
-                let resp = handle_request(device, ipc_result.label, &ipc_result.msg);
-                result = reply_recv(SERVICE_EP, resp.label, resp.msg[0], resp.msg[1], resp.msg[2]);
-            }
-            Err(err) => {
-                // Timeout or error - do background work
-                if poll_counter % 100 == 0 {
+                // Check if this is a bound notification (IRQ woke us)
+                if ipc_result.label == 0 && ipc_result.badge != 0 {
                     poll_interrupt_transfers(device);
-                }
-                poll_counter = poll_counter.wrapping_add(1);
+                    signal_client_notifications();
+                    let _ = m6_syscall::invoke::irq_ack(IRQ_HANDLER);
 
-                let _ = err;
-                sched_yield();
-                result = recv(SERVICE_EP);
+                    // Don't send reply for notification
+                    first_message = true;
+                } else {
+                    // Handle IPC request from client
+                    last_response = handle_request(device, ipc_result.label, &ipc_result.msg);
+                }
             }
+            Err(_) => {
+                // recv returned error — just retry, bound notification handles wakeup
+                first_message = true;
+            }
+        }
+    }
+}
+
+/// Signal all client notifications that have pending data.
+fn signal_client_notifications() {
+    // SAFETY: Single-threaded driver
+    let transfers = unsafe { &*(&raw const INTERRUPT_TRANSFERS) };
+
+    for transfer in transfers.iter() {
+        if transfer.active && transfer.has_pending_data && transfer.client_notif_cptr != 0 {
+            let _ = signal(transfer.client_notif_cptr);
         }
     }
 }
@@ -595,7 +625,8 @@ fn handle_get_interfaces(device: &mut XhciDevice, addr: u8) -> u64 {
 struct InterruptTransfer {
     device_addr: u8,
     endpoint: u8,
-    notif_cptr: u64,
+    /// Client notification CPtr (received via IPC cap transfer).
+    client_notif_cptr: u64,
     interval_ms: u16,
     buffer: [u8; 8],
     buffer_len: u8,
@@ -614,7 +645,7 @@ impl InterruptTransfer {
         Self {
             device_addr: 0,
             endpoint: 0,
-            notif_cptr: 0,
+            client_notif_cptr: 0,
             interval_ms: 0,
             buffer: [0; 8],
             buffer_len: 0,
@@ -636,7 +667,7 @@ fn handle_start_interrupt(
     device: &mut XhciDevice,
     device_addr: u8,
     endpoint: u8,
-    notif_cptr: u64,
+    _notif_cptr: u64,
     interval_ms: u16,
 ) -> u64 {
     // Check endpoint is IN direction
@@ -658,6 +689,18 @@ fn handle_start_interrupt(
         return response::ERR_NO_DEVICE;
     }
 
+    // Check if client sent a notification capability via IPC cap transfer
+    // SAFETY: IPC buffer is mapped and accessible; single-threaded driver
+    let client_notif_cptr = unsafe {
+        let recv_caps = m6_syscall::invoke::ipc_get_recv_caps();
+        let ipc_buf = m6_syscall::IpcBuffer::get();
+        if ipc_buf.recv_extra_caps > 0 && recv_caps[0] != 0 {
+            cptr(recv_caps[0])
+        } else {
+            0
+        }
+    };
+
     // SAFETY: Single-threaded driver
     let transfers = unsafe { &mut *(&raw mut INTERRUPT_TRANSFERS) };
     let slot = transfers.iter_mut().find(|t| !t.active);
@@ -666,7 +709,7 @@ fn handle_start_interrupt(
         Some(transfer) => {
             transfer.device_addr = device_addr;
             transfer.endpoint = endpoint;
-            transfer.notif_cptr = notif_cptr;
+            transfer.client_notif_cptr = client_notif_cptr;
             transfer.interval_ms = if interval_ms == 0 { 10 } else { interval_ms };
             transfer.buffer = [0; 8];
             transfer.buffer_len = 0;

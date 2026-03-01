@@ -9,8 +9,18 @@
 extern crate std;
 
 use core::time::Duration;
-use std::ipc::{ipc_set_recv_slots, Endpoint, IpcBuffer};
+use std::ipc::{ipc_set_recv_slots, ipc_set_send_caps, Endpoint, IpcBuffer, Notification};
+use std::time::Instant;
 use std::{print, println, thread, String, Vec};
+
+/// Yield-based delay using hardware counter (CNTPCT_EL0).
+/// Does not depend on kernel timer interrupts (tcb_sleep is broken).
+fn yield_delay(duration: Duration) {
+    let start = Instant::now();
+    while start.elapsed() < duration {
+        thread::yield_now();
+    }
+}
 
 // -- Capability slots passed by init
 
@@ -357,49 +367,47 @@ fn execute_command(cmd: &str) {
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    // Print banner
     println!("\n\x1b[36m=== M6 Shell v0.1 ===\x1b[0m");
     println!("Shell running in userspace (m6-std runtime)");
 
-    // Get CNode radix from startup argument (passed by init via x0)
     let cnode_radix = std::rt::startup_arg() as u8;
-    if cnode_radix == 0 {
-        // Fallback to default if not provided
-        println!("Warning: CNode radix not provided, defaulting to 10");
-    }
     let cnode_radix = if cnode_radix == 0 { 10u8 } else { cnode_radix };
 
-    // Try to get HID driver endpoint
     let hid_ep = try_get_hid_endpoint(cnode_radix);
 
     if hid_ep.is_none() {
-        println!("No HID driver available - running in display-only mode");
-        println!("(Keyboard input not supported)\n");
+        println!("No HID driver available - running in display-only mode\n");
         print!("\x1b[32mm6>\x1b[0m ");
-
-        // Idle loop without input
-        loop {
-            thread::sleep(Duration::from_millis(100));
-        }
+        loop { yield_delay(Duration::from_millis(500)); }
     }
 
     let hid_ep = hid_ep.unwrap();
     println!("HID driver connected");
 
-    // Subscribe to keyboard events
+    let input_notif = match Notification::create() {
+        Ok(n) => n,
+        Err(_) => {
+            println!("Failed to create input notification");
+            loop { yield_delay(Duration::from_millis(500)); }
+        }
+    };
+
+    // Transfer notification to HID driver during subscribe
+    // SAFETY: IPC buffer is mapped and accessible
+    unsafe { ipc_set_send_caps(&[input_notif.cptr()]); }
+
     let sub_id = match subscribe_keyboard(&hid_ep) {
         Some(id) => {
-            println!("Subscribed to keyboard events (id={})", id);
+            // SAFETY: IPC buffer is mapped and accessible
+            unsafe { IpcBuffer::get_mut().extra_caps = 0; }
             id
         }
         None => {
-            println!("Failed to subscribe to keyboard events");
-            println!("Running in display-only mode\n");
+            // SAFETY: IPC buffer is mapped and accessible
+            unsafe { IpcBuffer::get_mut().extra_caps = 0; }
+            println!("Failed to subscribe to keyboard events\n");
             print!("\x1b[32mm6>\x1b[0m ");
-
-            loop {
-                thread::sleep(Duration::from_millis(100));
-            }
+            loop { yield_delay(Duration::from_millis(500)); }
         }
     };
 
@@ -409,44 +417,48 @@ fn main() -> i32 {
     let mut line = String::new();
     let mut kb_state = KeyboardState::new();
 
-    // Input loop
+    // Input loop — poll HID every 16ms using yield-based delay.
+    // Uses CNTPCT_EL0 hardware counter (no tcb_sleep dependency).
+    let poll_interval = Duration::from_millis(16);
     loop {
-        let events = poll_keyboard_events(&hid_ep, sub_id);
+        yield_delay(poll_interval);
 
-        for event in events {
-            // Update modifier state
-            let pressed = event.value == 1;
-            kb_state.update(event.code, pressed);
-
-            // Only process key presses (not releases)
-            if !event.is_key_press() {
-                continue;
+        // Drain all buffered events
+        loop {
+            let events = poll_keyboard_events(&hid_ep, sub_id);
+            if events.is_empty() {
+                break;
             }
 
-            if let Some(ch) = keycode_to_char(event.code, &kb_state) {
-                match ch {
-                    '\n' => {
-                        println!();
-                        execute_command(&line);
-                        line.clear();
-                        print!("\x1b[32mm6>\x1b[0m ");
-                    }
-                    '\x08' => {
-                        // Backspace
-                        if !line.is_empty() {
-                            line.pop();
-                            // Move cursor back, overwrite with space, move back again
-                            print!("\x08 \x08");
+            for event in events {
+                let pressed = event.value == 1;
+                kb_state.update(event.code, pressed);
+
+                if !event.is_key_press() {
+                    continue;
+                }
+
+                if let Some(ch) = keycode_to_char(event.code, &kb_state) {
+                    match ch {
+                        '\n' => {
+                            println!();
+                            execute_command(&line);
+                            line.clear();
+                            print!("\x1b[32mm6>\x1b[0m ");
                         }
-                    }
-                    _ => {
-                        line.push(ch);
-                        print!("{}", ch);
+                        '\x08' => {
+                            if !line.is_empty() {
+                                line.pop();
+                                print!("\x08 \x08");
+                            }
+                        }
+                        _ => {
+                            line.push(ch);
+                            print!("{}", ch);
+                        }
                     }
                 }
             }
         }
-
-        thread::yield_now();
     }
 }
