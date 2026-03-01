@@ -140,9 +140,14 @@ pub fn do_send(
                     }
                     EndpointState::RecvQueue => {
                         // A receiver arrived while we were setting up TCB links.
-                        // Undo the TCB link to old_tail — leave old_tail->ipc_next
-                        // as sender_ref for now; the receiver path will clear it
-                        // when it dequeues us after we transition to Running below.
+                        // Clear the stale old_tail->ipc_next link we wrote above so
+                        // old_tail is not left with a dangling pointer to a sender
+                        // that is about to become Running.
+                        if old_tail.is_valid() {
+                            let _: () = object_table::with_tcb_mut(old_tail, |tcb| {
+                                tcb.ipc_next = ObjectRef::NULL;
+                            });
+                        }
                         // Deliver the message directly to the receiver instead.
                         let receiver_ref = endpoint.queue_head;
                         if receiver_ref.is_valid() {
@@ -506,12 +511,53 @@ pub fn do_call(
             }
 
             object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                endpoint.state = EndpointState::SendQueue;
-                if old_tail.is_valid() {
-                    endpoint.queue_tail = caller_ref;
-                } else {
-                    endpoint.queue_head = caller_ref;
-                    endpoint.queue_tail = caller_ref;
+                match endpoint.state {
+                    EndpointState::Idle | EndpointState::SendQueue => {
+                        // No concurrent receiver — enqueue normally.
+                        endpoint.state = EndpointState::SendQueue;
+                        if old_tail.is_valid() {
+                            endpoint.queue_tail = caller_ref;
+                        } else {
+                            endpoint.queue_head = caller_ref;
+                            endpoint.queue_tail = caller_ref;
+                        }
+                    }
+                    EndpointState::RecvQueue => {
+                        // A receiver arrived concurrently. Clear the stale
+                        // old_tail->ipc_next link before proceeding.
+                        if old_tail.is_valid() {
+                            let _: () = object_table::with_tcb_mut(old_tail, |tcb| {
+                                tcb.ipc_next = ObjectRef::NULL;
+                            });
+                        }
+                        let receiver_ref = endpoint.queue_head;
+                        if receiver_ref.is_valid() {
+                            let next: ObjectRef = object_table::with_tcb_mut(receiver_ref, |tcb| {
+                                let n = tcb.ipc_next;
+                                tcb.clear_ipc_links();
+                                n
+                            });
+                            endpoint.queue_head = next;
+                            if !next.is_valid() {
+                                endpoint.queue_tail = ObjectRef::NULL;
+                                endpoint.state = EndpointState::Idle;
+                            }
+                            // Grant reply capability to receiver.
+                            let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
+                                tcb.tcb.caller = reply_ref;
+                            });
+                            // Transition caller from BlockedOnSend to BlockedOnReply.
+                            let _: () = object_table::with_tcb_mut(caller_ref, |tcb| {
+                                tcb.tcb.state = ThreadState::BlockedOnReply;
+                                tcb.ipc_blocked_on = ObjectRef::NULL;
+                                tcb.tcb.reply_slot = ObjectRef::NULL;
+                                tcb.clear_ipc_state();
+                            });
+                            // Transfer message and wake receiver.
+                            transfer_message(receiver_ref, msg, badge);
+                            wake_thread(receiver_ref);
+                        }
+                    }
                 }
             });
 
