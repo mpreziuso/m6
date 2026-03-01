@@ -207,6 +207,19 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
             .ok_or(SyscallError::InvalidCap)??
         };
 
+        // Zero physical memory for regular Frame objects to prevent information
+        // leakage between processes. Device frames must not be zeroed (MMIO).
+        if target_type == ObjectType::Frame {
+            let virt = crate::memory::translate::phys_to_virt(phys_addr.as_u64());
+            // SAFETY: phys_to_virt returns the kernel direct-map VA for a valid
+            // physical address obtained from the untyped allocator.  The range
+            // [virt, virt+obj_size) is within the kernel's physical map window
+            // and is exclusively owned by this allocation at this point.
+            unsafe {
+                core::ptr::write_bytes(virt as *mut u8, 0, obj_size);
+            }
+        }
+
         // Allocate object table entry
         let obj_ref = object_table::alloc(kernel_type).ok_or_else(|| {
             log::debug!("Retype: object_table::alloc() failed - table full?");
@@ -833,18 +846,22 @@ fn install_page_table(
     Ok(())
 }
 
-/// Invalidate a TLB entry.
-fn invalidate_tlb_entry(_vaddr: u64, _asid: u16) {
-    // Issue TLBI for this VA + ASID
-    // TLBI VAE1IS, Xt - invalidate by VA, EL1, inner shareable
-    //
-    // For now, use a full TLB invalidation
+/// Invalidate a single TLB entry by VA + ASID.
+///
+/// Uses `tlbi vae1is` (VA, EL1, inner shareable) so only the targeted
+/// entry is flushed across all CPUs, not the entire TLB.
+/// Operand encoding: bits [63:48] = ASID, bits [43:0] = VA[55:12].
+fn invalidate_tlb_entry(vaddr: u64, asid: u16) {
+    let operand = ((asid as u64) << 48) | ((vaddr >> 12) & 0x0000_FFFF_FFFF_F);
+    // SAFETY: TLBI VAE1IS is safe; it only invalidates TLB entries,
+    // never causes data loss.
     unsafe {
         core::arch::asm!(
-            "dsb ishst",      // Ensure stores complete
-            "tlbi vmalle1is", // Invalidate all EL1 TLB entries (inner shareable)
-            "dsb ish",        // Ensure TLB invalidation completes
-            "isb",            // Synchronisation barrier
+            "dsb ishst",          // Ensure prior page-table stores are visible
+            "tlbi vae1is, {0}",   // Invalidate this VA+ASID on all inner-shareable CPUs
+            "dsb ish",            // Ensure the invalidation completes
+            "isb",                // Synchronisation barrier
+            in(reg) operand,
             options(nostack, preserves_flags)
         );
     }
