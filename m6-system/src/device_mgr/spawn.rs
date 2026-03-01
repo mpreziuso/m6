@@ -2175,6 +2175,7 @@ pub fn spawn_class_driver(
     let tcb_slot = registry.alloc_slot();
     let ipc_buf_slot = registry.alloc_slot();
     let driver_ep_slot = registry.alloc_slot();
+    let notif_slot = registry.alloc_slot();
 
     // Create VSpace (page table root)
     retype(
@@ -2234,6 +2235,17 @@ pub fn spawn_class_driver(
     )
     .map_err(|_| "Endpoint retype failed")?;
 
+    // Create notification for interrupt-driven wakeup
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::Notification as u64,
+        0,
+        cptr(slots::ROOT_CNODE),
+        notif_slot,
+        1,
+    )
+    .map_err(|_| "Notification retype failed")?;
+
     // Load ELF and create stack
     let entry = elf.entry();
     let stack_top = load_elf_and_stack(vspace_slot, &elf, elf_data, registry, &cptr)
@@ -2274,6 +2286,7 @@ pub fn spawn_class_driver(
         tcb_slot,
         driver_ep_slot,
         usb_host_ep_slot,
+        notif_slot,
     )
     .map_err(|_| "Cap install failed")?;
 
@@ -2306,6 +2319,7 @@ pub fn spawn_class_driver(
 }
 
 /// Install initial capabilities into a class driver's CSpace.
+#[allow(clippy::too_many_arguments)]
 fn install_class_driver_caps(
     child_cspace_cptr: u64,
     src_cnode_cptr: u64,
@@ -2314,6 +2328,7 @@ fn install_class_driver_caps(
     tcb_slot: u64,
     endpoint_slot: u64,
     usb_host_ep_slot: u64,
+    notif_slot: u64,
 ) -> Result<(), SpawnError> {
     // Slot 0: CSpace self-reference
     cap_copy(
@@ -2366,6 +2381,17 @@ fn install_class_driver_caps(
         0,
         src_cnode_cptr,
         usb_host_ep_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)?;
+
+    // Slot 14: Interrupt notification (for async wakeup)
+    cap_copy(
+        child_cspace_cptr,
+        class_driver::INTERRUPT_NOTIF,
+        0,
+        src_cnode_cptr,
+        notif_slot,
         0,
     )
     .map_err(SpawnError::CapCopyFailed)?;

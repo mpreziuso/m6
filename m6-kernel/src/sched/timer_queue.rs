@@ -203,13 +203,10 @@ pub fn time_until_next_expiry() -> Option<u64> {
 
     queue.peek().map(|entry| {
         if entry.expiry_ticks > now_ticks {
-            let freq = timer::frequency();
-            if freq > 0 {
-                let delta_ticks = entry.expiry_ticks - now_ticks;
-                (delta_ticks * 1_000_000_000) / freq
-            } else {
-                0
-            }
+            let delta_ticks = entry.expiry_ticks - now_ticks;
+            (delta_ticks * 1_000_000_000)
+                .checked_div(timer::frequency())
+                .unwrap_or(0)
         } else {
             0
         }

@@ -36,6 +36,21 @@ use m6_cap::objects::{FaultMessage, FaultType, ThreadState};
 use crate::cap::object_table::{self, KernelObjectType};
 use crate::ipc::message::IpcMessage;
 
+/// Print directly to the serial console, bypassing the log ring buffer.
+macro_rules! console_println {
+    ($($arg:tt)*) => {{
+        use core::fmt::Write;
+        struct W;
+        impl Write for W {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                m6_pal::console::puts(s);
+                Ok(())
+            }
+        }
+        let _ = writeln!(W, $($arg)*);
+    }};
+}
+
 /// Fault delivery error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FaultDeliveryError {
@@ -119,6 +134,10 @@ pub fn deliver_fault(
     tcb_ref: ObjectRef,
     fault_msg: &FaultMessage,
 ) -> Result<(), FaultDeliveryError> {
+    // IMPORTANT: The object table uses a single global IrqSpinMutex.
+    // All with_* calls acquire the SAME lock. Nesting them deadlocks.
+    // We use the "determine action inside lock, execute outside" pattern.
+
     // Get the fault endpoint from the TCB
     let fault_ep: ObjectRef = object_table::with_tcb(tcb_ref, |tcb| tcb.tcb.fault_endpoint);
 
@@ -150,61 +169,110 @@ pub fn deliver_fault(
     // This allows the handler to identify which thread faulted
     let badge = tcb_ref.index() as u64;
 
-    // Try to deliver the fault message
-    object_table::with_endpoint_mut(fault_ep, |endpoint| {
-        use crate::ipc::queue::{ipc_dequeue, ipc_enqueue};
-        use m6_cap::objects::EndpointState;
+    // -- Phase 1: Determine action inside endpoint lock (no TCB access)
+    use m6_cap::objects::EndpointState;
 
-        match endpoint.state {
-            EndpointState::RecvQueue => {
-                // Handler is waiting - deliver immediately
-                let handler_ref = ipc_dequeue(&mut endpoint.queue_head, &mut endpoint.queue_tail)
-                    .expect("RecvQueue but empty queue");
+    enum Action {
+        DeliverTo(ObjectRef),
+        QueueInSendQueue,
+    }
 
-                if endpoint.queue_head.is_null() {
+    let action = object_table::with_endpoint_mut(fault_ep, |endpoint| match endpoint.state {
+        EndpointState::RecvQueue => {
+            // Handler is waiting — grab the head reference only.
+            // Actual dequeue (TCB link updates) happens outside the lock.
+            let handler_ref = endpoint.queue_head;
+            debug_assert!(handler_ref.is_valid(), "RecvQueue but empty queue");
+            Action::DeliverTo(handler_ref)
+        }
+        EndpointState::Idle | EndpointState::SendQueue => Action::QueueInSendQueue,
+    })
+    .unwrap_or(Action::QueueInSendQueue);
+
+    // -- Phase 2: Execute action OUTSIDE the endpoint lock
+    match action {
+        Action::DeliverTo(handler_ref) => {
+            // Manual dequeue: get next from handler TCB, clear links
+            let next_in_queue: ObjectRef = object_table::with_tcb_mut(handler_ref, |tcb| {
+                let next = tcb.ipc_next;
+                tcb.clear_ipc_links();
+                next
+            });
+
+            // Update endpoint queue state (brief re-acquisition)
+            object_table::with_endpoint_mut(fault_ep, |endpoint| {
+                endpoint.queue_head = next_in_queue;
+                if !next_in_queue.is_valid() {
+                    endpoint.queue_tail = ObjectRef::NULL;
                     endpoint.state = EndpointState::Idle;
                 }
+            });
 
-                // Transfer fault message to handler
-                transfer_fault_message(handler_ref, &ipc_msg, badge);
-
-                // Give handler the reply capability
-                let _: () = object_table::with_tcb_mut(handler_ref, |tcb| {
-                    tcb.tcb.caller = reply_ref;
+            // Clear prev link of new head
+            if next_in_queue.is_valid() {
+                let _: () = object_table::with_tcb_mut(next_in_queue, |new_head| {
+                    new_head.ipc_prev = ObjectRef::NULL;
                 });
-
-                // Block faulting thread waiting for reply
-                let _: () = object_table::with_tcb_mut(tcb_ref, |tcb| {
-                    tcb.tcb.state = ThreadState::BlockedOnReply;
-                    tcb.ipc_blocked_on = ObjectRef::NULL;
-                });
-
-                // Remove faulting thread from run queue
-                crate::sched::remove_task(tcb_ref);
-
-                // Wake handler
-                wake_handler(handler_ref);
             }
 
-            EndpointState::Idle | EndpointState::SendQueue => {
-                // No handler waiting - queue the fault
-                // Store message in faulting thread's TCB
-                let _: () = object_table::with_tcb_mut(tcb_ref, |tcb| {
-                    tcb.ipc_message = ipc_msg.regs;
-                    tcb.ipc_badge = badge;
-                    tcb.tcb.state = ThreadState::BlockedOnSend;
-                    tcb.ipc_blocked_on = fault_ep;
-                });
+            // Transfer fault message to handler
+            transfer_fault_message(handler_ref, &ipc_msg, badge);
 
-                // Add to endpoint's send queue
-                endpoint.state = EndpointState::SendQueue;
-                ipc_enqueue(&mut endpoint.queue_head, &mut endpoint.queue_tail, tcb_ref);
+            // Give handler the reply capability
+            let _: () = object_table::with_tcb_mut(handler_ref, |tcb| {
+                tcb.tcb.caller = reply_ref;
+            });
 
-                // Remove from run queue
-                crate::sched::remove_task(tcb_ref);
-            }
+            // Block faulting thread waiting for reply
+            let _: () = object_table::with_tcb_mut(tcb_ref, |tcb| {
+                tcb.tcb.state = ThreadState::BlockedOnReply;
+                tcb.ipc_blocked_on = ObjectRef::NULL;
+            });
+
+            // Remove faulting thread from run queue
+            crate::sched::remove_task(tcb_ref);
+
+            // Wake handler
+            wake_handler(handler_ref);
         }
-    });
+
+        Action::QueueInSendQueue => {
+            // Store message in faulting thread's TCB
+            let _: () = object_table::with_tcb_mut(tcb_ref, |tcb| {
+                tcb.ipc_message = ipc_msg.regs;
+                tcb.ipc_badge = badge;
+                tcb.tcb.state = ThreadState::BlockedOnSend;
+                tcb.ipc_blocked_on = fault_ep;
+            });
+
+            // Inline ipc_enqueue: each step is a separate lock acquisition
+            let old_tail =
+                object_table::with_endpoint_mut(fault_ep, |endpoint| endpoint.queue_tail)
+                    .unwrap_or(ObjectRef::NULL);
+
+            let _: () = object_table::with_tcb_mut(tcb_ref, |tcb| {
+                tcb.ipc_prev = old_tail;
+                tcb.ipc_next = ObjectRef::NULL;
+            });
+
+            if old_tail.is_valid() {
+                let _: () = object_table::with_tcb_mut(old_tail, |old_tail_tcb| {
+                    old_tail_tcb.ipc_next = tcb_ref;
+                });
+            }
+
+            object_table::with_endpoint_mut(fault_ep, |endpoint| {
+                if !old_tail.is_valid() {
+                    endpoint.queue_head = tcb_ref;
+                }
+                endpoint.queue_tail = tcb_ref;
+                endpoint.state = EndpointState::SendQueue;
+            });
+
+            // Remove from run queue
+            crate::sched::remove_task(tcb_ref);
+        }
+    }
 
     Ok(())
 }
@@ -266,31 +334,11 @@ pub fn handle_user_fault(
 ) -> bool {
     let fault_msg = build_fault_message(ctx, fault_type);
 
-    // Always print faults directly to console (log::warn only goes to
-    // the ring buffer after early console is disabled, making user thread
-    // terminations invisible on the serial output).
-    {
-        use core::fmt::Write;
-        struct ConsoleFmt;
-        impl Write for ConsoleFmt {
-            fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                m6_pal::console::puts(s);
-                Ok(())
-            }
-        }
-        let _ = write!(
-            ConsoleFmt,
-            "!!! USER FAULT: type={:?} pc={:#x} addr={:#x} esr={:#x}\n",
-            fault_type, ctx.elr, ctx.far, ctx.esr
-        );
-    }
-
-    log::debug!(
-        "User fault: type={:?} pc={:#x} addr={:#x} esr={:#x}",
-        fault_type,
-        ctx.elr,
-        ctx.far,
-        ctx.esr
+    // Print faults directly to console (log::warn only goes to the ring
+    // buffer after early console is disabled, making terminations invisible).
+    console_println!(
+        "!!! USER FAULT: type={:?} pc={:#x} addr={:#x} esr={:#x}",
+        fault_type, ctx.elr, ctx.far, ctx.esr
     );
 
     match deliver_fault(tcb_ref, &fault_msg) {
@@ -299,48 +347,32 @@ pub fn handle_user_fault(
             true
         }
         Err(FaultDeliveryError::NoFaultEndpoint) => {
-            // No fault handler - terminate the thread
-            {
-                use core::fmt::Write;
-                struct ConsoleFmt;
-                impl Write for ConsoleFmt {
-                    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                        m6_pal::console::puts(s);
-                        Ok(())
-                    }
-                }
-                let _ = write!(
-                    ConsoleFmt,
-                    "!!! THREAD {:?} TERMINATED (no fault handler) pc={:#x}\n",
-                    tcb_ref, ctx.elr
+            // No fault handler — terminate with full crash diagnostics
+            console_println!(
+                "!!! THREAD {:?} TERMINATED (no fault handler) pc={:#x}",
+                tcb_ref, ctx.elr
+            );
+            for i in (0..30).step_by(2) {
+                console_println!(
+                    "  x{:02}={:#018x}  x{:02}={:#018x}",
+                    i, ctx.gpr[i], i + 1, ctx.gpr[i + 1]
                 );
             }
-            log::warn!(
-                "No fault endpoint for thread {:?}, terminating. Fault: {:?} at {:#x}",
-                tcb_ref,
-                fault_type,
-                ctx.elr
+            console_println!(
+                "  x30={:#018x}   sp={:#018x}",
+                ctx.gpr[30], ctx.sp
             );
+            let vspace = object_table::with_tcb(tcb_ref, |tcb| tcb.tcb.vspace);
+            console_println!("  vspace={:?}", vspace);
+
             terminate_thread(tcb_ref);
             true
         }
         Err(e) => {
-            {
-                use core::fmt::Write;
-                struct ConsoleFmt;
-                impl Write for ConsoleFmt {
-                    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                        m6_pal::console::puts(s);
-                        Ok(())
-                    }
-                }
-                let _ = write!(
-                    ConsoleFmt,
-                    "!!! FAULT DELIVERY FAILED for {:?}: {:?}\n",
-                    tcb_ref, e
-                );
-            }
-            log::error!("Failed to deliver fault: {:?}", e);
+            console_println!(
+                "!!! FAULT DELIVERY FAILED for {:?}: {:?}",
+                tcb_ref, e
+            );
             terminate_thread(tcb_ref);
             true
         }

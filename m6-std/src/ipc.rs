@@ -27,8 +27,8 @@ use m6_syscall::invoke::{IpcRecvResult, retype};
 
 // Re-export syscall wrappers for direct IPC access
 pub use m6_syscall::invoke::{
-    call, ipc_get_recv_caps, ipc_set_recv_slots, nb_recv, nb_send, poll, recv, reply_recv, send,
-    signal, wait,
+    call, ipc_get_recv_caps, ipc_set_recv_slots, ipc_set_send_caps, nb_recv, nb_send, poll, recv,
+    reply_recv, send, signal, wait,
 };
 pub use m6_syscall::IpcBuffer;
 
@@ -40,14 +40,14 @@ const IPC_SLOT_BASE: u64 = 512;
 /// Global counter for allocating IPC resource slots.
 static NEXT_IPC_SLOT: AtomicU64 = AtomicU64::new(IPC_SLOT_BASE);
 
-/// CNode radix.
-const CNODE_RADIX: u8 = 10;
+/// CNode radix (4096 slots, matches spawn_process).
+const CNODE_RADIX: u8 = 12;
 
 /// Root CNode CPtr.
 const ROOT_CNODE_CPTR: u64 = 0;
 
-/// Untyped capability CPtr.
-const UNTYPED_CPTR: u64 = 9 << 54;
+/// Untyped capability CPtr (slot 15, radix 12).
+const UNTYPED_CPTR: u64 = 15 << 52;
 
 // -- Endpoint wrapper
 

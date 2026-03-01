@@ -254,7 +254,7 @@ pub fn recv(src: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
     // Check if x0 is a kernel error code.
     // Kernel errors are small negative numbers (MIN_SYSCALL_ERROR to -1).
     // Valid IPC messages can have high bits set, so only treat known error codes as errors.
-    if x0 >= crate::error::MIN_SYSCALL_ERROR && x0 < 0 {
+    if (crate::error::MIN_SYSCALL_ERROR..0).contains(&x0) {
         Err(crate::error::SyscallError::from_i64(x0)
             .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
@@ -312,7 +312,7 @@ pub fn call(
     // Kernel errors are small negative numbers (MIN_SYSCALL_ERROR to -1).
     // Valid IPC messages can have high bits set (e.g., endpoint addresses),
     // so we only treat known error codes as errors.
-    if x0 >= crate::error::MIN_SYSCALL_ERROR && x0 < 0 {
+    if (crate::error::MIN_SYSCALL_ERROR..0).contains(&x0) {
         Err(crate::error::SyscallError::from_i64(x0)
             .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
@@ -368,7 +368,7 @@ pub fn reply_recv(
     // Check if x0 is a kernel error code.
     // Kernel errors are small negative numbers (MIN_SYSCALL_ERROR to -1).
     // Valid IPC messages can have high bits set, so only treat known error codes as errors.
-    if x0 >= crate::error::MIN_SYSCALL_ERROR && x0 < 0 {
+    if (crate::error::MIN_SYSCALL_ERROR..0).contains(&x0) {
         Err(crate::error::SyscallError::from_i64(x0)
             .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
@@ -416,7 +416,7 @@ pub fn nb_recv(src: u64) -> Result<IpcRecvResult, crate::error::SyscallError> {
     // Check if x0 is a kernel error code.
     // Kernel errors are small negative numbers (MIN_SYSCALL_ERROR to -1).
     // Valid IPC messages can have high bits set, so only treat known error codes as errors.
-    if x0 >= crate::error::MIN_SYSCALL_ERROR && x0 < 0 {
+    if (crate::error::MIN_SYSCALL_ERROR..0).contains(&x0) {
         Err(crate::error::SyscallError::from_i64(x0)
             .unwrap_or(crate::error::SyscallError::InvalidArg))
     } else {
@@ -942,6 +942,21 @@ pub fn tcb_exit(code: i32) -> ! {
 #[inline]
 pub fn tcb_sleep(nanoseconds: u64) -> SyscallResult {
     check_result(syscall1(Syscall::TcbSleep, nanoseconds))
+}
+
+/// Bind a notification to a TCB for combined IPC + notification waiting.
+///
+/// When a TCB is bound to a notification and blocks on an endpoint recv,
+/// pending signals on the bound notification will wake the thread (seL4-style
+/// combined wait). Pass `notif = 0` to unbind.
+///
+/// # Arguments
+///
+/// * `tcb` - CPtr to the TCB capability (requires WRITE right)
+/// * `notif` - CPtr to the notification capability (requires READ right), or 0 to unbind
+#[inline]
+pub fn tcb_bind_notification(tcb: u64, notif: u64) -> SyscallResult {
+    check_result(syscall2(Syscall::TcbBindNotification, tcb, notif))
 }
 
 // -- IRQ Operations

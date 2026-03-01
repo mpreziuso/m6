@@ -557,8 +557,10 @@ fn sync_exception_handler(ctx: &mut ExceptionContext) {
         esr::ec::SVC_AARCH64 => {
             if ctx.from_el0() {
                 handle_syscall(ctx);
-                // Check if we need to reschedule (yield was called or timer requested it)
-                if crate::sched::reschedule_pending() {
+                // Check if we need to reschedule (yield was called or timer requested it).
+                // Use should_reschedule() which atomically clears the flag, preventing
+                // stale flags from causing unnecessary context switches on every syscall.
+                if crate::sched::should_reschedule() {
                     // Save current context (including syscall return value) before switching
                     if let Some(tcb_ref) = crate::sched::current_task() {
                         crate::sched::dispatch::save_context(tcb_ref, ctx);

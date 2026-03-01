@@ -168,6 +168,24 @@ pub fn do_recv(
     blocking: bool,
     has_grant: bool,
 ) -> Result<Option<(u64, IpcMessage)>, SyscallError> {
+    // seL4 priority: check bound notification before endpoint.
+    // If the TCB has a bound notification with pending signals, deliver
+    // those immediately without touching the endpoint.
+    let bound_notif = object_table::with_tcb(receiver_ref, |tcb| tcb.tcb.bound_notification);
+    if bound_notif.is_valid() {
+        let signal_word = object_table::with_notification_mut(bound_notif, |notif| {
+            if notif.has_signals() {
+                Some(notif.poll())
+            } else {
+                None
+            }
+        });
+        if let Some(Some(word)) = signal_word {
+            // Deliver as notification: badge = signal_word, label = 0 (empty message)
+            return Ok(Some((word, IpcMessage::new())));
+        }
+    }
+
     // Determine action inside endpoint lock, execute outside
     enum Action {
         ReceiveFrom(ObjectRef),
@@ -228,7 +246,6 @@ pub fn do_recv(
             if let Err(e) =
                 super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant)
             {
-                // If capability transfer fails, we still deliver the message
                 log::debug!("Capability transfer failed during recv: {:?}", e);
             }
 
