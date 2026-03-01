@@ -6,6 +6,8 @@ A capability-based microkernel OS for ARM64, written entirely in Rust.
 
 m6 explores what an operating system looks like when built from scratch for modern ARM64 hardware, without decades of legacy constraints. Inspired by [seL4](https://sel4.systems/)'s security model, m6 implements a minimal kernel that provides only the essentials—memory isolation, capability-based security, IPC, and scheduling—whilst everything else runs in isolated userspace processes.
 
+You can read more about how this project came to be [here](https://medium.com/@mpreziuso/m6-building-an-operating-system-20-years-later-f99022ebcbf3).
+
 ## Design philosophy
 
 **Capabilities all the way down.** Every resource access requires an explicit, unforgeable capability. No ambient authority means no confused deputy attacks. If you don't hold the capability, you can't access the resource.
