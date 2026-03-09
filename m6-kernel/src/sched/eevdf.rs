@@ -335,7 +335,10 @@ pub fn consume_budget(tcb_ref: ObjectRef, _microseconds: u64) {
 pub fn should_preempt(sched: &PerCpuSched) -> bool {
     let current = match sched.current_thread {
         Some(c) if c != sched.idle_thread => c,
-        _ => return false, // Idle task is always preemptible
+        _ => {
+            // Idle task: any runnable task in the queue should preempt it
+            return find_next_runnable(sched).is_some();
+        }
     };
 
     // Check if there's a higher-priority task

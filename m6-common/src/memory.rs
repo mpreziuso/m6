@@ -203,3 +203,170 @@ pub mod page {
         addr & MASK_4K == 0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- MemoryType
+
+    #[test_case]
+    fn test_memory_type_from_u32_known_values() {
+        let pairs: &[(u32, MemoryType)] = &[
+            (0, MemoryType::Reserved),
+            (1, MemoryType::Conventional),
+            (2, MemoryType::UefiRuntime),
+            (3, MemoryType::AcpiReclaimable),
+            (4, MemoryType::AcpiNvs),
+            (5, MemoryType::Mmio),
+            (6, MemoryType::BootloaderReclaimable),
+            (7, MemoryType::KernelImage),
+            (8, MemoryType::KernelPageTables),
+            (9, MemoryType::BootInfo),
+            (10, MemoryType::Framebuffer),
+            (11, MemoryType::InitRD),
+        ];
+        for &(n, expected) in pairs {
+            assert_eq!(MemoryType::from_u32(n), expected);
+        }
+    }
+
+    #[test_case]
+    fn test_memory_type_from_u32_unknown_is_reserved() {
+        assert_eq!(MemoryType::from_u32(99), MemoryType::Reserved);
+        assert_eq!(MemoryType::from_u32(u32::MAX), MemoryType::Reserved);
+    }
+
+    #[test_case]
+    fn test_memory_type_is_usable() {
+        assert!(MemoryType::Conventional.is_usable());
+        assert!(MemoryType::BootloaderReclaimable.is_usable());
+        assert!(MemoryType::AcpiReclaimable.is_usable());
+        assert!(!MemoryType::Reserved.is_usable());
+        assert!(!MemoryType::UefiRuntime.is_usable());
+        assert!(!MemoryType::Mmio.is_usable());
+        assert!(!MemoryType::KernelImage.is_usable());
+        assert!(!MemoryType::Framebuffer.is_usable());
+    }
+
+    #[test_case]
+    fn test_memory_type_must_preserve() {
+        assert!(MemoryType::UefiRuntime.must_preserve());
+        assert!(MemoryType::AcpiNvs.must_preserve());
+        assert!(MemoryType::KernelImage.must_preserve());
+        assert!(MemoryType::KernelPageTables.must_preserve());
+        assert!(MemoryType::BootInfo.must_preserve());
+        assert!(MemoryType::InitRD.must_preserve());
+        assert!(!MemoryType::Conventional.must_preserve());
+        assert!(!MemoryType::BootloaderReclaimable.must_preserve());
+        assert!(!MemoryType::Reserved.must_preserve());
+        assert!(!MemoryType::Mmio.must_preserve());
+        assert!(!MemoryType::Framebuffer.must_preserve());
+    }
+
+    // -- MemoryRegion
+
+    fn region(base: u64, size: u64, ty: MemoryType) -> MemoryRegion {
+        MemoryRegion { base, size, memory_type: ty, _reserved: 0 }
+    }
+
+    #[test_case]
+    fn test_memory_region_valid() {
+        assert!(region(0x1000, 0x1000, MemoryType::Conventional).is_valid());
+    }
+
+    #[test_case]
+    fn test_memory_region_empty_is_invalid() {
+        assert!(!MemoryRegion::empty().is_valid());
+        assert!(!region(0x1000, 0, MemoryType::Conventional).is_valid());
+    }
+
+    #[test_case]
+    fn test_memory_region_end() {
+        let r = region(0x1000, 0x2000, MemoryType::Conventional);
+        assert_eq!(r.end(), 0x3000);
+    }
+
+    #[test_case]
+    fn test_memory_region_contains() {
+        let r = region(0x1000, 0x2000, MemoryType::Conventional); // 0x1000..0x3000
+        assert!(r.contains(0x1000)); // at start
+        assert!(r.contains(0x2FFF)); // last valid address
+        assert!(!r.contains(0x3000)); // exclusive end
+        assert!(!r.contains(0x0FFF)); // before start
+    }
+
+    // -- MemoryMap
+
+    fn make_map(entries: &[(u64, u64, MemoryType)]) -> MemoryMap {
+        let mut map = MemoryMap::empty();
+        for (i, &(base, size, ty)) in entries.iter().enumerate() {
+            map.regions[i] = region(base, size, ty);
+        }
+        map.entry_count = entries.len() as u32;
+        map
+    }
+
+    #[test_case]
+    fn test_memory_map_empty_total() {
+        assert_eq!(MemoryMap::empty().total_usable_memory(), 0);
+    }
+
+    #[test_case]
+    fn test_memory_map_total_usable_only() {
+        let map = make_map(&[
+            (0x1000, 0x1000, MemoryType::Conventional),
+            (0x2000, 0x2000, MemoryType::UefiRuntime),         // not usable
+            (0x5000, 0x3000, MemoryType::BootloaderReclaimable),
+        ]);
+        assert_eq!(map.total_usable_memory(), 0x1000 + 0x3000);
+    }
+
+    #[test_case]
+    fn test_memory_map_find_region_hit() {
+        let map = make_map(&[
+            (0x1000, 0x2000, MemoryType::Conventional), // 0x1000..0x3000
+            (0x4000, 0x1000, MemoryType::KernelImage),  // 0x4000..0x5000
+        ]);
+        let found = map.find_region(0x2000).unwrap();
+        assert_eq!(found.base, 0x1000);
+    }
+
+    #[test_case]
+    fn test_memory_map_find_region_exclusive_end() {
+        let map = make_map(&[(0x1000, 0x2000, MemoryType::Conventional)]);
+        assert!(map.find_region(0x3000).is_none()); // exclusive end
+    }
+
+    #[test_case]
+    fn test_memory_map_find_region_miss() {
+        let map = make_map(&[(0x1000, 0x2000, MemoryType::Conventional)]);
+        assert!(map.find_region(0x6000).is_none());
+    }
+
+    // -- page module
+
+    #[test_case]
+    fn test_page_align_down_4k() {
+        assert_eq!(page::align_down_4k(0x1000), 0x1000);
+        assert_eq!(page::align_down_4k(0x1FFF), 0x1000);
+        assert_eq!(page::align_down_4k(0x1001), 0x1000);
+        assert_eq!(page::align_down_4k(0), 0);
+    }
+
+    #[test_case]
+    fn test_page_align_up_4k() {
+        assert_eq!(page::align_up_4k(0x1000), 0x1000);
+        assert_eq!(page::align_up_4k(0x1001), 0x2000);
+        assert_eq!(page::align_up_4k(0x1FFF), 0x2000);
+        assert_eq!(page::align_up_4k(0), 0);
+    }
+
+    #[test_case]
+    fn test_page_is_aligned_4k() {
+        assert!(page::is_aligned_4k(0));
+        assert!(page::is_aligned_4k(0x1000));
+        assert!(!page::is_aligned_4k(0x1001));
+        assert!(!page::is_aligned_4k(0xFFF));
+    }
+}

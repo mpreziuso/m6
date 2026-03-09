@@ -36,7 +36,8 @@ pub use asid::{
     refresh_asid_if_needed,
 };
 pub use frame::{
-    alloc_frame, alloc_frame_zeroed, alloc_frames, alloc_frames_zeroed, free_frame, memory_stats,
+    alloc_frame, alloc_frame_zeroed, alloc_frames, alloc_frames_aligned, alloc_frames_zeroed,
+    free_frame, memory_stats,
 };
 pub use init::init_memory_from_boot_info;
 pub use layout::virt;

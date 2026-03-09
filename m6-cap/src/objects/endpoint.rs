@@ -200,7 +200,7 @@ impl ReplyObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_endpoint_idle() {
         let ep = EndpointObject::new();
         assert!(ep.is_idle());
@@ -209,7 +209,7 @@ mod tests {
         assert!(!ep.has_receivers());
     }
 
-    #[test]
+    #[test_case]
     fn test_notification_signal() {
         let mut notif = NotificationObject::new();
         assert!(!notif.has_signals());

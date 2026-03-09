@@ -145,6 +145,11 @@ pub fn build_prp(
         }
     }
 
+    // Flush PRP list to DRAM so the NVMe controller can read it via
+    // non-coherent SMMU DMA. Without this, the device reads stale entries.
+    let prp_bytes = pages_needed * 8; // 8 bytes per PRP entry
+    let _ = m6_syscall::invoke::cache_flush(prp_list_vaddr as u64, prp_bytes);
+
     // Calculate how many PRP list pages we used
     let prp_list_pages = pages_needed.div_ceil(PRPS_PER_PAGE);
 

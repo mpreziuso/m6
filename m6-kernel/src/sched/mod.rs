@@ -220,6 +220,17 @@ pub fn current_task() -> Option<ObjectRef> {
     sched_state[cpu_id].lock().current()
 }
 
+/// Check if the current task on this CPU is the idle task.
+///
+/// Used by the IRQ handler to allow timer-based context switches even when
+/// the idle task (which runs at EL1h) is preempted.
+pub fn current_task_is_idle() -> bool {
+    let cpu_id = current_cpu_id();
+    let sched_state = get_sched_state();
+    let sched = sched_state[cpu_id].lock();
+    sched.current_thread == Some(sched.idle_thread)
+}
+
 /// Insert a task into the run queue, respecting CPU affinity.
 ///
 /// If the task has a CPU affinity set (affinity >= 0), it will be inserted
@@ -333,18 +344,6 @@ pub fn schedule() {
     let prev_vspace = sched
         .current_thread
         .and_then(|tcb_ref| run_queue::with_tcb(tcb_ref, |tcb| tcb.tcb.vspace));
-
-    // Mark current task as runnable (if it was running)
-    if let Some(current_ref) = sched.current_thread {
-        object_table::with_object_mut(current_ref, |obj| {
-            if obj.obj_type == KernelObjectType::Tcb {
-                // SAFETY: We know this is a TCB.
-                let _tcb = unsafe { &mut *obj.data.tcb_ptr };
-                // Only change Running to Runnable, leave other states alone
-                // Note: We use TaskState from task module, not ThreadState from m6-cap
-            }
-        });
-    }
 
     // Find next task (or use idle task)
     let next_option = eevdf::find_next_runnable(&sched);

@@ -42,8 +42,9 @@ const HEADER_TYPE_BRIDGE: u8 = 0x01;
 
 /// Maximum devices to enumerate
 pub const MAX_PCIE_DEVICES: usize = 32;
-/// Maximum host bridges to support
-pub const MAX_PCIE_HOSTS: usize = 4;
+/// Maximum host bridges to support.
+/// RK3588 has 5 PCIe controllers (3x pcie2x1 + pcie3x2 + pcie3x4).
+pub const MAX_PCIE_HOSTS: usize = 8;
 
 // -- PCIe capability register offsets
 
@@ -64,8 +65,9 @@ const CAP_ID_MSI: u8 = 0x05;
 
 // -- RK3588 DesignWare Core registers
 
-/// PCIE_CLIENT_LTSSM_STATUS register offset (in APBDBG region)
-const RK3588_LTSSM_STATUS: usize = 0x150;
+/// PCIE_CLIENT_LTSSM_STATUS register offset (in client register block).
+/// Linux: drivers/pci/controller/dwc/pcie-dw-rockchip.c PCIE_CLIENT_LTSSM_STATUS = 0x0300.
+const RK3588_LTSSM_STATUS: usize = 0x300;
 /// RDLH_LINK_UP bit in LTSSM status
 const RK3588_RDLH_LINK_UP: u32 = 1 << 17;
 /// SMLH_LINK_UP bit in LTSSM status
@@ -95,12 +97,22 @@ pub struct PcieHostBridge {
     pub apbdbg_base: u64,
     /// Valid bus number range (start, end)
     pub bus_range: (u8, u8),
-    /// CPU address for PCIe memory window (from ranges)
-    pub mem_window_cpu: u64,
-    /// PCI address for PCIe memory window
-    pub mem_window_pci: u64,
-    /// Size of PCIe memory window
-    pub mem_window_size: u64,
+    /// CPU address for 32-bit non-prefetchable memory window (from ranges)
+    pub mem32_cpu: u64,
+    /// PCI address for 32-bit non-prefetchable memory window
+    pub mem32_pci: u64,
+    /// Size of 32-bit memory window
+    pub mem32_size: u64,
+    /// CPU address for 64-bit prefetchable memory window (from ranges)
+    pub mem64_cpu: u64,
+    /// PCI address for 64-bit prefetchable memory window
+    pub mem64_pci: u64,
+    /// Size of 64-bit memory window
+    pub mem64_size: u64,
+    /// IOMMU (SMMU) phandle from iommu-map property (0 = none)
+    pub iommu_phandle: u32,
+    /// Stream ID base from iommu-map (added to raw BDF to get SMMU stream ID)
+    pub iommu_stream_base: u32,
     /// Whether link is trained (for DWC, always true for ECAM)
     pub link_up: bool,
 }
@@ -115,11 +127,62 @@ impl PcieHostBridge {
             dbi_base: 0,
             apbdbg_base: 0,
             bus_range: (0, 0),
-            mem_window_cpu: 0,
-            mem_window_pci: 0,
-            mem_window_size: 0,
+            mem32_cpu: 0,
+            mem32_pci: 0,
+            mem32_size: 0,
+            mem64_cpu: 0,
+            mem64_pci: 0,
+            mem64_size: 0,
+            iommu_phandle: 0,
+            iommu_stream_base: 0,
             link_up: false,
         }
+    }
+
+    /// Translate a PCI BAR address to CPU address using memory windows.
+    ///
+    /// Checks the 32-bit window first, then the 64-bit window.
+    /// Falls back to identity mapping for addresses outside both windows.
+    pub fn pci_to_cpu(&self, pci_addr: u64) -> u64 {
+        if pci_addr == 0 {
+            return 0;
+        }
+        // Check 32-bit non-prefetchable window
+        if self.mem32_size > 0
+            && pci_addr >= self.mem32_pci
+            && pci_addr < self.mem32_pci + self.mem32_size
+        {
+            return pci_addr - self.mem32_pci + self.mem32_cpu;
+        }
+        // Check 64-bit prefetchable window
+        if self.mem64_size > 0
+            && pci_addr >= self.mem64_pci
+            && pci_addr < self.mem64_pci + self.mem64_size
+        {
+            return pci_addr - self.mem64_pci + self.mem64_cpu;
+        }
+        // Identity mapping for addresses outside known windows
+        pci_addr
+    }
+
+    /// Check if a PCI address falls within a known memory window.
+    pub fn is_in_memory_window(&self, pci_addr: u64) -> bool {
+        if pci_addr == 0 {
+            return false;
+        }
+        if self.mem32_size > 0
+            && pci_addr >= self.mem32_pci
+            && pci_addr < self.mem32_pci + self.mem32_size
+        {
+            return true;
+        }
+        if self.mem64_size > 0
+            && pci_addr >= self.mem64_pci
+            && pci_addr < self.mem64_pci + self.mem64_size
+        {
+            return true;
+        }
+        false
     }
 }
 
@@ -489,10 +552,37 @@ pub fn parse_pcie_hosts(fdt_data: &[u8]) -> [Option<PcieHostBridge>; MAX_PCIE_HO
             host.bus_range = (0, 255);
         }
 
-        // Parse ranges property for memory window
+        // Parse ranges property for memory windows
         // Format: <pci_hi pci_mid pci_lo cpu_hi cpu_lo size_hi size_lo>
         if let Some(ranges_prop) = node.property("ranges") {
             parse_ranges_property(ranges_prop.value, &mut host);
+        }
+
+        // Parse iommu-map property for SMMU phandle and stream ID base
+        // Format: <rid_base smmu_phandle stream_id_base length>
+        // e.g., <0x0 0x190 0x10000 0x10000> → phandle 0x190, stream base 0x10000
+        // The hardware adds stream_id_base to the raw BDF to produce the
+        // SMMU stream ID. Each PCIe controller has a unique base.
+        if let Some(iommu_map_prop) = node.property("iommu-map") {
+            let val = iommu_map_prop.value;
+            if val.len() >= 16 {
+                host.iommu_phandle =
+                    u32::from_be_bytes([val[4], val[5], val[6], val[7]]);
+                host.iommu_stream_base =
+                    u32::from_be_bytes([val[8], val[9], val[10], val[11]]);
+            }
+        }
+
+        // RK3588 DWC: always use hardware-defined stream bases from the TRM.
+        // EDK2 DTBs provide iommu-map with stream_id_base=0 for ALL controllers,
+        // but the hardware requires per-controller bases (pcie3x2=0x10000, etc).
+        // Without this, the SMMU STE is configured at the wrong stream index
+        // and DMA is silently GBPA-aborted.
+        if ht == PcieHostType::DesignWareDwc {
+            if host.iommu_phandle == 0 {
+                host.iommu_phandle = 0x190;
+            }
+            host.iommu_stream_base = iommu_stream_base_for_config(host.config_base);
         }
 
         // For ECAM, link is always considered up
@@ -547,36 +637,56 @@ fn parse_ranges_property(data: &[u8], host: &mut PcieHostBridge) {
 
         let space_type = (pci_hi >> 24) & 0x03;
 
-        // Look for 32-bit memory space (0x02) or 64-bit memory space (0x03)
-        if space_type == 0x02 || space_type == 0x03 {
-            // Found a memory window
-            let pci_addr = ((pci_mid as u64) << 32) | (pci_lo as u64);
-            let cpu_addr = ((cpu_hi as u64) << 32) | (cpu_lo as u64);
-            let size = ((size_hi as u64) << 32) | (size_lo as u64);
+        let pci_addr = ((pci_mid as u64) << 32) | (pci_lo as u64);
+        let cpu_addr = ((cpu_hi as u64) << 32) | (cpu_lo as u64);
+        let size = ((size_hi as u64) << 32) | (size_lo as u64);
 
-            // Use the first (or largest) memory window
-            if host.mem_window_size == 0 || size > host.mem_window_size {
-                host.mem_window_pci = pci_addr;
-                host.mem_window_cpu = cpu_addr;
-                host.mem_window_size = size;
+        match space_type {
+            0x02 => {
+                // 32-bit non-prefetchable memory window
+                if size > host.mem32_size {
+                    host.mem32_pci = pci_addr;
+                    host.mem32_cpu = cpu_addr;
+                    host.mem32_size = size;
+                }
             }
+            0x03 => {
+                // 64-bit prefetchable memory window
+                if size > host.mem64_size {
+                    host.mem64_pci = pci_addr;
+                    host.mem64_cpu = cpu_addr;
+                    host.mem64_size = size;
+                }
+            }
+            _ => {}
         }
 
         offset += entry_size;
     }
 }
 
-/// Check link status for a RK3588 PCIe controller via APBDBG registers.
+/// Check link status for a RK3588 PCIe controller via client registers.
+///
+/// Returns `Some(true)` if link is up, `Some(false)` if link is confirmed down,
+/// or `None` if the register reads all zeros (clocks likely not enabled).
 ///
 /// # Safety
-/// The APBDBG registers must be mapped at `apbdbg_vaddr`.
-pub unsafe fn check_rk3588_link_status(apbdbg_vaddr: usize) -> bool {
+/// The client register block must be mapped at `apbdbg_vaddr`.
+pub unsafe fn check_rk3588_link_status(apbdbg_vaddr: usize) -> Option<bool> {
     // Read LTSSM status register
-    // SAFETY: Caller guarantees APBDBG region is mapped.
+    // SAFETY: Caller guarantees register region is mapped.
     let status =
         unsafe { core::ptr::read_volatile((apbdbg_vaddr + RK3588_LTSSM_STATUS) as *const u32) };
+
+    // If the entire register reads zero, the PCIe controller's APB clock is
+    // likely not enabled — treat as "status unknown" so the caller can fall
+    // back to a safe default.
+    if status == 0 {
+        return None;
+    }
+
     // Link is up when both RDLH and SMLH link up bits are set
-    (status & RK3588_RDLH_LINK_UP) != 0 && (status & RK3588_SMLH_LINK_UP) != 0
+    Some((status & RK3588_RDLH_LINK_UP) != 0 && (status & RK3588_SMLH_LINK_UP) != 0)
 }
 
 /// Enumerate PCIe devices on a host bridge.
@@ -829,9 +939,12 @@ unsafe fn probe_function(
     };
 
     // Calculate stream ID for IOMMU
-    // Default: Requester ID = (bus << 8) | (dev << 3) | func
-    // Use absolute bus for the actual BDF/stream ID
-    let stream_id = ((abs_bus as u32) << 8) | ((dev as u32) << 3) | (func as u32);
+    // The hardware stream ID = iommu_stream_base + raw BDF.
+    // Each PCIe controller has a unique stream_base so their stream IDs
+    // don't collide in the shared SMMU. On RK3588, these bases come from
+    // the iommu-map DTB property (or the iommu_stream_base_for_config fallback).
+    let bdf = ((abs_bus as u32) << 8) | ((dev as u32) << 3) | (func as u32);
+    let stream_id = host.iommu_stream_base + bdf;
 
     Some(PcieDevice {
         bdf: (abs_bus, dev, func), // Use absolute bus for BDF
@@ -860,7 +973,11 @@ unsafe fn probe_bar0(
     // SAFETY: config space is mapped by caller
     let bar0 = unsafe { cfg_read32(config_vaddr, bus, dev, func, CFG_BAR0) };
 
+    io::puts("[device-mgr] PCIe: BAR0 raw=");
+    io::put_hex(bar0 as u64);
+
     if bar0 == 0 || bar0 == 0xFFFFFFFF {
+        io::puts(" (empty)\n");
         return (0, 0);
     }
 
@@ -874,6 +991,10 @@ unsafe fn probe_bar0(
     } else {
         0
     };
+
+    io::puts(" BAR1 raw=");
+    io::put_hex(bar1_orig as u64);
+    io::puts(if is_64bit { " (64-bit)\n" } else { " (32-bit)\n" });
 
     let pci_addr = if is_64bit {
         ((bar1_orig as u64) << 32) | ((bar0 & !0xF) as u64)
@@ -928,19 +1049,73 @@ unsafe fn probe_bar0(
         return (0, 0);
     }
 
-    // Translate PCI address to CPU address using the memory window
-    let cpu_addr = if pci_addr >= host.mem_window_pci
-        && pci_addr < host.mem_window_pci + host.mem_window_size
-    {
-        // Within memory window - translate
-        pci_addr - host.mem_window_pci + host.mem_window_cpu
-    } else if pci_addr == 0 {
-        // Not programmed yet - firmware may not have assigned it
-        0
-    } else {
-        // Assume identity mapping for addresses outside window
-        pci_addr
-    };
+    // If BAR0 PCI address is outside all known memory windows, reassign it
+    // to the mem32 window. This happens when UEFI assigns BARs to addresses
+    // not described by the DTB ranges property (e.g. RK3588 pcie3x2 where
+    // UEFI uses 0xF1000000 but DTB mem32 starts at 0xF1200000).
+    let mut pci_addr = pci_addr;
+    if pci_addr != 0 && !host.is_in_memory_window(pci_addr) && host.mem32_size > 0 {
+        // Align to BAR size within mem32 window
+        let aligned = (host.mem32_pci + size - 1) & !(size - 1);
+        if aligned + size <= host.mem32_pci + host.mem32_size {
+            io::puts("[device-mgr] PCIe: BAR0 at ");
+            io::put_hex(pci_addr);
+            io::puts(" outside memory windows, reassigning to ");
+            io::put_hex(aligned);
+            io::newline();
+
+            // Write new BAR0 value (preserve type bits from original)
+            let bar0_new = (aligned as u32 & !0xF) | (bar0 & 0xF);
+            // SAFETY: config space is mapped by caller
+            unsafe {
+                cfg_write32(config_vaddr, bus, dev, func, CFG_BAR0, bar0_new);
+            }
+            if is_64bit {
+                // SAFETY: config space is mapped by caller
+                unsafe {
+                    cfg_write32(
+                        config_vaddr,
+                        bus,
+                        dev,
+                        func,
+                        CFG_BAR0 + 4,
+                        (aligned >> 32) as u32,
+                    );
+                }
+            }
+
+            pci_addr = aligned;
+        }
+    }
+
+    // Enable Memory Space and Bus Master in Command register.
+    // Required for endpoints to respond to MMIO reads and initiate DMA.
+    // SAFETY: config space is mapped by caller
+    let cmd = unsafe { cfg_read16(config_vaddr, bus, dev, func, CFG_COMMAND) };
+    if cmd & 0x06 != 0x06 {
+        unsafe {
+            cfg_write16(config_vaddr, bus, dev, func, CFG_COMMAND, cmd | 0x06);
+        }
+    }
+    // Read back and log Command register to verify BME is actually set
+    let cmd_rb = unsafe { cfg_read16(config_vaddr, bus, dev, func, CFG_COMMAND) };
+    io::puts("[device-mgr] PCIe: CMD=");
+    io::put_hex(cmd_rb as u64);
+    if cmd_rb & 0x04 != 0 { io::puts(" BME"); } else { io::puts(" !BME"); }
+    if cmd_rb & 0x02 != 0 { io::puts(" MEM"); } else { io::puts(" !MEM"); }
+    io::newline();
+
+    // Translate PCI address to CPU address using memory windows
+    let cpu_addr = host.pci_to_cpu(pci_addr);
+
+    // Diagnostic: log BAR details for debugging
+    io::puts("[device-mgr] PCIe: BAR0 pci_addr=");
+    io::put_hex(pci_addr);
+    io::puts(" cpu_addr=");
+    io::put_hex(cpu_addr);
+    io::puts(" size=");
+    io::put_hex(size);
+    io::newline();
 
     (cpu_addr, size)
 }
@@ -991,6 +1166,413 @@ fn print_device_info(device: &PcieDevice) {
     }
 
     io::newline();
+}
+
+// -- Type 1 header (PCI-PCI bridge) register offsets
+
+/// Primary/Secondary/Subordinate bus number register (32-bit at offset 0x18)
+const CFG_BUS_NUMBERS: u16 = 0x18;
+/// Memory Base / Memory Limit register (32-bit at offset 0x20)
+/// Bits 15:4 = Memory Base upper 12 bits (1MB aligned), Bits 31:20 = Memory Limit upper 12 bits
+const CFG_MEMORY_BASE_LIMIT: u16 = 0x20;
+
+/// Bridge information parsed from a Type 1 header
+#[derive(Debug, Clone, Copy)]
+pub struct BridgeInfo {
+    pub primary_bus: u8,
+    pub secondary_bus: u8,
+    pub subordinate_bus: u8,
+}
+
+/// Read bridge information from a Type 1 (PCI-PCI bridge) header.
+///
+/// Returns `None` if the device at the given BDF is not a bridge.
+///
+/// # Safety
+/// Config space must be mapped at `config_vaddr`.
+pub unsafe fn read_bridge_info(
+    config_vaddr: usize,
+    rel_bus: u8,
+    dev: u8,
+    func: u8,
+) -> Option<BridgeInfo> {
+    // SAFETY: config space is mapped by caller
+    let header_type =
+        unsafe { cfg_read8(config_vaddr, rel_bus, dev, func, CFG_HEADER_TYPE) } & 0x7F;
+    if header_type != HEADER_TYPE_BRIDGE {
+        return None;
+    }
+    // SAFETY: config space is mapped by caller
+    let bus_reg = unsafe { cfg_read32(config_vaddr, rel_bus, dev, func, CFG_BUS_NUMBERS) };
+    Some(BridgeInfo {
+        primary_bus: bus_reg as u8,
+        secondary_bus: (bus_reg >> 8) as u8,
+        subordinate_bus: (bus_reg >> 16) as u8,
+    })
+}
+
+/// Programme the root port's Memory Base/Limit window via DBI.
+///
+/// The DBI mirrors the root port's Type 1 config header. The Memory Base
+/// register (offset 0x20) controls which memory-mapped transactions the
+/// bridge forwards downstream. Without this, the root port won't forward
+/// MEM TLPs to the device's BAR0.
+///
+/// `mem_base` and `mem_limit` are **PCI addresses** (1MB-aligned), not CPU
+/// addresses. The root port checks incoming TLP addresses against this range.
+///
+/// # Safety
+/// `dbi_config_vaddr` must point to the mapped DBI config page.
+pub unsafe fn set_bridge_memory_window(dbi_config_vaddr: usize, mem_base: u64, mem_limit: u64) {
+    // Memory Base: bits 15:4 = address bits 31:20 (1MB granularity)
+    // Memory Limit: bits 31:20 = address bits 31:20 of the top of the range
+    let base_field = ((mem_base >> 16) & 0xFFF0) as u32;
+    let limit_field = ((mem_limit >> 16) & 0xFFF0) as u32;
+    let val = base_field | (limit_field << 16);
+    // SAFETY: DBI config space is mapped by caller; bus=0, dev=0, func=0 is the root port
+    unsafe {
+        cfg_write32(dbi_config_vaddr, 0, 0, 0, CFG_MEMORY_BASE_LIMIT, val);
+    }
+}
+
+// -- DWC iATU registers (unrolled layout, offset from DBI base)
+
+/// Offset of iATU register block from DBI base
+pub const IATU_OFFSET: u64 = 0x300000;
+/// Stride between iATU regions (512 bytes per region)
+const IATU_REGION_STRIDE: usize = 0x200;
+
+// Per-region register offsets
+const IATU_REGION_CTRL1: usize = 0x00;
+const IATU_REGION_CTRL2: usize = 0x04;
+const IATU_LOWER_BASE: usize = 0x08;
+const IATU_UPPER_BASE: usize = 0x0C;
+const IATU_LOWER_LIMIT: usize = 0x10;
+const IATU_LOWER_TARGET: usize = 0x14;
+const IATU_UPPER_TARGET: usize = 0x18;
+const IATU_UPPER_LIMIT: usize = 0x20;
+
+/// ATU type for Type 0 config access (direct children on secondary bus)
+pub const IATU_TYPE_CFG0: u32 = 0x4;
+/// ATU type for Type 1 config access (devices behind switches)
+#[allow(dead_code)]
+pub const IATU_TYPE_CFG1: u32 = 0x5;
+
+// Inbound region offset within each iATU region block
+const IATU_INBOUND_OFFSET: usize = 0x100;
+
+// ATU control bits
+const IATU_ENABLE: u32 = 1 << 31;
+const IATU_CFG_SHIFT_MODE: u32 = 1 << 28;
+
+/// Maximum number of iATU regions to probe/disable.
+const IATU_MAX_REGIONS: usize = 8;
+
+/// Disable all inbound iATU windows.
+///
+/// UEFI may leave inbound iATU windows enabled from its own DMA setup.
+/// On DWC PCIe, enabling ANY inbound iATU window disables the hardware's
+/// default 1:1 pass-through for inbound TLPs. We must explicitly disable
+/// all inbound windows to restore the default pass-through.
+///
+/// # Safety
+///
+/// `iatu_vaddr` must point to the mapped iATU register block.
+pub unsafe fn disable_all_inbound_iatu(iatu_vaddr: usize) {
+    for region in 0..IATU_MAX_REGIONS {
+        let ctrl2_addr =
+            iatu_vaddr + region * IATU_REGION_STRIDE + IATU_INBOUND_OFFSET + IATU_REGION_CTRL2;
+        // SAFETY: iATU registers are mapped by caller
+        unsafe {
+            let ctrl2 = core::ptr::read_volatile(ctrl2_addr as *const u32);
+            if ctrl2 & IATU_ENABLE != 0 {
+                core::ptr::write_volatile(ctrl2_addr as *mut u32, ctrl2 & !IATU_ENABLE);
+            }
+        }
+    }
+}
+
+/// Configure an inbound iATU region in address-match mode.
+///
+/// Creates a pass-through window that accepts inbound DMA TLPs within
+/// [`base`..`limit`] and translates them to AXI address `target + (addr - base)`.
+/// For identity mapping, set `target == base`.
+///
+/// On DWC PCIe, the hardware default 1:1 pass-through only works if NO
+/// inbound iATU region is enabled. However, RK3588 UEFI may leave stale
+/// inbound regions from its own DMA setup. Disabling those without providing
+/// a replacement can leave the RC with no inbound acceptance window at all,
+/// silently dropping all DMA TLPs from downstream devices.
+///
+/// Configure RC BAR0 matching Linux's `dw_pcie_setup_rc()`.
+///
+/// Linux writes BAR0=0x4 (64-bit type) then zeroes it at the end.
+/// On RK3588 with no `dma-ranges`, Linux leaves all inbound iATU disabled
+/// and zeroes BAR0 — the DWC RC passes all inbound TLPs through by default.
+///
+/// # Safety
+///
+/// `dbi_vaddr` must point to the mapped DBI config page (root port config space).
+pub unsafe fn setup_rc_bar0_for_dma(dbi_vaddr: usize) {
+    const DBI_RO_WR_EN: usize = 0x8BC;
+
+    // Enable DBI write access to read-only registers
+    unsafe {
+        let misc = core::ptr::read_volatile((dbi_vaddr + DBI_RO_WR_EN) as *const u32);
+        core::ptr::write_volatile((dbi_vaddr + DBI_RO_WR_EN) as *mut u32, misc | 1);
+    }
+
+    // Write BAR0=0x4 (64-bit type), BAR1=0x0 — then zero BAR0 at end.
+    // This matches Linux dw_pcie_setup_rc() exactly.
+    unsafe {
+        core::ptr::write_volatile((dbi_vaddr + 0x10) as *mut u32, 0x0000_0004);
+        core::ptr::write_volatile((dbi_vaddr + 0x14) as *mut u32, 0x0000_0000);
+        core::ptr::write_volatile((dbi_vaddr + 0x10) as *mut u32, 0x0000_0000);
+    }
+
+    // Disable DBI write access to read-only registers
+    unsafe {
+        let misc = core::ptr::read_volatile((dbi_vaddr + DBI_RO_WR_EN) as *const u32);
+        core::ptr::write_volatile((dbi_vaddr + DBI_RO_WR_EN) as *mut u32, misc & !1);
+    }
+}
+
+/// Enable Memory Space and Bus Master on a device via config space.
+///
+/// Required for endpoints to respond to MMIO and initiate DMA,
+/// and for bridges to forward transactions.
+///
+/// # Safety
+/// Config space must be mapped at `config_vaddr`.
+pub unsafe fn enable_bus_master(config_vaddr: usize, bus: u8, dev: u8, func: u8) {
+    let cmd = unsafe { cfg_read16(config_vaddr, bus, dev, func, CFG_COMMAND) };
+    unsafe { cfg_write16(config_vaddr, bus, dev, func, CFG_COMMAND, cmd | 0x06) };
+}
+
+/// Programme an outbound iATU region for config space access.
+///
+/// # Safety
+/// `iatu_vaddr` must point to mapped iATU registers.
+pub unsafe fn programme_iatu_for_config(
+    iatu_vaddr: usize,
+    region_index: usize,
+    atu_type: u32,
+    cpu_base: u64,
+    size: u64,
+    target_bus: u8,
+) {
+    let region_base = iatu_vaddr + region_index * IATU_REGION_STRIDE;
+
+    // SAFETY: caller guarantees iATU registers are mapped at iatu_vaddr
+    unsafe {
+        // Disable region first
+        core::ptr::write_volatile((region_base + IATU_REGION_CTRL2) as *mut u32, 0);
+
+        // Set base address (CPU address that triggers translation)
+        core::ptr::write_volatile((region_base + IATU_LOWER_BASE) as *mut u32, cpu_base as u32);
+        core::ptr::write_volatile(
+            (region_base + IATU_UPPER_BASE) as *mut u32,
+            (cpu_base >> 32) as u32,
+        );
+
+        // Set limit (base + size - 1)
+        let limit = cpu_base + size - 1;
+        core::ptr::write_volatile((region_base + IATU_LOWER_LIMIT) as *mut u32, limit as u32);
+        core::ptr::write_volatile(
+            (region_base + IATU_UPPER_LIMIT) as *mut u32,
+            (limit >> 32) as u32,
+        );
+
+        // Set target (BDF encoding for config access)
+        let target = (target_bus as u32) << 24;
+        core::ptr::write_volatile((region_base + IATU_LOWER_TARGET) as *mut u32, target);
+        core::ptr::write_volatile((region_base + IATU_UPPER_TARGET) as *mut u32, 0);
+
+        // Set type and enable with CFG_SHIFT_MODE
+        core::ptr::write_volatile((region_base + IATU_REGION_CTRL1) as *mut u32, atu_type);
+        core::ptr::write_volatile(
+            (region_base + IATU_REGION_CTRL2) as *mut u32,
+            IATU_ENABLE | IATU_CFG_SHIFT_MODE,
+        );
+    }
+
+    // Poll for enable (hardware may take a few cycles)
+    for _ in 0..1000 {
+        // SAFETY: caller guarantees iATU registers are mapped
+        let ctrl2 =
+            unsafe { core::ptr::read_volatile((region_base + IATU_REGION_CTRL2) as *const u32) };
+        if ctrl2 & IATU_ENABLE != 0 {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Programme an outbound iATU region for memory (BAR MMIO) access.
+///
+/// After PCIe enumeration, reprogramme an ATU region so that CPU accesses
+/// to the memory window are translated into PCI MEM TLPs, allowing drivers
+/// to reach device BARs.
+///
+/// # Safety
+/// `iatu_vaddr` must point to mapped iATU registers.
+pub unsafe fn programme_iatu_for_mem(
+    iatu_vaddr: usize,
+    region_index: usize,
+    cpu_base: u64,
+    pci_base: u64,
+    size: u64,
+) {
+    let region_base = iatu_vaddr + region_index * IATU_REGION_STRIDE;
+
+    // SAFETY: caller guarantees iATU registers are mapped at iatu_vaddr
+    unsafe {
+        // Disable region first
+        core::ptr::write_volatile((region_base + IATU_REGION_CTRL2) as *mut u32, 0);
+
+        // Set base address (CPU address that triggers translation)
+        core::ptr::write_volatile((region_base + IATU_LOWER_BASE) as *mut u32, cpu_base as u32);
+        core::ptr::write_volatile(
+            (region_base + IATU_UPPER_BASE) as *mut u32,
+            (cpu_base >> 32) as u32,
+        );
+
+        // Set limit (base + size - 1)
+        let limit = cpu_base + size - 1;
+        core::ptr::write_volatile((region_base + IATU_LOWER_LIMIT) as *mut u32, limit as u32);
+        core::ptr::write_volatile(
+            (region_base + IATU_UPPER_LIMIT) as *mut u32,
+            (limit >> 32) as u32,
+        );
+
+        // Set target (PCI base address for the memory window)
+        core::ptr::write_volatile(
+            (region_base + IATU_LOWER_TARGET) as *mut u32,
+            pci_base as u32,
+        );
+        core::ptr::write_volatile(
+            (region_base + IATU_UPPER_TARGET) as *mut u32,
+            (pci_base >> 32) as u32,
+        );
+
+        // Type 0 = MEM read/write, enable without CFG_SHIFT_MODE
+        core::ptr::write_volatile((region_base + IATU_REGION_CTRL1) as *mut u32, 0x0);
+        core::ptr::write_volatile(
+            (region_base + IATU_REGION_CTRL2) as *mut u32,
+            IATU_ENABLE,
+        );
+    }
+
+    // Poll for enable
+    for _ in 0..1000 {
+        // SAFETY: caller guarantees iATU registers are mapped
+        let ctrl2 =
+            unsafe { core::ptr::read_volatile((region_base + IATU_REGION_CTRL2) as *const u32) };
+        if ctrl2 & IATU_ENABLE != 0 {
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// Look up the low-address DBI base for an RK3588 PCIe controller.
+///
+/// RK3588 has both high-address (> 4GB) and low-address DBI mappings.
+/// If the DTB provides the high-address DBI but no device untyped covers it,
+/// this returns the low-address alternative derived from the TRM.
+pub fn dbi_low_addr_for_config(config_base: u64) -> Option<u64> {
+    match config_base {
+        0xF000_0000 => Some(0xF500_0000),
+        0xF100_0000 => Some(0xF540_0000),
+        0xF200_0000 => Some(0xF580_0000),
+        0xF300_0000 => Some(0xF5C0_0000),
+        0xF400_0000 => Some(0xF600_0000),
+        _ => None,
+    }
+}
+
+/// Look up the SMMU iommu-map stream ID base for an RK3588 PCIe controller.
+///
+/// When the EDK2 DTB doesn't include iommu-map, this provides the hardware-
+/// defined stream ID base from the RK3588 TRM. Each PCIe controller has a
+/// unique base so their stream IDs don't collide in the shared SMMU.
+fn iommu_stream_base_for_config(config_base: u64) -> u32 {
+    // From rk3588-extra.dtsi / rk3588-base.dtsi iommu-map entries (upstream):
+    //   pcie3x4:   <0x0000 &mmu600_pcie 0x0000 0x1000>
+    //   pcie3x2:   <0x1000 &mmu600_pcie 0x1000 0x1000>
+    //   pcie2x1l0: <0x2000 &its0        0x2000 0x1000>
+    //   pcie2x1l1: <0x3000 &mmu600_pcie 0x3000 0x1000>
+    //   pcie2x1l2: <0x4000 &mmu600_pcie 0x4000 0x1000>
+    //
+    // The hardware adds the controller's rid_base to local BDFs, producing
+    // RIDs that the SMMU sees directly. With identity iommu-map (rid_base
+    // == iommu_base), the stream ID = iommu_base + local_BDF.
+    match config_base {
+        0xF000_0000 => 0x0000, // pcie3x4
+        0xF100_0000 => 0x1000, // pcie3x2
+        0xF200_0000 => 0x2000, // pcie2x1l0
+        0xF300_0000 => 0x3000, // pcie2x1l1
+        0xF400_0000 => 0x4000, // pcie2x1l2
+        _ => 0,
+    }
+}
+
+/// Scan a single bus for devices at the given config space virtual address.
+///
+/// Unlike `enumerate_devices`, this scans exactly one bus. The config page
+/// at `config_vaddr` must cover the target bus. `abs_bus` is used for BDF
+/// reporting; ECAM addressing uses rel_bus=0 (the config page IS the bus).
+///
+/// # Safety
+/// Config space must be mapped at `config_vaddr` for at least `mapped_size` bytes.
+pub unsafe fn enumerate_devices_at(
+    host: &PcieHostBridge,
+    config_vaddr: usize,
+    abs_bus: u8,
+    mapped_size: usize,
+) -> [PcieDevice; MAX_PCIE_DEVICES] {
+    let mut devices = [const { PcieDevice::empty() }; MAX_PCIE_DEVICES];
+    let mut dev_count = 0;
+
+    // How many devices can we scan? Each device occupies 32KB in ECAM space.
+    let max_devs = (mapped_size / (1 << 15)).clamp(1, 32) as u8;
+
+    io::puts("[device-mgr] PCIe: scanning secondary bus ");
+    io::put_u64(abs_bus as u64);
+    io::puts(" (mapped ");
+    io::put_u64((mapped_size / 1024) as u64);
+    io::puts("KB)...\n");
+
+    for dev in 0..max_devs {
+        if dev_count >= MAX_PCIE_DEVICES {
+            break;
+        }
+
+        let dev_offset = (dev as usize) << 15;
+        let dev_remaining = mapped_size.saturating_sub(dev_offset);
+        let can_scan_functions = dev_remaining >= (8 << 12);
+
+        // SAFETY: config space is mapped by caller
+        // rel_bus=0 because config_vaddr points directly at this bus's config page
+        unsafe {
+            probe_device(
+                host,
+                config_vaddr,
+                abs_bus, // absolute bus for BDF
+                0,       // rel_bus=0: config page IS this bus
+                dev,
+                &mut devices,
+                &mut dev_count,
+                can_scan_functions,
+            )
+        };
+    }
+
+    io::puts("[device-mgr] PCIe: found ");
+    io::put_u64(dev_count as u64);
+    io::puts(" device(s) on secondary bus\n");
+
+    devices
 }
 
 /// Get human-readable name for a PCIe class code.

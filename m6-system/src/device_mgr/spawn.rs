@@ -408,7 +408,7 @@ pub fn spawn_driver(
         crate::io::puts(config.manifest.compatible);
         crate::io::newline();
         claim_irq(irq_slot, config.device_info.irq, &cptr)?;
-    } else if config.manifest.needs_irq {
+    } else if config.manifest.needs_irq && !config.manifest.needs_msix {
         crate::io::puts("[device-mgr] WARNING: needs_irq but irq=");
         crate::io::put_u64(config.device_info.irq as u64);
         crate::io::puts(" for ");
@@ -429,8 +429,8 @@ pub fn spawn_driver(
         .map_err(SpawnError::RetypeFailed)?;
     }
 
-    // Create IOSpace if needed (track whether it was actually created)
-    let iospace_created = if let Some(io_slot) = iospace_slot {
+    // Create IOSpace if needed — SMMU is mandatory for DMA-capable devices
+    if let Some(io_slot) = iospace_slot {
         let smmu_slot = if has_smmu_control {
             // Resolve device's SMMU phandle to the correct SmmuControl slot
             let slot = resolve_smmu_phandle_to_slot(config.device_info.smmu_phandle);
@@ -447,20 +447,7 @@ pub fn spawn_driver(
         } else {
             None
         };
-        create_iospace(io_slot, smmu_slot, config.device_info.stream_id, &cptr)?
-    } else {
-        false
-    };
-
-    // SECURITY: Check if drivers that need IOMMU got IOSpace
-    // In production, this should fail. For debugging, we allow degraded operation.
-    if config.manifest.needs_iommu && !iospace_created {
-        // TODO: Make this configurable or fail in production builds
-        crate::io::puts("[device-mgr] SECURITY WARNING: ");
-        crate::io::puts(config.manifest.binary_name);
-        crate::io::puts(" running WITHOUT IOMMU protection!\n");
-        // Continue in degraded mode for debugging - remove this for production!
-    } else if iospace_created {
+        create_iospace(io_slot, smmu_slot, config.device_info.stream_id, &cptr)?;
         crate::io::puts("[device-mgr] IOSpace created for ");
         crate::io::puts(config.manifest.binary_name);
         if let Some(sid) = config.device_info.stream_id {
@@ -469,9 +456,6 @@ pub fn spawn_driver(
         }
         crate::io::newline();
     }
-
-    // Only pass iospace_slot to install_driver_caps if it was actually created
-    let effective_iospace_slot = if iospace_created { iospace_slot } else { None };
 
     // Create DMA buffer frames for DMA-capable drivers
     if let Some(ref dma_slots) = dma_buffer_slots {
@@ -488,17 +472,16 @@ pub fn spawn_driver(
         }
     }
 
-    // Create DmaPool and map DMA buffers into IOSpace if IOSpace was created
-    let dma_pool_slot = if let (true, Some(iospace), Some(dma_slots)) =
-        (iospace_created, iospace_slot, dma_buffer_slots.as_ref())
+    // Create DmaPool for IOVA allocation (driver maps DMA buffers itself)
+    let dma_pool_slot = if let (Some(iospace), Some(_)) =
+        (iospace_slot, dma_buffer_slots.as_ref())
     {
         let pool_slot = registry.alloc_slot();
 
-        // Create DmaPool with IOVA range starting at 256MB
         const IOVA_BASE: u64 = 0x1000_0000; // 256MB
         const IOVA_SIZE: u64 = 0x0100_0000; // 16MB pool
 
-        let pool_created = match dma_pool_create(
+        match dma_pool_create(
             cptr(iospace),
             IOVA_BASE,
             IOVA_SIZE,
@@ -506,64 +489,12 @@ pub fn spawn_driver(
             pool_slot,
             0, // depth = 0 (auto)
         ) {
-            Ok(_) => true,
+            Ok(_) => Some(pool_slot),
             Err(SyscallError::WouldBlock) => {
                 crate::io::puts("[device-mgr] WARN: DMA pool creation timed out\n");
-                crate::io::puts("[device-mgr] WARN: Driver will run WITHOUT DMA buffers!\n");
-                false
+                None
             }
             Err(e) => return Err(SpawnError::RetypeFailed(e)),
-        };
-
-        if !pool_created {
-            None
-        } else {
-            // Map DMA buffer frames into IOSpace at sequential IOVAs
-            // Retry with backoff for timing issues with SMMU
-            let mut iova = IOVA_BASE;
-            let mut mapping_failed = false;
-            for &slot in dma_slots {
-                let mut map_result = Err(SyscallError::WouldBlock);
-                let mut delay_iterations = 100_000u32;
-
-                for attempt in 0..5 {
-                    map_result = iospace_map_frame(
-                        cptr(iospace),
-                        cptr(slot),
-                        iova,
-                        3, // RW access
-                    );
-                    match map_result {
-                        Ok(_) => break,
-                        Err(SyscallError::WouldBlock) if attempt < 4 => {
-                            for _ in 0..delay_iterations {
-                                core::hint::spin_loop();
-                            }
-                            delay_iterations = (delay_iterations * 3) / 2;
-                            continue;
-                        }
-                        Err(_) => break,
-                    }
-                }
-
-                match map_result {
-                    Ok(_) => {}
-                    Err(SyscallError::AlreadyMapped) => {
-                        // IOVA already mapped by firmware (UEFI) - this is OK
-                        // The mapping already exists, continue with next frame
-                    }
-                    Err(SyscallError::WouldBlock) => {
-                        crate::io::puts("[device-mgr] WARN: IOMMU frame mapping timed out\n");
-                        crate::io::puts("[device-mgr] WARN: Driver will run WITHOUT DMA buffers!\n");
-                        mapping_failed = true;
-                        break;
-                    }
-                    Err(e) => return Err(SpawnError::IOSpaceOpFailed(e)),
-                }
-                iova += PAGE_SIZE as u64;
-            }
-
-            if mapping_failed { None } else { Some(pool_slot) }
         }
     } else {
         None
@@ -619,7 +550,6 @@ pub fn spawn_driver(
     // DWC3 USB drivers use per-controller DMA addresses: 0x8X01_0000
     if let Some(ref dma_slots) = dma_buffer_slots {
         let dma_buffer_vaddr = if config.manifest.binary_name == "drv-usb-dwc3" {
-            // Per-controller DMA region: controller 0 = 0x80010000, 1 = 0x80110000, etc.
             let controller_idx = match config.device_info.phys_base {
                 0xFC00_0000 => 0,
                 0xFC40_0000 => 1,
@@ -718,7 +648,7 @@ pub fn spawn_driver(
         }
 
         // Unmap the frame so the address can be reused
-        let _ = unmap_frame(cptr(info_slot));
+        let _ = unmap_frame(cptr(slots::ROOT_VSPACE), TEMP_VADDR);
 
         Some(info_slot)
     } else {
@@ -726,8 +656,8 @@ pub fn spawn_driver(
     };
 
     // Install initial capabilities in driver's CSpace
-    // Only copy SmmuControl if IOSpace was actually created (SMMU is available)
-    let smmu_to_copy = if iospace_created {
+    // Only copy SmmuControl if IOSpace was created (device needs IOMMU)
+    let smmu_to_copy = if iospace_slot.is_some() {
         resolve_smmu_phandle_to_slot(config.device_info.smmu_phandle)
     } else {
         None
@@ -743,7 +673,7 @@ pub fn spawn_driver(
         device_frame_slot,         // device frame slot number
         irq_handler_slot,          // optional irq handler slot
         irq_notif_slot,            // optional notification for IRQ delivery
-        effective_iospace_slot,    // optional iospace slot (only if actually created)
+        iospace_slot,    // optional iospace slot (only if actually created)
         smmu_to_copy,              // optional smmu control slot
         dma_pool_slot,             // optional DMA pool slot
         instance_info_slot,        // optional instance info frame (for SMMU drivers)
@@ -754,7 +684,8 @@ pub fn spawn_driver(
         &extended_mmio_slots,      // extended MMIO frames for large MMIO regions
     )?;
 
-    // Setup MSI-X for PCIe devices that support it
+    // Setup MSI-X for PCIe devices that support it.
+    // MSI-X failure is non-fatal — drivers fall back to polling mode.
     if let (Some(msix), Some(bdf)) = (&config.device_info.msix, config.device_info.pcie_bdf)
         && msix.present
         && config.device_info.phys_base != 0
@@ -762,17 +693,25 @@ pub fn spawn_driver(
         // Request 2 vectors for NVMe (admin + 1 IO queue), can be expanded later
         let requested_vectors = 2u32.min(msix.table_size as u32);
 
-        let msix_result = setup_msix(
+        match setup_msix(
             msix,
             requested_vectors,
             bdf,
             config.device_info.phys_base,
             registry,
             &cptr,
-        )?;
-
-        // Install MSI-X handler capabilities into driver's CSpace
-        install_msix_caps(cptr(cspace_slot), cptr(slots::ROOT_CNODE), &msix_result)?;
+        ) {
+            Ok(msix_result) => {
+                if let Err(_e) = install_msix_caps(cptr(cspace_slot), cptr(slots::ROOT_CNODE), &msix_result) {
+                    crate::io::puts("[device-mgr] WARN: MSI-X cap install failed for ");
+                    crate::io::puts(config.manifest.binary_name);
+                    crate::io::newline();
+                }
+            }
+            Err(_) => {
+                crate::io::puts("[device-mgr] WARN: MSI-X setup failed, driver will use polling\n");
+            }
+        }
     }
 
     // Calculate fault badge for this driver
@@ -1154,17 +1093,15 @@ fn claim_irq(slot: u64, irq: u32, cptr: &impl Fn(u64) -> u64) -> Result<(), Spaw
 ///
 /// # Security
 ///
-/// Returns `Err(IommuRequired)` if SMMU capability is not available.
-/// Returns `Ok(false)` if IOSpace creation fails due to SMMU hardware issues
-/// (WouldBlock/Timeout) - this allows degraded operation without IOMMU.
-/// Returns `Ok(true)` if IOSpace was created successfully.
+/// SMMU is mandatory for DMA-capable devices. All failure modes return errors
+/// that abort driver spawn — no degraded operation without IOMMU.
 fn create_iospace(
     slot: u64,
     smmu_control_slot: Option<u64>,
     stream_id: Option<u32>,
     cptr: &impl Fn(u64) -> u64,
-) -> Result<bool, SpawnError> {
-    // SECURITY: Require SMMU capability - drivers with DMA must use IOMMU
+) -> Result<(), SpawnError> {
+    // SECURITY: Require SMMU capability — drivers with DMA must use IOMMU
     let smmu_slot = match smmu_control_slot {
         Some(s) => s,
         None => return Err(SpawnError::IommuRequired),
@@ -1172,7 +1109,6 @@ fn create_iospace(
 
     // Create IOSpace from SmmuControl + untyped memory
     // Retry with exponential backoff for WouldBlock (timing issues with SMMU init)
-    // Total wait time: ~500ms (10ms + 15ms + 22ms + 33ms + 50ms + 75ms + 112ms + 168ms + 252ms)
     const MAX_RETRIES: u32 = 10;
     let mut create_result = Err(SyscallError::WouldBlock);
     let mut delay_iterations = 100_000u32; // ~10ms initial delay
@@ -1188,7 +1124,6 @@ fn create_iospace(
         match create_result {
             Ok(_) => break,
             Err(SyscallError::WouldBlock) if attempt < MAX_RETRIES - 1 => {
-                // Exponential backoff: multiply delay by 1.5 each iteration
                 for _ in 0..delay_iterations {
                     core::hint::spin_loop();
                 }
@@ -1199,36 +1134,16 @@ fn create_iospace(
         }
     }
 
-    if let Err(e) = create_result {
-        // Handle various failure modes gracefully - fall back to no-IOMMU mode
-        match e {
-            SyscallError::WouldBlock => {
-                crate::io::puts("[device-mgr] WARN: IOSpace creation timed out (SMMU not ready?)\n");
-            }
-            SyscallError::AlreadyMapped => {
-                crate::io::puts("[device-mgr] IOSpace already configured by firmware\n");
-            }
-            SyscallError::NotSupported | SyscallError::InvalidCap | SyscallError::EmptySlot => {
-                // SMMU capability not available (kernel skipped SMMU init)
-                crate::io::puts("[device-mgr] WARN: SMMU not available (");
-                crate::io::puts(e.name());
-                crate::io::puts(")\n");
-            }
-            _ => {
-                crate::io::puts("[device-mgr] WARN: IOSpace creation failed: ");
-                crate::io::puts(e.name());
-                crate::io::newline();
-            }
-        }
-        crate::io::puts("[device-mgr] WARN: Driver will run WITHOUT IOMMU protection!\n");
-        return Ok(false);
-    }
+    create_result.map_err(|e| {
+        crate::io::puts("[device-mgr] IOSpace creation failed: ");
+        crate::io::puts(e.name());
+        crate::io::newline();
+        SpawnError::IOSpaceOpFailed(e)
+    })?;
 
     // Bind stream ID if device has one
-    // VirtIO MMIO devices typically don't have stream IDs and operate in bypass mode
     // PCIe devices with stream IDs will have IOMMU translation enabled
     if let Some(sid) = stream_id {
-        // Retry stream binding with backoff
         let mut bind_result = Err(SyscallError::WouldBlock);
         let mut delay_iterations = 100_000u32;
 
@@ -1236,6 +1151,7 @@ fn create_iospace(
             bind_result = iospace_bind_stream(cptr(slot), cptr(smmu_slot), sid);
             match bind_result {
                 Ok(_) => break,
+                Err(SyscallError::AlreadyMapped) => break, // firmware pre-bound — OK
                 Err(SyscallError::WouldBlock) if attempt < 4 => {
                     for _ in 0..delay_iterations {
                         core::hint::spin_loop();
@@ -1249,29 +1165,51 @@ fn create_iospace(
 
         match bind_result {
             Ok(_) => {
-                crate::io::puts("[device-mgr] Bound stream ID ");
+                crate::io::puts("[device-mgr] Bound stream ID 0x");
                 crate::io::put_hex(sid as u64);
                 crate::io::puts(" to IOSpace\n");
             }
             Err(SyscallError::AlreadyMapped) => {
-                // Stream ID already bound by firmware (UEFI) - this is OK
-                // The stream is already configured in the SMMU, use it as-is
-                crate::io::puts("[device-mgr] Stream ");
+                crate::io::puts("[device-mgr] Stream 0x");
                 crate::io::put_hex(sid as u64);
                 crate::io::puts(" already bound by firmware\n");
             }
-            Err(SyscallError::WouldBlock) => {
-                crate::io::puts("[device-mgr] WARN: Stream bind timed out for stream ");
+            Err(e) => {
+                crate::io::puts("[device-mgr] Stream bind failed for 0x");
                 crate::io::put_hex(sid as u64);
+                crate::io::puts(": ");
+                crate::io::puts(e.name());
                 crate::io::newline();
-                crate::io::puts("[device-mgr] WARN: Driver will run WITHOUT IOMMU protection!\n");
-                return Ok(false);
+                return Err(SpawnError::IOSpaceOpFailed(e));
             }
-            Err(e) => return Err(SpawnError::IOSpaceOpFailed(e)),
+        }
+
+        // Also bind at raw BDF (stream_id & 0xFFFF) if it differs from the
+        // full stream ID. With correct iommu-map values (0x1000 for pcie3x2,
+        // etc.), stream IDs are <0x10000 so this is typically a no-op.
+        let raw_bdf = sid & 0xFFFF;
+        if raw_bdf != sid {
+            let raw_bind = iospace_bind_stream(cptr(slot), cptr(smmu_slot), raw_bdf);
+            match raw_bind {
+                Ok(_) => {
+                    crate::io::puts("[device-mgr] Also bound raw BDF 0x");
+                    crate::io::put_hex(raw_bdf as u64);
+                    crate::io::puts(" to IOSpace\n");
+                }
+                Err(SyscallError::AlreadyMapped) => {
+                    // Another device already has this raw BDF — fine, skip
+                }
+                Err(e) => {
+                    crate::io::puts("[device-mgr] WARN: raw BDF bind failed: ");
+                    crate::io::puts(e.name());
+                    crate::io::newline();
+                    // Non-fatal: the primary binding should still work
+                }
+            }
         }
     }
 
-    Ok(true)
+    Ok(())
 }
 
 /// Ensure page tables exist for an address range in a VSpace.
@@ -1734,7 +1672,7 @@ fn install_driver_caps(
         }
     }
 
-    // Slots 64-127: Large MMIO frames (for multi-page additional regions like PHY)
+    // Slots 80-143: Large MMIO frames (for multi-page additional regions like PHY)
     for (i, &slot) in large_frame_slots.iter().enumerate() {
         if slot != 0 {
             let dest_slot = slots::driver::LARGE_FRAME_START + i as u64;
@@ -1743,7 +1681,7 @@ fn install_driver_caps(
         }
     }
 
-    // Slots 48-63: Extended MMIO frames (for devices with large MMIO regions)
+    // Slots 64-79: Extended MMIO frames (for devices with large MMIO regions)
     for (i, &slot) in extended_mmio_slots.iter().enumerate() {
         if slot != 0 {
             let dest_slot = slots::driver::EXTENDED_MMIO_START + i as u64;
@@ -1951,6 +1889,22 @@ fn programme_msix_table(
     io::put_hex(table_vaddr as u64);
     io::newline();
 
+    // Mask ALL MSI-X vectors first. UEFI may have left MSI-X enabled with
+    // stale table entries pointing to UEFI's MSI addresses. If we fail to
+    // programme our own entries or can't access config space to disable
+    // MSI-X, the controller would send MSI-X TLPs to stale addresses on
+    // completion — causing it to hang. Masking every vector via the BAR
+    // prevents this regardless of the MSI-X Enable bit state.
+    for i in 0..msix.table_size as u32 {
+        let entry_addr = table_vaddr + (i as usize) * 16;
+        // SAFETY: BAR page is mapped, entry is within the table
+        unsafe {
+            // Vector Control: bit 0 = 1 → masked
+            core::ptr::write_volatile((entry_addr + 12) as *mut u32, 1);
+        }
+    }
+
+    // Now programme our allocated vectors (unmask them)
     for i in 0..vector_count {
         let entry_offset = (i as usize) * 16;
         let entry_addr = table_vaddr + entry_offset;
@@ -1975,10 +1929,22 @@ fn programme_msix_table(
     }
 
     // Unmap the temporary mapping
-    let _ = unmap_frame(cptr(bar_frame_slot));
+    let _ = unmap_frame(cptr(slots::ROOT_VSPACE), MSIX_TABLE_VADDR);
 
-    // Enable MSI-X in config space
-    enable_msix_in_config(pcie_bdf, msix.cap_offset, registry, cptr)?;
+    // Enable MSI-X in config space (non-fatal if this fails — all vectors
+    // are masked above, so even if UEFI left MSI-X enabled the controller
+    // won't generate stale TLPs)
+    if enable_msix_in_config(pcie_bdf, msix.cap_offset, bar_phys_base, registry, cptr).is_err() {
+        let (bus, dev, func) = pcie_bdf;
+        io::puts("[device-mgr] MSI-X: config space enable FAILED for ");
+        io::put_hex(bus as u64);
+        io::puts(":");
+        io::put_hex(dev as u64);
+        io::puts(".");
+        io::put_hex(func as u64);
+        io::puts(" — vectors masked via BAR only\n");
+        return Ok(());
+    }
 
     Ok(())
 }
@@ -1986,9 +1952,12 @@ fn programme_msix_table(
 /// Enable MSI-X in PCIe config space.
 ///
 /// This maps the config space temporarily and sets the MSI-X Enable bit.
+/// For DWC hosts (RK3588), downstream devices require ATU programming
+/// to access config space — plain ECAM addressing only works for ECAM hosts.
 fn enable_msix_in_config(
     pcie_bdf: (u8, u8, u8),
     cap_offset: u8,
+    bar_phys_base: u64,
     registry: &mut Registry,
     cptr: &impl Fn(u64) -> u64,
 ) -> Result<(), SpawnError> {
@@ -1997,19 +1966,80 @@ fn enable_msix_in_config(
 
     // SAFETY: Called after _start has initialised BOOT_INFO
     let boot_info = unsafe { crate::get_boot_info() };
-    let dtb_data =
-        unsafe { core::slice::from_raw_parts(boot_info.dtb_vaddr as *const u8, 0x10000) };
-
-    // Parse PCIe hosts to find config space base
-    let hosts = pcie::parse_pcie_hosts(dtb_data);
-
-    let Some(host) = hosts.iter().flatten().next() else {
-        io::puts("[device-mgr] MSI-X: no PCIe host found for config access\n");
+    let Some(dtb_data) = (unsafe { boot_info.dtb_slice() }) else {
+        io::puts("[device-mgr] MSI-X: DTB not available\n");
         return Err(SpawnError::MsixSetupFailed);
     };
 
-    // Calculate config space address for this BDF
+    let hosts = pcie::parse_pcie_hosts(dtb_data);
     let (bus, dev, func) = pcie_bdf;
+
+    // Find the host that owns this BDF.
+    // Strategy: (1) match by bus_range, (2) match by BAR0 in memory window.
+    let mut found_host: Option<&pcie::PcieHostBridge> = None;
+    for host in hosts.iter().flatten() {
+        // Direct bus_range match (works for ECAM hosts)
+        if bus >= host.bus_range.0 && bus <= host.bus_range.1 {
+            found_host = Some(host);
+            break;
+        }
+        // Match by BAR0 falling within this host's memory window.
+        // On DWC hosts, the device sits on a secondary bus behind the root
+        // port, so bus_range won't match — but BAR0 is always within the
+        // host's memory aperture.
+        if host.mem32_size > 0
+            && bar_phys_base >= host.mem32_cpu
+            && bar_phys_base < host.mem32_cpu + host.mem32_size
+        {
+            found_host = Some(host);
+            break;
+        }
+    }
+
+    let Some(host) = found_host else {
+        io::puts("[device-mgr] MSI-X: no PCIe host found for config access (BAR0=");
+        io::put_hex(bar_phys_base);
+        io::puts(") BDF=");
+        io::put_u64(bus as u64);
+        io::puts(":");
+        io::put_u64(dev as u64);
+        io::puts(".");
+        io::put_u64(func as u64);
+        io::puts("\n[device-mgr] MSI-X: parsed hosts:");
+        for (i, h) in hosts.iter().enumerate() {
+            if let Some(h) = h {
+                io::puts(" [");
+                io::put_u64(i as u64);
+                io::puts("]=mem32@");
+                io::put_hex(h.mem32_cpu);
+                io::puts("+");
+                io::put_hex(h.mem32_size);
+                io::puts(",bus=");
+                io::put_u64(h.bus_range.0 as u64);
+                io::puts("-");
+                io::put_u64(h.bus_range.1 as u64);
+            }
+        }
+        io::newline();
+        return Err(SpawnError::MsixSetupFailed);
+    };
+
+    const CONFIG_VADDR: u64 = 0x0000_9001_0000;
+
+    ensure_page_tables(
+        slots::ROOT_VSPACE,
+        CONFIG_VADDR,
+        CONFIG_VADDR + 0x4000, // room for config + iATU pages
+        registry,
+        cptr,
+    )?;
+
+    // For DWC hosts, we need ATU to access downstream device config space
+    if host.host_type == pcie::PcieHostType::DesignWareDwc {
+        return enable_msix_dwc(host, pcie_bdf, cap_offset, CONFIG_VADDR, registry, boot_info, cptr);
+    }
+
+    // ECAM path: direct config space access
     let rel_bus = bus - host.bus_range.0;
     let config_offset = ((rel_bus as u64) << 20)
         | ((dev as u64) << 15)
@@ -2019,12 +2049,10 @@ fn enable_msix_in_config(
     let config_phys = host.config_base + (config_offset & !0xFFF);
     let config_page_offset = (config_offset & 0xFFF) as usize;
 
-    // Find device untyped for config space
     let (device_untyped_slot, _size, untyped_base) = boot_info
         .find_device_untyped(config_phys)
         .ok_or(SpawnError::DeviceUntypedNotFound)?;
 
-    // Retype to DeviceFrame
     let config_frame_slot = registry.alloc_slot();
     let offset_in_untyped = config_phys.saturating_sub(untyped_base);
 
@@ -2038,17 +2066,6 @@ fn enable_msix_in_config(
     )
     .map_err(SpawnError::RetypeFailed)?;
 
-    // Map into device-mgr's VSpace
-    const CONFIG_VADDR: u64 = 0x0000_9001_0000;
-
-    ensure_page_tables(
-        slots::ROOT_VSPACE,
-        CONFIG_VADDR,
-        CONFIG_VADDR + PAGE_SIZE as u64,
-        registry,
-        cptr,
-    )?;
-
     map_frame(
         cptr(slots::ROOT_VSPACE),
         cptr(config_frame_slot),
@@ -2058,23 +2075,144 @@ fn enable_msix_in_config(
     )
     .map_err(SpawnError::FrameMapFailed)?;
 
-    // Read and modify MSI-X Message Control register (cap_offset + 2)
-    let msg_ctrl_addr = CONFIG_VADDR as usize + config_page_offset + 2;
+    msix_enable_write(CONFIG_VADDR as usize + config_page_offset);
 
-    // SAFETY: We just mapped this memory
+    let _ = unmap_frame(cptr(slots::ROOT_VSPACE), CONFIG_VADDR);
+    Ok(())
+}
+
+/// Enable MSI-X for a device behind a DWC root port.
+///
+/// Programmes the iATU for config access, maps the secondary bus config page,
+/// and writes the MSI-X Enable bit.
+fn enable_msix_dwc(
+    host: &crate::pcie::PcieHostBridge,
+    pcie_bdf: (u8, u8, u8),
+    cap_offset: u8,
+    base_vaddr: u64,
+    registry: &mut Registry,
+    boot_info: &crate::boot_info::DevMgrBootInfo,
+    cptr: &impl Fn(u64) -> u64,
+) -> Result<(), SpawnError> {
+    use crate::io;
+    use crate::pcie;
+
+    let (bus, _dev, _func) = pcie_bdf;
+
+    // Resolve DBI base (prefer low-address for device untyped availability)
+    let dbi_base = if host.dbi_base != 0 && boot_info.find_device_untyped(host.dbi_base).is_some() {
+        host.dbi_base
+    } else {
+        pcie::dbi_low_addr_for_config(host.config_base).ok_or_else(|| {
+            io::puts("[device-mgr] MSI-X DWC: no DBI base\n");
+            SpawnError::MsixSetupFailed
+        })?
+    };
+
+    // Map iATU registers (DBI + 0x300000)
+    let iatu_phys = dbi_base + pcie::IATU_OFFSET;
+    let iatu_vaddr = base_vaddr + 0x1000;
+    let _iatu_slot = match map_device_page(iatu_phys, iatu_vaddr, registry, boot_info, cptr) {
+        Ok(slot) => slot,
+        Err(e) => {
+            io::puts("[device-mgr] MSI-X DWC: iATU map failed at ");
+            io::put_hex(iatu_phys);
+            io::puts(" (likely consumed during PCIe scan)\n");
+            return Err(e);
+        }
+    };
+
+    // Programme ATU region 0 for CFG0 access to the target bus
+    let sec_cpu_addr = host.config_base + (1u64 << 20);
+    // SAFETY: iATU registers are mapped
     unsafe {
+        pcie::programme_iatu_for_config(
+            iatu_vaddr as usize,
+            0,
+            pcie::IATU_TYPE_CFG0,
+            sec_cpu_addr,
+            1 << 20,
+            bus,
+        );
+    }
+
+    // Map the secondary bus config page
+    let sec_config_vaddr = base_vaddr;
+    let _sec_config_slot = match map_device_page(sec_cpu_addr, sec_config_vaddr, registry, boot_info, cptr) {
+        Ok(slot) => slot,
+        Err(e) => {
+            io::puts("[device-mgr] MSI-X DWC: config page map failed at ");
+            io::put_hex(sec_cpu_addr);
+            io::newline();
+            let _ = unmap_frame(cptr(slots::ROOT_VSPACE), iatu_vaddr);
+            return Err(e);
+        }
+    };
+
+    // The cap_offset is within the 4KB config page (device 0, function 0)
+    let config_page_offset = cap_offset as usize;
+    msix_enable_write(sec_config_vaddr as usize + config_page_offset);
+
+    // Clean up
+    let _ = unmap_frame(cptr(slots::ROOT_VSPACE), sec_config_vaddr);
+    let _ = unmap_frame(cptr(slots::ROOT_VSPACE), iatu_vaddr);
+
+    Ok(())
+}
+
+/// Write the MSI-X Enable bit in the Message Control register.
+///
+/// `msg_ctrl_vaddr` points to the MSI-X capability (cap_offset within the page).
+/// The Message Control register is at cap_offset + 2.
+fn msix_enable_write(cap_vaddr: usize) {
+    // SAFETY: Caller guarantees config space is mapped at this address
+    unsafe {
+        let msg_ctrl_addr = cap_vaddr + 2;
         let msg_ctrl = core::ptr::read_volatile(msg_ctrl_addr as *const u16);
         // Set MSI-X Enable (bit 15), clear Function Mask (bit 14)
         let new_msg_ctrl = (msg_ctrl | (1 << 15)) & !(1 << 14);
         core::ptr::write_volatile(msg_ctrl_addr as *mut u16, new_msg_ctrl);
     }
+    crate::io::puts("[device-mgr] MSI-X: enabled in config space\n");
+}
 
-    io::puts("[device-mgr] MSI-X: enabled in config space\n");
+/// Map a single 4KB device page into the device-mgr's VSpace.
+///
+/// Returns the capability slot of the mapped frame.
+fn map_device_page(
+    phys_addr: u64,
+    vaddr: u64,
+    registry: &mut Registry,
+    boot_info: &crate::boot_info::DevMgrBootInfo,
+    cptr: &impl Fn(u64) -> u64,
+) -> Result<u64, SpawnError> {
+    let (device_untyped_slot, _size, untyped_base) = boot_info
+        .find_device_untyped(phys_addr)
+        .ok_or(SpawnError::DeviceUntypedNotFound)?;
 
-    // Unmap
-    let _ = unmap_frame(cptr(config_frame_slot));
+    let frame_slot = registry.alloc_slot();
+    let offset = phys_addr.saturating_sub(untyped_base);
 
-    Ok(())
+    retype(
+        cptr(device_untyped_slot),
+        ObjectType::DeviceFrame as u64,
+        12,
+        cptr(slots::ROOT_CNODE),
+        frame_slot,
+        offset,
+    )
+    .map_err(SpawnError::RetypeFailed)?;
+
+    map_frame(
+        cptr(slots::ROOT_VSPACE),
+        cptr(frame_slot),
+        vaddr,
+        MapRights::RW.to_bits() | (1 << 3),
+        0,
+    )
+    .map_err(SpawnError::FrameMapFailed)?;
+
+    Ok(frame_slot)
 }
 
 /// Copy MSI-X handler capabilities to driver's CSpace.
@@ -2099,11 +2237,10 @@ pub fn install_msix_caps(
         }
     }
 
-    // Also copy notifications - they go after the IRQ handlers (slots 48+)
+    // Also copy notifications (slots 56-63)
     for i in 0..msix_result.vector_count as usize {
         if msix_result.notif_slots[i] != 0 {
-            let dest_slot =
-                slots::driver::MSIX_IRQ_START + slots::driver::MSIX_MAX_VECTORS as u64 + i as u64;
+            let dest_slot = slots::driver::MSIX_NOTIF_START + i as u64;
             cap_copy(
                 child_cspace_cptr,
                 dest_slot,

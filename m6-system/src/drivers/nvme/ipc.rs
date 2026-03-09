@@ -86,14 +86,13 @@ impl DeviceInfo {
         self.capacity_blocks * (self.block_size as u64)
     }
 
-    /// Pack into IPC message format.
-    /// Returns (x1, x2, x3, x4) for reply.
+    /// Pack into IPC message format (3 registers).
+    /// Returns (msg1, msg2, msg3) for reply.
     #[must_use]
-    pub const fn pack(&self) -> (u64, u64, u64, u64) {
+    pub const fn pack(&self) -> (u64, u64, u64) {
         (
             self.capacity_blocks,
-            self.block_size as u64,
-            self.max_transfer_blocks as u64,
+            self.block_size as u64 | (self.max_transfer_blocks as u64) << 32,
             self.optimal_alignment as u64,
         )
     }

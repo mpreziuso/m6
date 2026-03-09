@@ -115,19 +115,23 @@ pub mod driver {
     /// Maximum number of MSI-X vectors we support per driver
     pub const MSIX_MAX_VECTORS: usize = 8;
 
+    /// First MSI-X notification slot (for PCIe devices with MSI-X)
+    /// Slots 56-63 contain Notification caps for MSI-X vectors 0-7
+    pub const MSIX_NOTIF_START: u64 = 56;
+
     /// First extended MMIO frame slot (for devices with large MMIO regions)
-    /// Slots 56-71 contain DeviceFrame caps for pages beyond the first 4KB
+    /// Slots 64-79 contain DeviceFrame caps for pages beyond the first 4KB
     /// DEVICE_FRAME covers offset 0x0000-0x0FFF, these cover 0x1000+
-    pub const EXTENDED_MMIO_START: u64 = 56;
+    pub const EXTENDED_MMIO_START: u64 = 64;
     /// Maximum number of extended MMIO pages (plus 1 for DEVICE_FRAME = 17 pages = 68KB)
     pub const EXTENDED_MMIO_MAX: usize = 16;
 
     /// First large additional frame slot (for multi-page regions like PHY MMIO)
-    /// Slots 72-135 contain DeviceFrame caps for large MMIO regions
-    pub const LARGE_FRAME_START: u64 = 72;
+    /// Slots 80-143 contain DeviceFrame caps for large MMIO regions
+    pub const LARGE_FRAME_START: u64 = 80;
     /// Maximum number of large additional frame pages per driver
     pub const LARGE_FRAME_MAX: usize = 64;
 
     /// First free slot for driver's own allocations
-    pub const FIRST_FREE_SLOT: u64 = 136;
+    pub const FIRST_FREE_SLOT: u64 = 144;
 }

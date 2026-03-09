@@ -20,7 +20,7 @@ use m6_arch::IrqSpinMutex;
 use m6_cap::{
     ObjectRef,
     objects::{
-        AsidPoolObject, DmaPoolObject, EndpointObject, FrameObject, IOSpaceObject,
+        AsidPoolObject, DmaPoolObject, EndpointObject, EndpointState, FrameObject, IOSpaceObject,
         IrqControlObject, IrqHandlerObject, NotificationObject, PageTableObject, ReplyObject,
         SmmuControlObject, TimerControlObject, TimerObject, UntypedObject, VSpaceObject,
     },
@@ -334,6 +334,220 @@ impl ObjectTable {
     pub fn free_count(&self) -> u32 {
         (MAX_OBJECTS as u32 - 1).saturating_sub(self.allocated)
     }
+
+    /// Atomically dequeue a receiver from an endpoint's RecvQueue.
+    ///
+    /// If the endpoint is in `RecvQueue` state, removes the head TCB from the queue
+    /// (clearing its IPC links) and returns `Dequeued(receiver_ref)`. Otherwise
+    /// returns `NoneQueued { old_tail }` with the current queue tail for enqueue use.
+    ///
+    /// Performing check-and-dequeue within a single lock acquisition prevents the
+    /// SMP race where two concurrent senders both observe the same receiver.
+    ///
+    /// # Safety invariants
+    ///
+    /// `TcbFull` is heap-allocated behind `tcb_ptr`. Accessing it via raw pointer
+    /// while holding `&mut self` is safe because:
+    /// - No other code can acquire the table lock concurrently.
+    /// - `TcbFull` does not alias any element of `self.objects`.
+    fn ipc_dequeue_recv(&mut self, ep_ref: ObjectRef) -> Option<IpcDequeueResult> {
+        let ep_idx = ep_ref.index() as usize;
+        if ep_idx == 0 || ep_idx >= MAX_OBJECTS {
+            return None;
+        }
+
+        // Phase 1: read endpoint state. Borrow dropped at end of block.
+        let receiver_ref: ObjectRef = {
+            let obj = &self.objects[ep_idx];
+            if obj.is_free() || obj.obj_type != KernelObjectType::Endpoint {
+                return None;
+            }
+            // SAFETY: verified Endpoint type above.
+            unsafe {
+                let ep = &*obj.data.endpoint;
+                match ep.state {
+                    EndpointState::RecvQueue => ep.queue_head,
+                    EndpointState::Idle | EndpointState::SendQueue => {
+                        return Some(IpcDequeueResult::NoneQueued { old_tail: ep.queue_tail });
+                    }
+                }
+            }
+        };
+
+        if !receiver_ref.is_valid() {
+            panic!("ipc_dequeue_recv: RecvQueue with invalid queue_head");
+        }
+
+        // Phase 2: get receiver TCB pointer. Borrow dropped at end of block.
+        let tcb_idx = receiver_ref.index() as usize;
+        if tcb_idx == 0 || tcb_idx >= MAX_OBJECTS {
+            return None;
+        }
+        let tcb_ptr: *mut TcbFull = {
+            let obj = &self.objects[tcb_idx];
+            if obj.is_free() || obj.obj_type != KernelObjectType::Tcb {
+                return None;
+            }
+            // SAFETY: verified Tcb type above.
+            unsafe { obj.data.tcb_ptr }
+        };
+        if tcb_ptr.is_null() {
+            return None;
+        }
+
+        // Phase 3: clear dequeued TCB's IPC links, capture next.
+        // TcbFull is heap-allocated; this does not borrow self.objects.
+        // SAFETY: tcb_ptr is valid; we hold the table lock for exclusive access.
+        let next = unsafe {
+            let tcb = &mut *tcb_ptr;
+            let next = tcb.ipc_next;
+            tcb.clear_ipc_links();
+            next
+        };
+
+        // Phase 4: update endpoint queue head and state. Borrow dropped at end of block.
+        {
+            let obj = &mut self.objects[ep_idx];
+            // SAFETY: verified Endpoint type in phase 1.
+            unsafe {
+                let ep = &mut *obj.data.endpoint;
+                ep.queue_head = next;
+                if !next.is_valid() {
+                    ep.queue_tail = ObjectRef::NULL;
+                    ep.state = EndpointState::Idle;
+                }
+            }
+        }
+
+        // Phase 5: clear ipc_prev on the new queue head. Borrow dropped at end of block.
+        if next.is_valid() {
+            let next_idx = next.index() as usize;
+            if next_idx != 0 && next_idx < MAX_OBJECTS {
+                let next_tcb_ptr: *mut TcbFull = {
+                    let obj = &self.objects[next_idx];
+                    if !obj.is_free() && obj.obj_type == KernelObjectType::Tcb {
+                        // SAFETY: verified Tcb type above.
+                        unsafe { obj.data.tcb_ptr }
+                    } else {
+                        core::ptr::null_mut()
+                    }
+                };
+                if !next_tcb_ptr.is_null() {
+                    // SAFETY: TcbFull is heap-allocated and valid; we hold the table lock.
+                    unsafe { (*next_tcb_ptr).ipc_prev = ObjectRef::NULL; }
+                }
+            }
+        }
+
+        Some(IpcDequeueResult::Dequeued(receiver_ref))
+    }
+
+    /// Atomically dequeue a sender from an endpoint's SendQueue.
+    ///
+    /// If the endpoint is in `SendQueue` state, removes the head TCB from the queue
+    /// (clearing its IPC links) and returns `Dequeued(sender_ref)`. Otherwise
+    /// returns `NoneQueued { old_tail }` with the current queue tail for enqueue use.
+    ///
+    /// Performing check-and-dequeue within a single lock acquisition prevents the
+    /// SMP race where two concurrent receivers both observe the same sender.
+    fn ipc_dequeue_send(&mut self, ep_ref: ObjectRef) -> Option<IpcDequeueResult> {
+        let ep_idx = ep_ref.index() as usize;
+        if ep_idx == 0 || ep_idx >= MAX_OBJECTS {
+            return None;
+        }
+
+        // Phase 1: read endpoint state. Borrow dropped at end of block.
+        let sender_ref: ObjectRef = {
+            let obj = &self.objects[ep_idx];
+            if obj.is_free() || obj.obj_type != KernelObjectType::Endpoint {
+                return None;
+            }
+            // SAFETY: verified Endpoint type above.
+            unsafe {
+                let ep = &*obj.data.endpoint;
+                match ep.state {
+                    EndpointState::SendQueue => ep.queue_head,
+                    EndpointState::Idle | EndpointState::RecvQueue => {
+                        return Some(IpcDequeueResult::NoneQueued { old_tail: ep.queue_tail });
+                    }
+                }
+            }
+        };
+
+        if !sender_ref.is_valid() {
+            panic!("ipc_dequeue_send: SendQueue with invalid queue_head");
+        }
+
+        // Phase 2: get sender TCB pointer. Borrow dropped at end of block.
+        let tcb_idx = sender_ref.index() as usize;
+        if tcb_idx == 0 || tcb_idx >= MAX_OBJECTS {
+            return None;
+        }
+        let tcb_ptr: *mut TcbFull = {
+            let obj = &self.objects[tcb_idx];
+            if obj.is_free() || obj.obj_type != KernelObjectType::Tcb {
+                return None;
+            }
+            // SAFETY: verified Tcb type above.
+            unsafe { obj.data.tcb_ptr }
+        };
+        if tcb_ptr.is_null() {
+            return None;
+        }
+
+        // Phase 3: clear dequeued TCB's IPC links, capture next.
+        // SAFETY: tcb_ptr is valid; we hold the table lock for exclusive access.
+        let next = unsafe {
+            let tcb = &mut *tcb_ptr;
+            let next = tcb.ipc_next;
+            tcb.clear_ipc_links();
+            next
+        };
+
+        // Phase 4: update endpoint queue head and state. Borrow dropped at end of block.
+        {
+            let obj = &mut self.objects[ep_idx];
+            // SAFETY: verified Endpoint type in phase 1.
+            unsafe {
+                let ep = &mut *obj.data.endpoint;
+                ep.queue_head = next;
+                if !next.is_valid() {
+                    ep.queue_tail = ObjectRef::NULL;
+                    ep.state = EndpointState::Idle;
+                }
+            }
+        }
+
+        // Phase 5: clear ipc_prev on the new queue head. Borrow dropped at end of block.
+        if next.is_valid() {
+            let next_idx = next.index() as usize;
+            if next_idx != 0 && next_idx < MAX_OBJECTS {
+                let next_tcb_ptr: *mut TcbFull = {
+                    let obj = &self.objects[next_idx];
+                    if !obj.is_free() && obj.obj_type == KernelObjectType::Tcb {
+                        // SAFETY: verified Tcb type above.
+                        unsafe { obj.data.tcb_ptr }
+                    } else {
+                        core::ptr::null_mut()
+                    }
+                };
+                if !next_tcb_ptr.is_null() {
+                    // SAFETY: TcbFull is heap-allocated and valid; we hold the table lock.
+                    unsafe { (*next_tcb_ptr).ipc_prev = ObjectRef::NULL; }
+                }
+            }
+        }
+
+        Some(IpcDequeueResult::Dequeued(sender_ref))
+    }
+}
+
+/// Result of an atomic IPC dequeue operation.
+pub enum IpcDequeueResult {
+    /// A thread was successfully dequeued from the endpoint queue.
+    Dequeued(ObjectRef),
+    /// No thread was queued; contains the current tail for use when enqueuing.
+    NoneQueued { old_tail: ObjectRef },
 }
 
 /// Global kernel object table.
@@ -767,6 +981,22 @@ where
         }
     }
     None
+}
+
+/// Atomically check endpoint state and dequeue a receiver.
+///
+/// Acquires the object table lock once and performs both the state check
+/// and dequeue atomically, preventing SMP races in `do_send`/`do_call`.
+pub fn ipc_dequeue_recv(ep_ref: ObjectRef) -> Option<IpcDequeueResult> {
+    get_table().lock().ipc_dequeue_recv(ep_ref)
+}
+
+/// Atomically check endpoint state and dequeue a sender.
+///
+/// Acquires the object table lock once and performs both the state check
+/// and dequeue atomically, preventing SMP races in `do_recv`.
+pub fn ipc_dequeue_send(ep_ref: ObjectRef) -> Option<IpcDequeueResult> {
+    get_table().lock().ipc_dequeue_send(ep_ref)
 }
 
 /// Access a PageTable with a closure (read-only).

@@ -20,6 +20,13 @@
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
+#![cfg_attr(test, no_main)]
+#![cfg_attr(test, feature(custom_test_frameworks))]
+#![cfg_attr(test, test_runner(m6_testlib::runner))]
+#![cfg_attr(test, reexport_test_harness_main = "test_main")]
+
+#[cfg(test)]
+m6_testlib::test_entry!();
 
 use spin::Once;
 

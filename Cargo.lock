@@ -162,6 +162,7 @@ checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 name = "m6-alloc"
 version = "0.1.0"
 dependencies = [
+ "m6-testlib",
  "spin",
 ]
 
@@ -195,11 +196,15 @@ name = "m6-cap"
 version = "0.1.0"
 dependencies = [
  "m6-common",
+ "m6-testlib",
 ]
 
 [[package]]
 name = "m6-common"
 version = "0.1.0"
+dependencies = [
+ "m6-testlib",
+]
 
 [[package]]
 name = "m6-kernel"
@@ -232,6 +237,7 @@ name = "m6-paging"
 version = "0.1.0"
 dependencies = [
  "m6-common",
+ "m6-testlib",
  "spin",
  "tock-registers",
 ]
@@ -267,6 +273,7 @@ version = "0.1.0"
 dependencies = [
  "m6-cap",
  "m6-common",
+ "m6-testlib",
 ]
 
 [[package]]
@@ -286,6 +293,10 @@ dependencies = [
  "tock-registers",
  "zerocopy",
 ]
+
+[[package]]
+name = "m6-testlib"
+version = "0.1.0"
 
 [[package]]
 name = "m6-user"

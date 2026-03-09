@@ -427,20 +427,43 @@ fn parse_smmus(fdt: &Fdt) -> ([SmmuConfig; MAX_SMMUS], usize) {
                 };
 
                 // Parse interrupts (SMMUv3 typically has: eventq, gerror, cmdq-sync)
-                // The interrupt property format depends on the interrupt controller
+                // node.interrupts() is broken for GICv3 (#interrupt-cells=3) — it
+                // returns None for cell sizes >= 3. Parse the raw property manually.
                 let mut event_irq = 0u32;
                 let mut gerror_irq = 0u32;
                 let mut cmdq_sync_irq = 0u32;
 
-                if let Some(mut interrupts) = node.interrupts() {
-                    if let Some(irq) = interrupts.next() {
-                        event_irq = irq as u32;
-                    }
-                    if let Some(irq) = interrupts.next() {
-                        gerror_irq = irq as u32;
-                    }
-                    if let Some(irq) = interrupts.next() {
-                        cmdq_sync_irq = irq as u32;
+                if let Some(prop) = node.property("interrupts") {
+                    let data = prop.value;
+                    // GICv3 interrupt cells: [type(4), number(4), flags(4)] per entry
+                    // SPI type = 0, INTID = number + 32
+                    // PPI type = 1, INTID = number + 16
+                    let cell_size = 12; // 3 cells × 4 bytes
+                    let irq_count = data.len() / cell_size;
+
+                    for i in 0..irq_count.min(3) {
+                        let off = i * cell_size;
+                        if off + cell_size > data.len() {
+                            break;
+                        }
+                        let irq_type = u32::from_be_bytes([
+                            data[off], data[off + 1], data[off + 2], data[off + 3],
+                        ]);
+                        let irq_num = u32::from_be_bytes([
+                            data[off + 4], data[off + 5], data[off + 6], data[off + 7],
+                        ]);
+                        // Convert to GIC INTID: SPI = num + 32, PPI = num + 16
+                        let intid = match irq_type {
+                            0 => irq_num + 32,  // SPI
+                            1 => irq_num + 16,  // PPI
+                            _ => irq_num,
+                        };
+                        match i {
+                            0 => event_irq = intid,
+                            1 => gerror_irq = intid,
+                            2 => cmdq_sync_irq = intid,
+                            _ => {}
+                        }
                     }
                 }
 

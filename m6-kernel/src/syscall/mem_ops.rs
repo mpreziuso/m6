@@ -171,15 +171,15 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
         let phys_addr = if target_type == ObjectType::DeviceFrame && device_offset != 0 {
             object_table::with_untyped(untyped_cap.obj_ref, |untyped| {
                 let size = untyped.size();
-                let is_dev = untyped.is_device;
-                log::debug!(
-                    "Retype: DeviceFrame offset={:#x} obj_size={:#x} untyped_phys={:#x} size={:#x} is_device={}",
-                    device_offset,
-                    obj_size,
-                    untyped.phys_base.as_u64(),
-                    size,
-                    is_dev
-                );
+                //let is_dev = untyped.is_device;
+                // log::debug!(
+                //     "Retype: DeviceFrame offset={:#x} obj_size={:#x} untyped_phys={:#x} size={:#x} is_device={}",
+                //     device_offset,
+                //     obj_size,
+                //     untyped.phys_base.as_u64(),
+                //     size,
+                //     is_dev
+                // );
                 untyped
                     .try_allocate_at_offset(device_offset, obj_size)
                     .map_err(|e| {

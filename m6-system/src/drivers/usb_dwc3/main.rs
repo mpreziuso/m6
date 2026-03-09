@@ -72,8 +72,8 @@ const fn dma_buffer_frame(index: usize) -> u64 {
 }
 
 // Extended MMIO frame slots (for DWC3's large MMIO region)
-// TODO: Import from shared slot constants crate instead of hardcoding
-const EXTENDED_MMIO_START: u64 = 56;
+// Must match slots::driver::EXTENDED_MMIO_START
+const EXTENDED_MMIO_START: u64 = 64;
 const EXTENDED_MMIO_MAX: usize = 16;
 
 /// Page size

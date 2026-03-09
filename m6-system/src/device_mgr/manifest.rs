@@ -24,8 +24,12 @@ pub struct DriverManifest {
     pub compatible: &'static str,
     /// Binary name in initrd TAR
     pub binary_name: &'static str,
-    /// Whether driver needs IRQ capability
+    /// Whether driver needs IRQ capability (wired/legacy IRQ)
     pub needs_irq: bool,
+    /// Whether driver uses MSI-X (PCIe message-signalled interrupts).
+    /// When true, the irq=0 warning is suppressed since MSI-X devices
+    /// don't have a wired IRQ line.
+    pub needs_msix: bool,
     /// Whether driver needs IOMMU/IOSpace capability
     pub needs_iommu: bool,
     /// Whether driver needs DMA buffers (can be true even with needs_iommu=false)
@@ -112,7 +116,8 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
     DriverManifest {
         compatible: "arm,smmu-v3",
         binary_name: "drv-smmu",
-        needs_irq: true,    // Event queue interrupt
+        needs_irq: true, // Event queue interrupt
+        needs_msix: false,
         needs_iommu: false, // SMMU doesn't use itself
         needs_dma: false,
         is_platform: true,
@@ -125,6 +130,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "arm,pl011",
         binary_name: "drv-uart-pl011",
         needs_irq: true,
+        needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
         is_platform: true,
@@ -136,6 +142,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "ns16550a",
         binary_name: "drv-uart-ns16550",
         needs_irq: true,
+        needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
         is_platform: true,
@@ -147,6 +154,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "snps,dw-apb-uart",
         binary_name: "drv-uart-dw",
         needs_irq: true,
+        needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
         is_platform: true,
@@ -159,6 +167,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "virtio,mmio",
         binary_name: "drv-virtio-blk",
         needs_irq: true,
+        needs_msix: false,
         needs_iommu: true, // Block devices perform DMA
         needs_dma: true,
         is_platform: true,
@@ -171,6 +180,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "virtio,mmio",
         binary_name: "drv-virtio-mmio",
         needs_irq: true,
+        needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
         is_platform: true,
@@ -180,34 +190,38 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
     },
     // -- Storage drivers (PCIe class code matching)
     // NVMe: class=01 (storage), subclass=08 (NVMe), prog_if=02 (NVMe)
+    // BAR0 layout: page 0 = controller regs, page 1+ = doorbell regs (offset 0x1000+)
     DriverManifest {
         compatible: "pcie:010802",
         binary_name: "drv-nvme",
-        needs_irq: true,
+        needs_irq: false,
+        needs_msix: true,
         needs_iommu: true,
         needs_dma: true,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
-        mmio_pages: 1,
+        mmio_pages: 4, // 16KB: regs (4KB) + doorbells (12KB)
     },
     // Platform NVMe (DTB-enumerated)
     DriverManifest {
         compatible: "nvme",
         binary_name: "drv-nvme",
-        needs_irq: true,
+        needs_irq: false,
+        needs_msix: true,
         needs_iommu: true,
         needs_dma: true,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
-        mmio_pages: 1,
+        mmio_pages: 4,
     },
     // SATA AHCI: class=01 (storage), subclass=06 (SATA), prog_if=01 (AHCI)
     DriverManifest {
         compatible: "pcie:010601",
         binary_name: "drv-ahci",
-        needs_irq: true,
+        needs_irq: false,
+        needs_msix: true,
         needs_iommu: true,
         needs_dma: true,
         is_platform: false,
@@ -220,7 +234,8 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
     DriverManifest {
         compatible: "pcie:0c0330",
         binary_name: "drv-usb-xhci",
-        needs_irq: true,
+        needs_irq: false,
+        needs_msix: true,
         needs_iommu: true,
         needs_dma: true,
         is_platform: false,
@@ -233,6 +248,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "generic-xhci",
         binary_name: "drv-usb-xhci",
         needs_irq: true,
+        needs_msix: false,
         needs_iommu: true,
         needs_dma: true,
         is_platform: false,
@@ -249,6 +265,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "snps,dwc3",
         binary_name: "drv-usb-dwc3",
         needs_irq: true,
+        needs_msix: false,
         // FIXME: Disabled until SMMU command queue is fixed (cons returns garbage)
         // When enabled, USB DMA gets blocked by SMMU causing HSE errors
         needs_iommu: false,
@@ -263,6 +280,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "usb-hid",
         binary_name: "drv-usb-hid",
         needs_irq: false,
+        needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
         is_platform: false,
@@ -275,6 +293,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "pci-host-generic",
         binary_name: "drv-pcie-ecam",
         needs_irq: true,
+        needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
         is_platform: true,
@@ -286,6 +305,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "pci-host-ecam-generic",
         binary_name: "drv-pcie-ecam",
         needs_irq: true,
+        needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
         is_platform: true,
@@ -297,6 +317,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         compatible: "rockchip,rk3588-pcie",
         binary_name: "drv-pcie-rk3588",
         needs_irq: true,
+        needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
         is_platform: true,

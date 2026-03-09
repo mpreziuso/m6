@@ -470,13 +470,13 @@ impl fmt::Display for CapSlot {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_slot_size() {
         assert_eq!(core::mem::size_of::<CapSlot>(), 16);
         assert_eq!(core::mem::align_of::<CapSlot>(), 16);
     }
 
-    #[test]
+    #[test_case]
     fn test_empty_slot() {
         let slot = CapSlot::empty();
         assert!(slot.is_empty());
@@ -484,11 +484,82 @@ mod tests {
         assert_eq!(slot.cap_type(), ObjectType::Empty);
     }
 
-    #[test]
+    #[test_case]
     fn test_object_type_badge_support() {
         assert!(ObjectType::Endpoint.supports_badge());
         assert!(ObjectType::Notification.supports_badge());
         assert!(!ObjectType::Frame.supports_badge());
         assert!(!ObjectType::TCB.supports_badge());
+    }
+
+    #[test_case]
+    fn test_object_type_is_memory() {
+        for ty in [
+            ObjectType::Untyped,
+            ObjectType::Frame,
+            ObjectType::DeviceFrame,
+            ObjectType::PageTableL0,
+            ObjectType::PageTableL1,
+            ObjectType::PageTableL2,
+            ObjectType::PageTableL3,
+            ObjectType::VSpace,
+        ] {
+            assert!(ty.is_memory(), "{ty:?} should be a memory type");
+        }
+        for ty in [
+            ObjectType::Endpoint,
+            ObjectType::Notification,
+            ObjectType::TCB,
+            ObjectType::CNode,
+            ObjectType::IRQHandler,
+            ObjectType::Empty,
+        ] {
+            assert!(!ty.is_memory(), "{ty:?} should not be a memory type");
+        }
+    }
+
+    #[test_case]
+    fn test_object_type_is_ipc() {
+        for ty in [ObjectType::Endpoint, ObjectType::Notification, ObjectType::Reply] {
+            assert!(ty.is_ipc(), "{ty:?} should be an IPC type");
+        }
+        for ty in [ObjectType::Frame, ObjectType::TCB, ObjectType::CNode, ObjectType::Empty] {
+            assert!(!ty.is_ipc(), "{ty:?} should not be an IPC type");
+        }
+    }
+
+    #[test_case]
+    fn test_slot_flags_with_without() {
+        let flags = SlotFlags::NONE;
+        assert!(!flags.contains(SlotFlags::IN_CDT));
+        let with_cdt = flags.with(SlotFlags::IN_CDT);
+        assert!(with_cdt.contains(SlotFlags::IN_CDT));
+        let without_cdt = with_cdt.without(SlotFlags::IN_CDT);
+        assert!(!without_cdt.contains(SlotFlags::IN_CDT));
+        // Combining both flags then removing one.
+        let both = SlotFlags::NONE.with(SlotFlags::IN_CDT).with(SlotFlags::IS_ORIGINAL);
+        assert!(both.contains(SlotFlags::IN_CDT));
+        assert!(both.contains(SlotFlags::IS_ORIGINAL));
+        let only_orig = both.without(SlotFlags::IN_CDT);
+        assert!(!only_orig.contains(SlotFlags::IN_CDT));
+        assert!(only_orig.contains(SlotFlags::IS_ORIGINAL));
+    }
+
+    #[test_case]
+    fn test_cap_slot_has_right() {
+        use crate::{Badge, CapRights};
+        let slot = CapSlot::new(
+            ObjectRef::from_index(1),
+            ObjectType::Frame,
+            CapRights::RW,
+            Badge::NONE,
+            SlotFlags::NONE,
+        );
+        assert!(slot.has_right(CapRights::READ));
+        assert!(slot.has_right(CapRights::WRITE));
+        assert!(!slot.has_right(CapRights::GRANT));
+        assert!(!slot.has_right(CapRights::GRANT_REPLY));
+        let empty_slot = CapSlot::empty();
+        assert!(!empty_slot.has_right(CapRights::READ));
     }
 }

@@ -303,7 +303,7 @@ pub const fn object_alignment(obj_type: ObjectType, size_bits: u8) -> usize {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_untyped_creation() {
         let ut = UntypedObject::new(PhysAddr::new(0x1000), 12, false);
         assert_eq!(ut.size(), 4096);
@@ -311,7 +311,7 @@ mod tests {
         assert!(!ut.is_exhausted());
     }
 
-    #[test]
+    #[test_case]
     fn test_untyped_allocation() {
         let mut ut = UntypedObject::new(PhysAddr::new(0x1000), 12, false);
 
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(ut.watermark, 128);
     }
 
-    #[test]
+    #[test_case]
     fn test_untyped_exhaustion() {
         let mut ut = UntypedObject::new(PhysAddr::new(0x1000), 6, false); // 64 bytes
 

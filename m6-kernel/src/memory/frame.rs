@@ -344,6 +344,79 @@ impl FrameAllocator {
         }
     }
 
+    /// Allocate contiguous frames aligned to `align_frames` frame boundary.
+    ///
+    /// `align_frames` must be a power of 2.
+    #[must_use]
+    pub fn alloc_contiguous_aligned(
+        &mut self,
+        count: usize,
+        align_frames: usize,
+    ) -> Option<usize> {
+        if count == 0
+            || self.free_frames < count
+            || align_frames == 0
+            || !align_frames.is_power_of_two()
+        {
+            return None;
+        }
+        let align = align_frames;
+
+        // Search the full range, stepping by alignment
+        let found = self.find_aligned_run(0, self.total_frames, count, align);
+
+        if let Some(relative_start) = found {
+            let abs_start = self.first_frame + relative_start;
+            self.mark_allocated(abs_start, count)
+                .expect("internal error: validated range failed to mark");
+
+            self.search_hint = relative_start + count;
+            if self.search_hint >= self.total_frames {
+                self.search_hint = 0;
+            }
+
+            Some(abs_start)
+        } else {
+            None
+        }
+    }
+
+    /// Find a contiguous run of free frames starting at an aligned boundary.
+    fn find_aligned_run(
+        &self,
+        start: usize,
+        end: usize,
+        count: usize,
+        align: usize,
+    ) -> Option<usize> {
+        if start >= end || count == 0 {
+            return None;
+        }
+
+        // Round up start to next aligned boundary (in absolute frame numbers)
+        let abs_start = self.first_frame + start;
+        let aligned_abs = (abs_start + align - 1) & !(align - 1);
+        let mut frame = aligned_abs.saturating_sub(self.first_frame);
+
+        while frame + count <= end {
+            // Check if all frames in [frame, frame+count) are free
+            let mut all_free = true;
+            for i in 0..count {
+                if !self.is_frame_free(frame + i) {
+                    all_free = false;
+                    break;
+                }
+            }
+            if all_free {
+                return Some(frame);
+            }
+            // Step to next aligned boundary
+            frame += align;
+        }
+
+        None
+    }
+
     /// Find a contiguous run of free frames in the given range.
     ///
     /// Returns the relative frame index of the start of the run, or None.
@@ -703,6 +776,48 @@ pub fn alloc_frames(count: usize) -> Option<u64> {
                 .checked_mul(page::SIZE_4K)
                 .expect("frame address overflow") as u64
         })
+}
+
+/// Allocate contiguous physical frames aligned to `align_pages` page boundary,
+/// and zero their contents.
+///
+/// `align_pages` must be a power of 2. For example, to allocate 2048 pages
+/// aligned to 8MB (2048 pages), pass `align_pages = 2048`.
+///
+/// Returns the physical address of the first frame, or `None` if allocation failed.
+#[must_use]
+pub fn alloc_frames_aligned(count: usize, align_pages: usize) -> Option<u64> {
+    let mut guard = FRAME_ALLOCATOR.lock();
+    let phys = guard
+        .as_mut()
+        .and_then(|alloc| alloc.alloc_contiguous_aligned(count, align_pages))
+        .map(|frame| {
+            frame
+                .checked_mul(page::SIZE_4K)
+                .expect("frame address overflow") as u64
+        })?;
+
+    let total_size = count * page::SIZE_4K;
+    drop(guard); // Release lock before zeroing
+
+    if let Some(virt) = phys_to_virt_checked(phys) {
+        if phys_to_virt_checked(phys + total_size as u64 - 1).is_some() {
+            unsafe {
+                core::ptr::write_bytes(virt as *mut u8, 0, total_size);
+            }
+            return Some(phys);
+        }
+    }
+
+    log::error!(
+        "Aligned allocation {:#x}..{:#x} outside direct map range",
+        phys,
+        phys + total_size as u64
+    );
+    for i in 0..count {
+        free_frame(phys + (i * page::SIZE_4K) as u64);
+    }
+    None
 }
 
 /// Allocate contiguous physical frames and zero their contents.

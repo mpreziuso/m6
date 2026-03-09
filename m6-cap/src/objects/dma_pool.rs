@@ -153,7 +153,7 @@ impl DmaPoolObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_dma_pool_creation() {
         let pool = DmaPoolObject::new(ObjectRef::from_index(1), 0x1_0000_0000, 0x100_0000);
         assert_eq!(pool.iova_base, 0x1_0000_0000);
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(pool.alloc_watermark, 0);
     }
 
-    #[test]
+    #[test_case]
     fn test_dma_pool_allocation() {
         let mut pool = DmaPoolObject::new(ObjectRef::from_index(1), 0x1000, 0x10000);
 
@@ -175,12 +175,13 @@ mod tests {
         assert_eq!(iova2, Some(0x2000));
         assert_eq!(pool.alloc_count, 2);
 
-        // Allocation with alignment
+        // Allocation with alignment: watermark is already at 0x3000 (page-aligned),
+        // so the small 0x100-byte allocation starts at iova_base + 0x3000 = 0x4000.
         let iova3 = pool.allocate(0x100, 0x1000);
-        assert_eq!(iova3, Some(0x5000)); // Aligned to 0x1000
+        assert_eq!(iova3, Some(0x4000)); // Aligned to 0x1000
     }
 
-    #[test]
+    #[test_case]
     fn test_dma_pool_exhaustion() {
         let mut pool = DmaPoolObject::new(ObjectRef::from_index(1), 0x1000, 0x2000);
 
@@ -192,7 +193,7 @@ mod tests {
         assert!(iova2.is_none());
     }
 
-    #[test]
+    #[test_case]
     fn test_dma_pool_reset() {
         let mut pool = DmaPoolObject::new(ObjectRef::from_index(1), 0x1000, 0x10000);
 
@@ -205,7 +206,7 @@ mod tests {
         assert_eq!(pool.alloc_watermark, 0);
     }
 
-    #[test]
+    #[test_case]
     fn test_dma_direction() {
         assert_eq!(DmaDirection::from_u8(0), Some(DmaDirection::Bidirectional));
         assert_eq!(DmaDirection::from_u8(1), Some(DmaDirection::ToDevice));

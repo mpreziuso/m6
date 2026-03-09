@@ -1,12 +1,8 @@
 [package]
-name = "m6-common"
+name = "m6-testlib"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-
-[dependencies]
-
-[dev-dependencies]
-m6-testlib = { path = "../m6-testlib" }
+description = "Bare-metal test harness for aarch64-unknown-none"

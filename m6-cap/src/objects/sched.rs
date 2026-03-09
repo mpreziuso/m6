@@ -226,7 +226,7 @@ impl SchedControlObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_sched_context_creation() {
         let ctx = SchedContextObject::new(5000, 10000);
         assert!(ctx.is_valid());
@@ -234,7 +234,7 @@ mod tests {
         assert_eq!(ctx.utilisation_percent(), 50);
     }
 
-    #[test]
+    #[test_case]
     fn test_sched_context_consume() {
         let mut ctx = SchedContextObject::new(1000, 10000);
         assert_eq!(ctx.consume(500), 500);
@@ -243,7 +243,7 @@ mod tests {
         assert!(!ctx.has_budget());
     }
 
-    #[test]
+    #[test_case]
     fn test_sched_context_replenish() {
         let mut ctx = SchedContextObject::new(1000, 10000);
         ctx.consume(1000);
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(ctx.remaining, 1000);
     }
 
-    #[test]
+    #[test_case]
     fn test_sched_control() {
         let mut ctrl = SchedControlObject::new(100_000);
         assert!(ctrl.can_allocate(50_000));

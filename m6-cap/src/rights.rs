@@ -232,7 +232,7 @@ impl core::ops::BitOr for CapRights {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_rights_construction() {
         assert_eq!(CapRights::NONE.bits(), 0);
         assert_eq!(CapRights::ALL.bits(), 0x0F);
@@ -240,7 +240,7 @@ mod tests {
         assert_eq!(CapRights::RWG.bits(), 0x07);
     }
 
-    #[test]
+    #[test_case]
     fn test_rights_contains() {
         assert!(CapRights::ALL.contains(CapRights::READ));
         assert!(CapRights::ALL.contains(CapRights::RW));
@@ -248,14 +248,14 @@ mod tests {
         assert!(CapRights::RW.contains(CapRights::READ));
     }
 
-    #[test]
+    #[test_case]
     fn test_rights_subset() {
         assert!(CapRights::READ.is_subset_of(CapRights::ALL));
         assert!(CapRights::RW.is_subset_of(CapRights::RWG));
         assert!(!CapRights::GRANT.is_subset_of(CapRights::RW));
     }
 
-    #[test]
+    #[test_case]
     fn test_rights_intersect() {
         assert_eq!(CapRights::ALL.intersect(CapRights::RW), CapRights::RW);
         assert_eq!(CapRights::READ.intersect(CapRights::WRITE), CapRights::NONE);

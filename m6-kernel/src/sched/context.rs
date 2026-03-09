@@ -106,15 +106,10 @@ pub fn switch_vspace(vspace_ref: Option<ObjectRef>) {
             // TTBR0_EL1 format: [ASID:16][BADDR:48]
             let ttbr0_with_asid = (asid << 48) | (ttbr0 & 0x0000_FFFF_FFFF_FFFF);
 
-            // Always invalidate TLB for this ASID before switching.
-            // This is necessary because:
-            // 1. On first use of an ASID, there may be stale entries from
-            //    the bootloader phase or previous boot cycles
-            // 2. On RK3588 and similar big.LITTLE systems, TLB entries may
-            //    not be properly invalidated across all clusters
-            // 3. The ASID generation tracking alone is insufficient when
-            //    switching to a newly created VSpace
-            invalidate_tlb_by_asid(asid);
+            // Only invalidate TLB if the ASID has been recycled (generation is stale).
+            if !vspace.is_asid_generation_current(crate::memory::current_generation()) {
+                invalidate_tlb_by_asid(asid);
+            }
 
             // DSB ISH (full inner-shareable) ensures all prior loads and stores
             // are visible to the hardware page-table walker before TTBR0 is

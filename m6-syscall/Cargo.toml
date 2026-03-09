@@ -16,6 +16,9 @@ default = []
 # Enable userspace syscall invocation (requires inline asm)
 userspace = []
 
+[dev-dependencies]
+m6-testlib = { path = "../m6-testlib" }
+
 [dependencies]
 m6-cap = { path = "../m6-cap", default-features = false }
 m6-common = { workspace = true }

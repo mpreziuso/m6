@@ -183,7 +183,7 @@ impl IrqControlObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_irq_handler() {
         let mut handler = IrqHandlerObject::new(33);
         assert!(!handler.is_bound());
@@ -199,7 +199,7 @@ mod tests {
         assert!(!handler.is_masked());
     }
 
-    #[test]
+    #[test_case]
     fn test_irq_control() {
         let mut ctrl = IrqControlObject::new();
         assert!(ctrl.is_available(33));

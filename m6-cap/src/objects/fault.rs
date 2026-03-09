@@ -217,14 +217,14 @@ pub mod flags {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_fault_type_conversion() {
         assert_eq!(FaultType::from_u64(1), FaultType::PageFault);
         assert_eq!(FaultType::from_u64(99), FaultType::Unknown);
         assert_eq!(FaultType::PageFault.as_u64(), 1);
     }
 
-    #[test]
+    #[test_case]
     fn test_fault_message_regs() {
         let msg = FaultMessage::new(FaultType::PageFault, 0x1000, 0x2000, 0x3000, flags::WNR);
         let regs = msg.to_regs();

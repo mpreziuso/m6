@@ -351,6 +351,168 @@ pub const PER_CPU_STACK_INFO_SIZE: usize = 16;
 /// Offset of `virt_top` within PerCpuStackInfo
 pub const PER_CPU_STACK_VIRT_TOP_OFFSET: usize = 8;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::addr::{PhysAddr, VirtAddr};
+
+    fn zeroed_boot_info() -> BootInfo {
+        // SAFETY: BootInfo is #[repr(C)] with only integer/struct fields, all valid when zeroed.
+        unsafe { core::mem::zeroed() }
+    }
+
+    // -- BootInfo
+
+    #[test_case]
+    fn test_boot_info_is_valid() {
+        let mut info = zeroed_boot_info();
+        info.magic = BOOT_INFO_MAGIC;
+        info.version = BOOT_INFO_VERSION;
+        assert!(info.is_valid());
+    }
+
+    #[test_case]
+    fn test_boot_info_wrong_magic() {
+        let mut info = zeroed_boot_info();
+        info.magic = 0xDEAD_BEEF;
+        info.version = BOOT_INFO_VERSION;
+        assert!(!info.is_valid());
+    }
+
+    #[test_case]
+    fn test_boot_info_wrong_version() {
+        let mut info = zeroed_boot_info();
+        info.magic = BOOT_INFO_MAGIC;
+        info.version = BOOT_INFO_VERSION - 1;
+        assert!(!info.is_valid());
+    }
+
+    #[test_case]
+    fn test_boot_info_cpu_count_zero_becomes_one() {
+        let mut info = zeroed_boot_info();
+        info.cpu_count = 0;
+        assert_eq!(info.cpu_count(), 1);
+    }
+
+    #[test_case]
+    fn test_boot_info_cpu_count_normal() {
+        let mut info = zeroed_boot_info();
+        info.cpu_count = 4;
+        assert_eq!(info.cpu_count(), 4);
+    }
+
+    #[test_case]
+    fn test_boot_info_cpu_count_at_max() {
+        let mut info = zeroed_boot_info();
+        info.cpu_count = MAX_CPUS as u32;
+        assert_eq!(info.cpu_count(), MAX_CPUS);
+    }
+
+    #[test_case]
+    fn test_boot_info_cpu_count_clamp() {
+        let mut info = zeroed_boot_info();
+        info.cpu_count = (MAX_CPUS + 1) as u32;
+        assert_eq!(info.cpu_count(), MAX_CPUS);
+    }
+
+    #[test_case]
+    fn test_boot_info_has_initrd() {
+        let mut info = zeroed_boot_info();
+        info.initrd_phys_base = PhysAddr::new(0x1000_0000);
+        info.initrd_size = 0x1000;
+        assert!(info.has_initrd());
+    }
+
+    #[test_case]
+    fn test_boot_info_no_initrd_zero_size() {
+        let mut info = zeroed_boot_info();
+        info.initrd_phys_base = PhysAddr::new(0x1000_0000);
+        info.initrd_size = 0;
+        assert!(!info.has_initrd());
+    }
+
+    #[test_case]
+    fn test_boot_info_no_initrd_null_base() {
+        let mut info = zeroed_boot_info();
+        info.initrd_phys_base = PhysAddr::new(0);
+        info.initrd_size = 0x1000;
+        assert!(!info.has_initrd());
+    }
+
+    // -- PerCpuStackInfo
+
+    #[test_case]
+    fn test_per_cpu_stack_valid() {
+        let s = PerCpuStackInfo {
+            phys_base: PhysAddr::new(0x1000_0000),
+            virt_top: VirtAddr::new(0xFFFF_0000_0000_1000),
+        };
+        assert!(s.is_valid());
+    }
+
+    #[test_case]
+    fn test_per_cpu_stack_empty_is_invalid() {
+        assert!(!PerCpuStackInfo::empty().is_valid());
+    }
+
+    #[test_case]
+    fn test_per_cpu_stack_null_virt() {
+        let s = PerCpuStackInfo {
+            phys_base: PhysAddr::new(0x1000_0000),
+            virt_top: VirtAddr::new(0),
+        };
+        assert!(!s.is_valid());
+    }
+
+    #[test_case]
+    fn test_per_cpu_stack_null_phys() {
+        let s = PerCpuStackInfo {
+            phys_base: PhysAddr::new(0),
+            virt_top: VirtAddr::new(0xFFFF_0000_0000_1000),
+        };
+        assert!(!s.is_valid());
+    }
+
+    // -- FramebufferInfo
+
+    #[test_case]
+    fn test_framebuffer_valid() {
+        let fb = FramebufferInfo {
+            base: 0x1000_0000,
+            virt_base: 0xFFFF_0000_1000_0000,
+            size: 0x100_0000,
+            width: 1920,
+            height: 1080,
+            stride: 7680,
+            bpp: 32,
+            red_position: 16,
+            red_size: 8,
+            green_position: 8,
+            green_size: 8,
+            blue_position: 0,
+            blue_size: 8,
+            _reserved: [0; 2],
+        };
+        assert!(fb.is_valid());
+    }
+
+    #[test_case]
+    fn test_framebuffer_empty_is_invalid() {
+        assert!(!FramebufferInfo::empty().is_valid());
+    }
+
+    #[test_case]
+    fn test_framebuffer_missing_dimensions_is_invalid() {
+        let mut fb = FramebufferInfo::empty();
+        fb.base = 0x1000_0000;
+        fb.virt_base = 0xFFFF_0000_1000_0000;
+        fb.size = 0x100_0000;
+        fb.width = 1920;
+        // height = 0 → invalid
+        assert!(!fb.is_valid());
+    }
+}
+
 // Compile-time verification of offsets
 const _: () = {
     assert!(

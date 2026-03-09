@@ -307,7 +307,7 @@ pub fn handle_irq_control_get(args: &SyscallArgs) -> SyscallResult {
 /// - x1: MSI target address (physical address to write for MSI)
 /// - x2: Base SPI number (message data for first vector)
 /// - x3: Actual number of vectors allocated
-pub fn handle_msi_allocate(args: &SyscallArgs, ctx: &ExceptionContext) -> SyscallResult {
+pub fn handle_msi_allocate(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallResult {
     let irq_control_cptr = args.arg0;
     let requested_count = args.arg1 as u32;
 
@@ -335,16 +335,10 @@ pub fn handle_msi_allocate(args: &SyscallArgs, ctx: &ExceptionContext) -> Syscal
         m6_pal::gic::configure_msi_spi(spi);
     }
 
-    // Return MSI configuration via registers
-    // x1 = target address, x2 = base SPI, x3 = count
-    // We need to write to x1-x3 in the exception context
-    // SAFETY: We're modifying return values in the exception context
-    unsafe {
-        let ctx_ptr = ctx as *const ExceptionContext as *mut ExceptionContext;
-        (*ctx_ptr).gpr[1] = msi_config.target_addr;
-        (*ctx_ptr).gpr[2] = msi_config.data_base as u64;
-        (*ctx_ptr).gpr[3] = msi_config.vector_count as u64;
-    }
+    // Return MSI configuration via registers x1-x3
+    ctx.gpr[1] = msi_config.target_addr;
+    ctx.gpr[2] = msi_config.data_base as u64;
+    ctx.gpr[3] = msi_config.vector_count as u64;
 
     log::trace!(
         "msi_allocate: allocated {} vectors, target={:#x}, base_spi={}",

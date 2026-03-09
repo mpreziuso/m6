@@ -156,13 +156,13 @@ impl VSpaceObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_asid() {
         assert!(!Asid::INVALID.is_valid());
         assert!(Asid::new(1).is_valid());
     }
 
-    #[test]
+    #[test_case]
     fn test_vspace_creation() {
         let vspace = VSpaceObject::new(PhysAddr::new(0x1000), ObjectRef::from_index(1));
         assert!(!vspace.has_asid());

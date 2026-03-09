@@ -153,14 +153,14 @@ impl IOSpaceObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_ioasid() {
         assert!(!Ioasid::INVALID.is_valid());
         assert!(Ioasid::new(1).is_valid());
         assert_eq!(Ioasid::new(42).value(), 42);
     }
 
-    #[test]
+    #[test_case]
     fn test_iospace_creation() {
         let iospace = IOSpaceObject::new(PhysAddr::new(0x1000), ObjectRef::from_index(1), 0);
         assert!(!iospace.has_ioasid());
@@ -168,7 +168,7 @@ mod tests {
         assert_eq!(iospace.mapped_frames, 0);
     }
 
-    #[test]
+    #[test_case]
     fn test_iospace_counters() {
         let mut iospace = IOSpaceObject::new(PhysAddr::new(0x1000), ObjectRef::from_index(1), 0);
 

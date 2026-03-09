@@ -135,7 +135,7 @@ impl TimerControlObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_timer_object() {
         let mut timer = TimerObject::new();
         assert!(!timer.is_bound());
@@ -152,7 +152,7 @@ mod tests {
         assert!(!timer.is_armed());
     }
 
-    #[test]
+    #[test_case]
     fn test_periodic_timer() {
         let mut timer = TimerObject::new();
         timer.bind(ObjectRef::from_index(1), Badge::new(0x01));
@@ -163,7 +163,7 @@ mod tests {
         assert_eq!(timer.period_ns, 1_000_000);
     }
 
-    #[test]
+    #[test_case]
     fn test_timer_unbind() {
         let mut timer = TimerObject::new();
         timer.bind(ObjectRef::from_index(1), Badge::new(0x01));
@@ -176,7 +176,7 @@ mod tests {
         assert_eq!(timer.period_ns, 0);
     }
 
-    #[test]
+    #[test_case]
     fn test_timer_control() {
         let _ctrl = TimerControlObject::new();
         // TimerControl has no behaviour to test (no quota tracking)

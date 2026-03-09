@@ -22,7 +22,7 @@ pub mod registers;
 
 extern crate alloc;
 
-use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -31,12 +31,33 @@ use m6_cap::ObjectRef;
 use m6_common::memory::page;
 use spin::Once;
 
-use crate::memory::frame::alloc_frames_zeroed;
+use crate::memory::frame::{alloc_frames_aligned, alloc_frames_zeroed};
 use crate::memory::translate::phys_to_virt;
 use registers::*;
 
 /// Maximum number of SMMUs supported.
 const MAX_SMMUS: usize = 4;
+
+// -- Direct console hex output helpers (for diagnostics that must be visible)
+
+const HEX_CHARS: &[u8; 16] = b"0123456789abcdef";
+
+fn put_hex_u8(v: u8) {
+    m6_pal::console::putc(HEX_CHARS[(v >> 4) as usize]);
+    m6_pal::console::putc(HEX_CHARS[(v & 0xF) as usize]);
+}
+
+fn put_hex_u32(v: u32) {
+    for i in (0..8).rev() {
+        m6_pal::console::putc(HEX_CHARS[((v >> (i * 4)) & 0xF) as usize]);
+    }
+}
+
+fn put_hex_u64(v: u64) {
+    for i in (0..16).rev() {
+        m6_pal::console::putc(HEX_CHARS[((v >> (i * 4)) & 0xF) as usize]);
+    }
+}
 
 /// Command queue size (must be power of 2).
 const CMDQ_ENTRIES: usize = 1024;
@@ -112,12 +133,13 @@ pub struct SmmuInstance {
     /// Physical base address of SMMU registers.
     base_phys: u64,
     /// Physical address of stream table.
-    #[expect(dead_code)]
     strtab_phys: u64,
     /// Virtual address of stream table.
     strtab_virt: u64,
     /// Log2 of max stream ID.
     strtab_log2size: u8,
+    /// Output Address Size from IDR5 (raw 3-bit value, used as IPS in CDs).
+    oas: u8,
     /// Command queue state.
     cmdq: QueueState,
     /// Event queue state.
@@ -126,8 +148,8 @@ pub struct SmmuInstance {
     enabled: bool,
     /// SMMU instance index.
     index: u8,
-    /// Per-stream binding tracking (heap-allocated, sized by max_streams).
-    stream_bindings: Box<[StreamBindingEntry]>,
+    /// Per-stream binding tracking (sparse — only bound streams have entries).
+    stream_bindings: BTreeMap<u32, StreamBindingEntry>,
 }
 
 // SAFETY: SmmuInstance is only accessed with the SMMU_INSTANCES lock held.
@@ -165,25 +187,44 @@ impl SmmuInstance {
         unsafe { core::ptr::write_volatile(ptr, value) }
     }
 
+    /// Mask for extracting the index+wrap bits from CMDQ_CONS/CMDQ_PROD.
+    /// Bits [log2size:0] are valid; bits [31:24] in CONS are CERROR.
+    #[inline]
+    fn cmdq_idx_mask(&self) -> u32 {
+        (1u32 << (self.cmdq.log2size + 1)) - 1
+    }
+
     /// Submit a command to the command queue.
     pub fn submit_cmd(&mut self, cmd: CommandEntry) -> Result<(), SmmuError> {
         let queue_size = 1usize << self.cmdq.log2size;
+        let idx_mask = self.cmdq_idx_mask();
 
-        // Check for queue full
         // SAFETY: Reading CMDQ_CONS register.
-        let cons = unsafe { self.read32(SMMU_CMDQ_CONS) };
-        if (self.cmdq.prod.wrapping_sub(cons) as usize) >= queue_size {
+        let cons_raw = unsafe { self.read32(SMMU_CMDQ_CONS) };
+
+        // Check for CERROR (command error) in bits [31:24]
+        let cerror = (cons_raw >> 24) & 0xFF;
+        if cerror != 0 {
+            log::error!("SMMU #{}: CERROR={} in submit_cmd", self.index, cerror);
+            return Err(SmmuError::InvalidConfig);
+        }
+
+        // Check for queue full (mask to index+wrap bits only)
+        let cons = cons_raw & idx_mask;
+        if ((self.cmdq.prod & idx_mask).wrapping_sub(cons) as usize) >= queue_size {
             return Err(SmmuError::QueueFull);
         }
 
         // Write command to queue
         let entry_offset = (self.cmdq.prod as usize % queue_size) * CommandEntry::SIZE;
-        let entry_ptr = (self.cmdq.base_virt + entry_offset as u64) as *mut CommandEntry;
+        let entry_vaddr = self.cmdq.base_virt + entry_offset as u64;
+        let entry_ptr = entry_vaddr as *mut CommandEntry;
         // SAFETY: We own the command queue and the offset is within bounds.
         unsafe { core::ptr::write_volatile(entry_ptr, cmd) };
 
-        // Memory barrier
-        core::sync::atomic::fence(Ordering::Release);
+        // Clean cache to ensure the SMMU (a non-coherent bus master) sees our writes.
+        // Without this, the SMMU reads stale data from DRAM → CERROR_ILL.
+        m6_arch::cache::cache_clean_range(entry_vaddr, CommandEntry::SIZE);
 
         // Update producer
         self.cmdq.prod = self.cmdq.prod.wrapping_add(1);
@@ -199,12 +240,32 @@ impl SmmuInstance {
         self.submit_cmd(CommandEntry::cmd_sync())?;
 
         let expected_cons = self.cmdq.prod;
+        let idx_mask = self.cmdq_idx_mask();
 
         // Poll for completion
         for _ in 0..10000 {
             // SAFETY: Reading CMDQ_CONS register.
-            let cons = unsafe { self.read32(SMMU_CMDQ_CONS) };
-            if cons == expected_cons {
+            let cons_raw = unsafe { self.read32(SMMU_CMDQ_CONS) };
+
+            // Check for CERROR (bits [31:24])
+            let cerror = (cons_raw >> 24) & 0xFF;
+            if cerror != 0 {
+                log::error!(
+                    "SMMU #{}: CERROR={} during cmd_sync (cons={:#x} prod={})",
+                    self.index, cerror, cons_raw, self.cmdq.prod
+                );
+                // Acknowledge error: write cons with CERROR cleared
+                let cons_idx = cons_raw & idx_mask;
+                // SAFETY: Writing CMDQ_CONS to acknowledge CERROR.
+                unsafe { self.write32(SMMU_CMDQ_CONS, cons_idx) };
+                // Reset queue state to match hardware
+                self.cmdq.prod = cons_idx;
+                // SAFETY: Writing CMDQ_PROD to re-sync with hardware.
+                unsafe { self.write32(SMMU_CMDQ_PROD, cons_idx) };
+                return Err(SmmuError::InvalidConfig);
+            }
+
+            if (cons_raw & idx_mask) == (expected_cons & idx_mask) {
                 return Ok(());
             }
             core::hint::spin_loop();
@@ -213,7 +274,7 @@ impl SmmuInstance {
         // SAFETY: Reading CMDQ_CONS register for diagnostic.
         let final_cons = unsafe { self.read32(SMMU_CMDQ_CONS) };
         log::warn!(
-            "SMMU #{}: cmd_sync timeout - prod={} cons={} (expected cons={})",
+            "SMMU #{}: cmd_sync timeout - prod={} cons={:#x} (expected cons={})",
             self.index,
             self.cmdq.prod,
             final_cons,
@@ -221,6 +282,12 @@ impl SmmuInstance {
         );
 
         Err(SmmuError::Timeout)
+    }
+
+    /// Output Address Size from IDR5 (raw 3-bit IPS encoding for CDs).
+    #[inline]
+    pub fn oas(&self) -> u8 {
+        self.oas
     }
 
     /// Configure a stream table entry.
@@ -236,12 +303,36 @@ impl SmmuInstance {
 
         // Write STE to stream table
         let ste_offset = (stream_id as usize) * StreamTableEntry::SIZE;
-        let ste_ptr = (self.strtab_virt + ste_offset as u64) as *mut StreamTableEntry;
+        let ste_vaddr = self.strtab_virt + ste_offset as u64;
+        let ste_phys = self.strtab_phys + ste_offset as u64;
+        let ste_ptr = ste_vaddr as *mut StreamTableEntry;
         // SAFETY: We own the stream table and the offset is within bounds.
         unsafe { core::ptr::write_volatile(ste_ptr, ste) };
 
+        // Clean cache so the SMMU sees the updated STE in DRAM
+        m6_arch::cache::cache_clean_range(ste_vaddr, StreamTableEntry::SIZE);
+
+        // Diagnostic: read back STE from DRAM (after cache invalidate) to verify
+        m6_arch::cache::cache_invalidate_range(ste_vaddr, StreamTableEntry::SIZE);
+        let readback = unsafe { core::ptr::read_volatile(ste_ptr) };
+        m6_pal::console::puts("[SMMU] STE write: sid=0x");
+        put_hex_u32(stream_id);
+        m6_pal::console::puts(" phys=0x");
+        put_hex_u64(ste_phys);
+        m6_pal::console::puts(" strtab_base=0x");
+        put_hex_u64(self.strtab_phys);
+        m6_pal::console::puts("\n[SMMU]   DW0=0x");
+        put_hex_u64(readback.dwords[0]);
+        m6_pal::console::puts(" DW1=0x");
+        put_hex_u64(readback.dwords[1]);
+        m6_pal::console::puts("\n[SMMU]   align=");
+        let table_size = 1u64 << (self.strtab_log2size as u64 + 6); // entries * 64
+        let aligned = (self.strtab_phys & (table_size - 1)) == 0;
+        m6_pal::console::puts(if aligned { "OK" } else { "MISALIGNED!" });
+        m6_pal::console::puts("\n");
+
         // Invalidate STE cache
-        self.submit_cmd_sync(CommandEntry::cfgi_ste(stream_id, true))
+        self.submit_cmd_sync(CommandEntry::cfgi_ste(stream_id))
     }
 
     /// Invalidate IOTLB entries for an ASID.
@@ -257,6 +348,98 @@ impl SmmuInstance {
     pub fn invalidate_va(&mut self, asid: u16, iova: u64) -> Result<(), SmmuError> {
         // leaf=true since we're invalidating a page mapping
         self.submit_cmd_sync(CommandEntry::tlbi_nh_va(asid, iova, true))
+    }
+
+    /// Prefetch an IOVA translation (diagnostic: tests page table walk).
+    ///
+    /// Submits CMD_PREFETCH_ADDR for the given stream and IOVA. If the
+    /// SMMU can't walk the page tables, an event is generated in the
+    /// event queue. If the walk succeeds, the entry is silently cached.
+    pub fn prefetch_va(
+        &mut self,
+        stream_id: u32,
+        iova: u64,
+    ) -> Result<(), SmmuError> {
+        self.submit_cmd_sync(CommandEntry::prefetch_addr(stream_id, iova))
+    }
+
+    /// Dump SMMU hardware state for diagnostics (output via direct console).
+    ///
+    /// This reads back live SMMU register state and the STE at the given
+    /// stream ID. Output goes directly to the serial console so it is always
+    /// visible, even after the userspace console transition.
+    pub fn dump_state(&self, stream_id: u32) {
+        m6_pal::console::puts("[SMMU] -- Diagnostic dump (SMMU #");
+        put_hex_u8(self.index);
+        m6_pal::console::puts(") --\n");
+
+        // SAFETY: SMMU MMIO reads are always safe when the base pointer is valid.
+        unsafe {
+            let cr0 = self.read32(SMMU_CR0);
+            let cr0ack = self.read32(SMMU_CR0ACK);
+            let gerror = self.read32(SMMU_GERROR);
+            let gerrorn = self.read32(SMMU_GERRORN);
+            let eventq_prod = self.read32(SMMU_EVENTQ_PROD);
+            let eventq_cons = self.read32(SMMU_EVENTQ_CONS);
+
+            m6_pal::console::puts("[SMMU]   CR0=0x");
+            put_hex_u32(cr0);
+            m6_pal::console::puts(" CR0ACK=0x");
+            put_hex_u32(cr0ack);
+            m6_pal::console::puts("\n[SMMU]   GERROR=0x");
+            put_hex_u32(gerror);
+            m6_pal::console::puts(" GERRORN=0x");
+            put_hex_u32(gerrorn);
+            if gerror != gerrorn {
+                m6_pal::console::puts(" ** ACTIVE ERRORS **");
+            }
+            m6_pal::console::puts("\n[SMMU]   EVENTQ prod=0x");
+            put_hex_u32(eventq_prod);
+            m6_pal::console::puts(" cons=0x");
+            put_hex_u32(eventq_cons);
+            m6_pal::console::puts("\n");
+        }
+
+        // Dump STE at stream_id
+        let max_streams = 1u32 << self.strtab_log2size;
+        if stream_id < max_streams {
+            let ste_offset = (stream_id as usize) * StreamTableEntry::SIZE;
+            let ste_vaddr = self.strtab_virt + ste_offset as u64;
+
+            // Invalidate cache to read what SMMU sees in DRAM
+            m6_arch::cache::cache_invalidate_range(ste_vaddr, StreamTableEntry::SIZE);
+            let ste = unsafe {
+                core::ptr::read_volatile(ste_vaddr as *const StreamTableEntry)
+            };
+
+            m6_pal::console::puts("[SMMU]   STE[0x");
+            put_hex_u32(stream_id);
+            m6_pal::console::puts("]:\n");
+            for i in 0..8 {
+                m6_pal::console::puts("[SMMU]     DW");
+                put_hex_u8(i as u8);
+                m6_pal::console::puts("=0x");
+                put_hex_u64(ste.dwords[i]);
+                m6_pal::console::puts("\n");
+            }
+
+            // Decode key fields
+            let valid = ste.dwords[0] & 1;
+            let config = (ste.dwords[0] >> 1) & 0x7;
+            m6_pal::console::puts("[SMMU]     V=");
+            put_hex_u8(valid as u8);
+            m6_pal::console::puts(" Config=0b");
+            put_hex_u8(config as u8);
+            m6_pal::console::puts("\n");
+        } else {
+            m6_pal::console::puts("[SMMU]   SID 0x");
+            put_hex_u32(stream_id);
+            m6_pal::console::puts(" out of range (max=0x");
+            put_hex_u32(max_streams);
+            m6_pal::console::puts(")\n");
+        }
+
+        m6_pal::console::puts("[SMMU] -- End dump --\n");
     }
 
     // -- Stream Binding Management
@@ -277,35 +460,65 @@ impl SmmuInstance {
         fault_notif: ObjectRef,
         fault_badge: u64,
     ) -> Result<(), SmmuError> {
-        let entry = self
-            .stream_bindings
-            .get_mut(stream_id as usize)
-            .ok_or(SmmuError::InvalidStreamId)?;
+        // Validate stream_id fits in the stream table
+        if stream_id >= (1u32 << self.strtab_log2size) {
+            return Err(SmmuError::InvalidStreamId);
+        }
 
-        entry.cd_table_phys = cd_table_phys;
-        entry.iospace_ref = iospace_ref;
-        entry.fault_notification = fault_notif;
-        entry.fault_badge = fault_badge;
-        entry.is_bound = true;
+        self.stream_bindings.insert(stream_id, StreamBindingEntry {
+            cd_table_phys,
+            iospace_ref,
+            fault_notification: fault_notif,
+            fault_badge,
+            is_bound: true,
+        });
         Ok(())
     }
 
     /// Unbind a stream and clear its binding entry.
     pub fn unbind_stream(&mut self, stream_id: u32) -> Result<(), SmmuError> {
-        let entry = self
-            .stream_bindings
-            .get_mut(stream_id as usize)
+        self.stream_bindings
+            .remove(&stream_id)
             .ok_or(SmmuError::InvalidStreamId)?;
-
-        *entry = StreamBindingEntry::default();
         Ok(())
     }
 
     /// Get stream binding info for fault delivery.
     pub fn get_stream_binding(&self, stream_id: u32) -> Option<&StreamBindingEntry> {
         self.stream_bindings
-            .get(stream_id as usize)
+            .get(&stream_id)
             .filter(|e| e.is_bound)
+    }
+
+    /// Find any stream ID bound to the given IOSpace.
+    pub fn find_stream_for_iospace(&self, iospace_ref: ObjectRef) -> Option<u32> {
+        self.stream_bindings
+            .iter()
+            .find(|(_, e)| e.is_bound && e.iospace_ref == iospace_ref)
+            .map(|(&sid, _)| sid)
+    }
+
+    /// Prefetch a VA for ALL streams bound to the given IOSpace.
+    /// Returns the number of streams tested.
+    pub fn prefetch_all_for_iospace(
+        &mut self,
+        iospace_ref: ObjectRef,
+        iova: u64,
+    ) -> usize {
+        // Collect stream IDs first (can't borrow self mutably during iteration)
+        let sids: alloc::vec::Vec<u32> = self.stream_bindings
+            .iter()
+            .filter(|(_, e)| e.is_bound && e.iospace_ref == iospace_ref)
+            .map(|(&sid, _)| sid)
+            .collect();
+        let count = sids.len();
+        for sid in sids {
+            log::info!("SMMU prefetch: stream_id={:#x} iova={:#x}", sid, iova);
+            if let Err(e) = self.prefetch_va(sid, iova) {
+                log::warn!("SMMU prefetch failed for stream {:#x}: {:?}", sid, e);
+            }
+        }
+        count
     }
 
     /// Configure fault handler for an already-bound stream.
@@ -317,7 +530,7 @@ impl SmmuInstance {
     ) -> Result<(), SmmuError> {
         let entry = self
             .stream_bindings
-            .get_mut(stream_id as usize)
+            .get_mut(&stream_id)
             .ok_or(SmmuError::InvalidStreamId)?;
 
         if !entry.is_bound {
@@ -329,10 +542,48 @@ impl SmmuInstance {
         Ok(())
     }
 
+    /// Check and acknowledge GERROR (global errors).
+    ///
+    /// Returns true if any errors were active.
+    pub fn check_gerror(&mut self) -> bool {
+        // SAFETY: Reading GERROR/GERRORN registers.
+        let gerror = unsafe { self.read32(SMMU_GERROR) };
+        let gerrorn = unsafe { self.read32(SMMU_GERRORN) };
+        let active = gerror ^ gerrorn;
+
+        if active != 0 {
+            use m6_pal::console;
+            console::puts("[SMMU");
+            put_hex_u8(self.index);
+            console::puts("] GERROR active=0x");
+            put_hex_u32(active);
+            if active & GERROR_CMDQ_ERR != 0 {
+                console::puts(" CMDQ_ERR");
+            }
+            if active & GERROR_EVENTQ_ABT != 0 {
+                console::puts(" EVENTQ_ABT");
+            }
+            if active & GERROR_SFM_ERR != 0 {
+                console::puts(" SFM_ERR");
+            }
+            console::puts("\n");
+
+            // Acknowledge all active errors
+            // SAFETY: Writing GERRORN register.
+            unsafe { self.write32(SMMU_GERRORN, gerror) };
+            true
+        } else {
+            false
+        }
+    }
+
     /// Process pending events in the event queue.
     ///
     /// Returns the number of events processed.
     pub fn process_events(&mut self) -> usize {
+        // Check for global errors first
+        self.check_gerror();
+
         let mut processed = 0;
         let queue_size = 1usize << self.eventq.log2size;
 
@@ -345,9 +596,15 @@ impl SmmuInstance {
                 break; // Queue empty
             }
 
-            // Read event entry
+            // Invalidate the event entry from CPU cache before reading.
+            // The SMMU is a non-coherent bus master — it writes events to DRAM
+            // but the CPU may have a stale cache line for this address.
             let entry_offset = (self.eventq.cons as usize % queue_size) * EventEntry::SIZE;
-            let entry_ptr = (self.eventq.base_virt + entry_offset as u64) as *const EventEntry;
+            let entry_vaddr = self.eventq.base_virt + entry_offset as u64;
+            m6_arch::cache::cache_invalidate_range(entry_vaddr, EventEntry::SIZE);
+
+            // Read event entry
+            let entry_ptr = entry_vaddr as *const EventEntry;
             // SAFETY: We own the event queue and the offset is within bounds.
             let event = unsafe { core::ptr::read_volatile(entry_ptr) };
 
@@ -376,21 +633,47 @@ impl SmmuInstance {
     /// - `smmu_index`: SMMU instance index
     /// - `stream_bindings`: Stream binding table for fault delivery
     /// - `event`: Event queue entry
-    fn handle_event(smmu_index: u8, stream_bindings: &[StreamBindingEntry], event: &EventEntry) {
+    fn handle_event(smmu_index: u8, stream_bindings: &BTreeMap<u32, StreamBindingEntry>, event: &EventEntry) {
         let event_type = event.event_type();
         let stream_id = event.stream_id();
         let address = event.address();
 
-        log::debug!(
-            "SMMU{} event: type={:#x} stream={:#x} addr={:#x}",
-            smmu_index,
-            event_type,
-            stream_id,
-            address
-        );
+        // Skip empty/spurious events (type=0x00 with all zeros is a stale entry)
+        if event_type == 0 && stream_id == 0 && address == 0 {
+            return;
+        }
+
+        // Print SMMU events directly to the serial console so they're always
+        // visible. After transition_to_userspace_console(), log::* only goes
+        // to the ring buffer which is invisible during debugging.
+        use m6_pal::console;
+        console::puts("[SMMU");
+        put_hex_u8(smmu_index);
+        console::puts("] event type=0x");
+        put_hex_u8(event_type);
+        console::puts(" stream=0x");
+        put_hex_u32(stream_id);
+        console::puts(" addr=0x");
+        put_hex_u64(address);
+        console::puts("\n");
+
+        // Dump raw DWORDs for detailed debugging
+        console::puts("[SMMU");
+        put_hex_u8(smmu_index);
+        console::puts("]   DW0=0x");
+        put_hex_u64(event.dwords[0]);
+        console::puts(" DW1=0x");
+        put_hex_u64(event.dwords[1]);
+        console::puts("\n[SMMU");
+        put_hex_u8(smmu_index);
+        console::puts("]   DW2=0x");
+        put_hex_u64(event.dwords[2]);
+        console::puts(" DW3=0x");
+        put_hex_u64(event.dwords[3]);
+        console::puts("\n");
 
         // Look up stream binding for fault delivery
-        if let Some(binding) = stream_bindings.get(stream_id as usize)
+        if let Some(binding) = stream_bindings.get(&stream_id)
             && binding.is_bound
             && binding.fault_notification.is_valid()
         {
@@ -402,43 +685,28 @@ impl SmmuInstance {
             // Signal fault notification
             use crate::ipc::notification::do_signal;
             match do_signal(binding.fault_notification, combined_badge) {
-                Ok(()) => {
-                    log::trace!(
-                        "Delivered SMMU fault to userspace: stream={:#x} badge={:#x}",
-                        stream_id,
-                        combined_badge
-                    );
-                    return;
-                }
-                Err(e) => {
-                    log::error!(
-                        "Failed to deliver SMMU fault to userspace: stream={:#x} error={:?}",
-                        stream_id,
-                        e
-                    );
+                Ok(()) => return,
+                Err(_) => {
+                    console::puts("[SMMU] fault delivery failed for stream 0x");
+                    put_hex_u32(stream_id);
+                    console::puts("\n");
                 }
             }
         }
 
-        // No fault handler configured - log error
+        // No fault handler configured - print detail to console
         if event.is_translation_fault() {
-            log::error!(
-                "SMMU translation fault (no handler): stream={:#x} addr={:#x}",
-                stream_id,
-                address
-            );
+            console::puts("[SMMU] TRANSLATION FAULT: stream=0x");
+            put_hex_u32(stream_id);
+            console::puts(" addr=0x");
+            put_hex_u64(address);
+            console::puts("\n");
         } else if event.is_permission_fault() {
-            log::error!(
-                "SMMU permission fault (no handler): stream={:#x} addr={:#x}",
-                stream_id,
-                address
-            );
-        } else {
-            log::warn!(
-                "SMMU event (no handler): type={:#x} stream={:#x}",
-                event_type,
-                stream_id
-            );
+            console::puts("[SMMU] PERMISSION FAULT: stream=0x");
+            put_hex_u32(stream_id);
+            console::puts(" addr=0x");
+            put_hex_u64(address);
+            console::puts("\n");
         }
     }
 }
@@ -658,8 +926,20 @@ pub unsafe fn init(
     }
 
     // Determine stream table size from IDR1.SIDSIZE
+    // Cap at 17 (128K entries = 8MB). On RK3588, each PCIe controller has
+    // a unique stream_base (0x0, 0x1000, 0x2000, ...) so pcie2x1l2
+    // needs stream IDs up to ~0x5000 requiring log2size >= 15.
+    // We cap at 17 (128K entries) for headroom. For SIDSIZE>17,
+    // implement 2-level stream tables.
     let sid_size = (idr1 & 0x3F) as u8;
-    let strtab_log2size = sid_size.min(16); // Cap at 64K streams for sanity
+    let strtab_log2size = sid_size.min(17);
+    if sid_size > 17 {
+        log::warn!(
+            "SMMU #{}: SIDSIZE={} but linear stream table capped at 17 (8MB). \
+             Streams > 0x1FFFF will GBPA-abort.",
+            index, sid_size
+        );
+    }
 
     log::info!(
         "SMMU: IDR0={:#x} IDR1={:#x} SIDsize={} TTF={:#x}",
@@ -670,11 +950,25 @@ pub unsafe fn init(
     );
 
     // Allocate stream table (linear format)
+    // ARM IHI 0070: STRTAB_BASE.ADDR must be aligned to the larger of 64 bytes
+    // and the total table size. For LOG2SIZE=17, table = 8MB → need 8MB alignment.
     let strtab_entries = 1usize << strtab_log2size;
     let strtab_size = strtab_entries * StreamTableEntry::SIZE;
     let strtab_pages = strtab_size.div_ceil(page::SIZE_4K);
-    let strtab_phys = alloc_frames_zeroed(strtab_pages).ok_or(SmmuError::AllocFailed)?;
+    let strtab_align_pages = strtab_pages.max(1); // alignment in pages
+    let strtab_phys =
+        alloc_frames_aligned(strtab_pages, strtab_align_pages)
+            .ok_or(SmmuError::AllocFailed)?;
     let strtab_virt = phys_to_virt(strtab_phys);
+
+    // Diagnostic: log stream table address and alignment
+    m6_pal::console::puts("[SMMU] Stream table: phys=0x");
+    put_hex_u64(strtab_phys as u64);
+    m6_pal::console::puts(" size=0x");
+    put_hex_u64(strtab_size as u64);
+    m6_pal::console::puts(" align=");
+    let strtab_aligned = (strtab_phys & (strtab_size as u64 - 1)) == 0;
+    m6_pal::console::puts(if strtab_aligned { "OK\n" } else { "MISALIGNED!\n" });
 
     // Allocate command queue
     let cmdq_size = CMDQ_ENTRIES * CommandEntry::SIZE;
@@ -688,11 +982,14 @@ pub unsafe fn init(
     let eventq_phys = alloc_frames_zeroed(eventq_pages).ok_or(SmmuError::AllocFailed)?;
     let eventq_virt = phys_to_virt(eventq_phys);
 
-    // Allocate stream bindings array
-    let max_streams = 1usize << strtab_log2size;
-    let stream_bindings = (0..max_streams)
-        .map(|_| StreamBindingEntry::default())
-        .collect();
+    // Flush zeroed allocations to DRAM so the SMMU (non-coherent bus master) sees zeros.
+    // Without this, the SMMU reads stale DRAM content instead of the zeroed data.
+    m6_arch::cache::cache_clean_range(strtab_virt, strtab_size);
+    m6_arch::cache::cache_clean_range(cmdq_virt, cmdq_size);
+    m6_arch::cache::cache_clean_range(eventq_virt, eventq_size);
+
+    // Stream bindings are sparse — entries created on bind_stream only
+    let stream_bindings = BTreeMap::new();
 
     let mut instance = SmmuInstance {
         base,
@@ -700,6 +997,7 @@ pub unsafe fn init(
         strtab_phys,
         strtab_virt,
         strtab_log2size,
+        oas: oas as u8,
         cmdq: QueueState {
             base_phys: cmdq_phys,
             base_virt: cmdq_virt,
@@ -741,11 +1039,25 @@ pub unsafe fn init(
 
         // Configure stream table base (linear format)
         // RA=1 (read-allocate hint)
-        instance.write64(SMMU_STRTAB_BASE, strtab_phys | (1 << 62));
+        let strtab_base_val = strtab_phys | (1 << 62);
+        instance.write64(SMMU_STRTAB_BASE, strtab_base_val);
         instance.write32(
             SMMU_STRTAB_BASE_CFG,
             strtab_log2size as u32, // LOG2SIZE, FMT=0 (linear)
         );
+
+        // Read back STRTAB_BASE and CFG to verify the register writes took effect
+        let rb_base = instance.read64(SMMU_STRTAB_BASE);
+        let rb_cfg = instance.read32(SMMU_STRTAB_BASE_CFG);
+        m6_pal::console::puts("[SMMU] STRTAB_BASE wrote=0x");
+        put_hex_u64(strtab_base_val);
+        m6_pal::console::puts(" readback=0x");
+        put_hex_u64(rb_base);
+        m6_pal::console::puts("\n[SMMU] STRTAB_BASE_CFG wrote=0x");
+        put_hex_u32(strtab_log2size as u32);
+        m6_pal::console::puts(" readback=0x");
+        put_hex_u32(rb_cfg);
+        m6_pal::console::puts("\n");
 
         // Configure command queue
         let cmdq_log2size = instance.cmdq.log2size as u64;
@@ -753,7 +1065,9 @@ pub unsafe fn init(
         instance.write32(SMMU_CMDQ_PROD, 0);
         instance.write32(SMMU_CMDQ_CONS, 0);
 
-        // Configure event queue
+        // Configure event queue base. Do NOT sync CONS yet — EVENTQ_PROD is
+        // IMPLEMENTATION DEFINED while SMMUEN=0 (reads may return stale values).
+        // We sync CONS after SMMU enable when EVENTQ_PROD has a defined value.
         let eventq_log2size = instance.eventq.log2size as u64;
         instance.write64(SMMU_EVENTQ_BASE, eventq_phys | eventq_log2size);
 
@@ -778,6 +1092,15 @@ pub unsafe fn init(
         // Disable global bypass (abort transactions to unconfigured streams)
         instance.write32(SMMU_GBPA, GBPA_ABORT | GBPA_UPDATE);
 
+        // Verify GBPA was accepted (UPDATE bit should self-clear)
+        for _ in 0..10000 {
+            let gbpa_rb = instance.read32(SMMU_GBPA);
+            if gbpa_rb & GBPA_UPDATE == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
         // Enable SMMU
         let cr0 = cr0 | CR0_SMMUEN;
         instance.write32(SMMU_CR0, cr0);
@@ -791,11 +1114,62 @@ pub unsafe fn init(
             }
             core::hint::spin_loop();
         }
+
+        // Diagnostic: print final SMMU state after enable
+        let final_cr0 = instance.read32(SMMU_CR0);
+        let final_cr0ack = instance.read32(SMMU_CR0ACK);
+        let final_gbpa = instance.read32(SMMU_GBPA);
+        let final_gerror = instance.read32(SMMU_GERROR);
+        m6_pal::console::puts("[SMMU] Enabled: CR0=0x");
+        put_hex_u32(final_cr0);
+        m6_pal::console::puts(" CR0ACK=0x");
+        put_hex_u32(final_cr0ack);
+        m6_pal::console::puts(" GBPA=0x");
+        put_hex_u32(final_gbpa);
+        m6_pal::console::puts(" GERROR=0x");
+        put_hex_u32(final_gerror);
+        m6_pal::console::puts("\n");
+
         if !cr0ack_ok {
-            let ack = instance.read32(SMMU_CR0ACK);
-            log::warn!("SMMU #{}: CR0ACK timeout on SMMU enable (expected {:#x}, got {:#x})", index, cr0, ack);
+            log::warn!("SMMU #{}: CR0ACK timeout on SMMU enable (expected {:#x}, got {:#x})", index, cr0, final_cr0ack);
         } else {
-            log::info!("SMMU #{}: enabled (CR0={:#x} CR0ACK={:#x})", index, cr0, instance.read32(SMMU_CR0ACK));
+            log::info!("SMMU #{}: enabled (CR0={:#x} CR0ACK={:#x})", index, cr0, final_cr0ack);
+        }
+
+        // Now that SMMUEN=1, EVENTQ_PROD has a defined value. Sync CONS to
+        // it so the kernel and hardware agree the queue is empty.
+        let hw_eventq_prod = instance.read32(SMMU_EVENTQ_PROD);
+        instance.write32(SMMU_EVENTQ_CONS, hw_eventq_prod);
+        instance.eventq.prod = hw_eventq_prod;
+        instance.eventq.cons = hw_eventq_prod;
+
+        // Enable event queue and global error IRQs in the SMMU hardware.
+        // Without this, the SMMU never asserts the event IRQ line even though
+        // the GIC handler is registered — faults silently pile up in the queue.
+        let irq_ctrl = IRQ_CTRL_EVENTQ_IRQEN | IRQ_CTRL_GERROR_IRQEN;
+        instance.write32(SMMU_IRQ_CTRL, irq_ctrl);
+
+        // Wait for IRQ_CTRLACK
+        let mut irq_ack_ok = false;
+        for _ in 0..10000 {
+            if instance.read32(SMMU_IRQ_CTRLACK) == irq_ctrl {
+                irq_ack_ok = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if !irq_ack_ok {
+            let ack = instance.read32(SMMU_IRQ_CTRLACK);
+            log::warn!("SMMU #{}: IRQ_CTRLACK timeout (expected {:#x}, got {:#x})", index, irq_ctrl, ack);
+        }
+
+        // Check GERROR for any pre-existing errors
+        let gerror = instance.read32(SMMU_GERROR);
+        let gerrorn = instance.read32(SMMU_GERRORN);
+        if gerror != gerrorn {
+            log::warn!("SMMU #{}: GERROR={:#x} GERRORN={:#x} (active errors)", index, gerror, gerrorn);
+            // Acknowledge all errors
+            instance.write32(SMMU_GERRORN, gerror);
         }
     }
 

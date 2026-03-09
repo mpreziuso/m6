@@ -172,14 +172,14 @@ impl core::ops::BitAnd for Badge {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_badge_none() {
         assert!(Badge::NONE.is_none());
         assert!(!Badge::NONE.is_some());
         assert_eq!(Badge::NONE.value(), 0);
     }
 
-    #[test]
+    #[test_case]
     fn test_badge_value() {
         let badge = Badge::new(0x1234);
         assert!(!badge.is_none());
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(badge.value(), 0x1234);
     }
 
-    #[test]
+    #[test_case]
     fn test_badge_combine() {
         let a = Badge::new(0x01);
         let b = Badge::new(0x02);
