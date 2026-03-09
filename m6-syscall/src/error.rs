@@ -153,3 +153,98 @@ pub fn check_result(value: i64) -> SyscallResult {
         Err(SyscallError::from_i64(value).unwrap_or(SyscallError::InvalidSyscall))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL_VARIANTS: &[(i64, SyscallError)] = &[
+        (0, SyscallError::Ok),
+        (-1, SyscallError::InvalidCap),
+        (-2, SyscallError::NoRights),
+        (-3, SyscallError::InvalidArg),
+        (-4, SyscallError::SlotOccupied),
+        (-5, SyscallError::EmptySlot),
+        (-6, SyscallError::TypeMismatch),
+        (-7, SyscallError::NoMemory),
+        (-8, SyscallError::WouldBlock),
+        (-9, SyscallError::Revoked),
+        (-10, SyscallError::Alignment),
+        (-11, SyscallError::Range),
+        (-12, SyscallError::NotSupported),
+        (-13, SyscallError::InvalidState),
+        (-14, SyscallError::GuardMismatch),
+        (-15, SyscallError::DepthExceeded),
+        (-16, SyscallError::Truncated),
+        (-17, SyscallError::InvalidSyscall),
+        (-18, SyscallError::ObjectInUse),
+        (-19, SyscallError::LastCapability),
+        (-20, SyscallError::CircularDependency),
+        (-21, SyscallError::AlreadyMapped),
+        (-22, SyscallError::NotMapped),
+    ];
+
+    #[test_case]
+    fn test_as_i64_round_trip() {
+        for &(expected_i64, variant) in ALL_VARIANTS {
+            assert_eq!(variant.as_i64(), expected_i64);
+        }
+    }
+
+    #[test_case]
+    fn test_from_i64_round_trip() {
+        for &(raw, expected) in ALL_VARIANTS {
+            assert_eq!(SyscallError::from_i64(raw), Some(expected));
+        }
+    }
+
+    #[test_case]
+    fn test_from_i64_unmapped_values() {
+        assert_eq!(SyscallError::from_i64(1), None);
+        assert_eq!(SyscallError::from_i64(-23), None);
+        assert_eq!(SyscallError::from_i64(-100), None);
+        assert_eq!(SyscallError::from_i64(i64::MIN), None);
+        assert_eq!(SyscallError::from_i64(i64::MAX), None);
+    }
+
+    #[test_case]
+    fn test_is_ok_only_for_ok() {
+        assert!(SyscallError::Ok.is_ok());
+        for &(_, variant) in ALL_VARIANTS.iter().skip(1) {
+            assert!(!variant.is_ok(), "{variant:?} should not be ok");
+        }
+    }
+
+    #[test_case]
+    fn test_is_err_for_all_non_ok() {
+        assert!(!SyscallError::Ok.is_err());
+        for &(_, variant) in ALL_VARIANTS.iter().skip(1) {
+            assert!(variant.is_err(), "{variant:?} should be an error");
+        }
+    }
+
+    #[test_case]
+    fn test_name_non_empty_for_all() {
+        for &(_, variant) in ALL_VARIANTS {
+            assert!(!variant.name().is_empty(), "{variant:?} name must be non-empty");
+        }
+    }
+
+    #[test_case]
+    fn test_check_result_success() {
+        assert_eq!(check_result(0), Ok(0));
+        assert_eq!(check_result(42), Ok(42));
+    }
+
+    #[test_case]
+    fn test_check_result_error() {
+        assert_eq!(check_result(-1), Err(SyscallError::InvalidCap));
+        assert_eq!(check_result(-7), Err(SyscallError::NoMemory));
+    }
+
+    #[test_case]
+    fn test_check_result_unknown_error() {
+        // Unknown negative values fall back to InvalidSyscall
+        assert_eq!(check_result(-100), Err(SyscallError::InvalidSyscall));
+    }
+}

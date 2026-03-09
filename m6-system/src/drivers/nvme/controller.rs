@@ -5,7 +5,10 @@
 
 #![allow(dead_code)]
 
-use super::command::{DOORBELL_BASE, REG_ACQ, REG_AQA, REG_ASQ, REG_CAP, REG_CC, REG_CSTS, REG_VS};
+use super::command::{
+    DOORBELL_BASE, REG_ACQ, REG_AQA, REG_ASQ, REG_CAP, REG_CC, REG_CSTS, REG_INTMS, REG_NSSR,
+    REG_VS,
+};
 
 /// Maximum timeout for controller ready (in milliseconds)
 const TIMEOUT_MS: u32 = 5000;
@@ -191,14 +194,71 @@ impl NvmeController {
         Err("Timeout waiting for controller disable")
     }
 
+    /// Check if NVM Subsystem Reset is supported (CAP.NSSRS, bit 36).
+    #[inline]
+    #[must_use]
+    pub fn nssrs_supported(&self) -> bool {
+        (self.capabilities() >> 36) & 1 != 0
+    }
+
+    /// Attempt NVM Subsystem Reset.
+    ///
+    /// Writes the magic value 0x4E564D65 ("NVMe") to the NSSR register.
+    /// This is more thorough than a CC.EN=0 controller reset — it clears
+    /// all internal state including any UEFI-residual DMA engine config.
+    ///
+    /// Some controllers (SM2263) drop the PCIe link during NSSR, causing
+    /// MMIO reads to return 0xFFFFFFFF. This method waits for the link to
+    /// re-train, then clears CSTS.NSSRO so the controller will accept
+    /// new commands.
+    ///
+    /// Returns `true` if NSSR succeeded, `false` if the link didn't
+    /// recover (caller should fall back to CC.EN=0 reset).
+    pub fn subsystem_reset(&self) -> bool {
+        self.write32(REG_NSSR, 0x4E56_4D65);
+
+        // Wait for PCIe link to re-establish after NSSR.
+        // Some controllers reset their PCIe PHY during subsystem reset,
+        // causing MMIO reads to return 0xFFFFFFFF until link re-trains.
+        // Use a generous timeout (10s) since link re-training can be slow.
+        let link_timeout = 10_000usize * POLL_ITERATIONS_PER_MS;
+        let mut link_ok = false;
+        for _ in 0..link_timeout {
+            let csts = self.read32(REG_CSTS);
+            if csts != 0xFFFF_FFFF {
+                link_ok = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        if !link_ok {
+            return false;
+        }
+
+        // Wait for controller to become not ready (CSTS.RDY=0)
+        if self.wait_not_ready().is_err() {
+            return false;
+        }
+
+        // Clear CSTS.NSSRO (bit 4) — RW1C. The controller refuses to
+        // process commands while NSSRO is set.
+        let csts = self.status();
+        if csts & (1 << 4) != 0 {
+            self.write32(REG_CSTS, 1 << 4);
+        }
+        true
+    }
+
     /// Initialise the controller with admin queues.
     ///
     /// This performs the full NVMe initialisation sequence:
-    /// 1. Disable controller (CC.EN = 0)
-    /// 2. Wait for CSTS.RDY = 0
-    /// 3. Configure admin queues (AQA, ASQ, ACQ)
-    /// 4. Set CC (MPS, IOSQES, IOCQES, EN=1)
-    /// 5. Wait for CSTS.RDY = 1
+    /// 1. Subsystem reset (if supported) to clear UEFI state
+    /// 2. Disable controller (CC.EN = 0)
+    /// 3. Wait for CSTS.RDY = 0
+    /// 4. Configure admin queues (AQA, ASQ, ACQ)
+    /// 5. Set CC (MPS, IOSQES, IOCQES, EN=1)
+    /// 6. Wait for CSTS.RDY = 1
     ///
     /// # Arguments
     ///
@@ -233,6 +293,13 @@ impl NvmeController {
             return Err("Queue depth exceeds controller maximum");
         }
 
+        // NVM Subsystem Reset (NSSR) is NOT used here. While the SM2263
+        // supports it (CAP.NSSRS=1), NSSR drops the PCIe link entirely,
+        // requiring the device-mgr to reconfigure BME, bridge windows, and
+        // outbound ATU — something the driver cannot do on its own.
+        // CC.EN=0 provides a controller-level reset that preserves the
+        // PCIe link and config space.
+
         // Step 1: Disable controller
         self.disable()?;
 
@@ -247,15 +314,31 @@ impl NvmeController {
         // Step 5: Set Admin Completion Queue Base Address (ACQ)
         self.write64(REG_ACQ, admin_cq_iova);
 
+        // Mask all interrupt vectors via INTMS before enabling. If UEFI left
+        // MSI-X enabled with stale table entries, unmasked interrupts could
+        // cause the controller to write MSI-X TLPs to invalid addresses.
+        self.write32(REG_INTMS, 0xFFFF_FFFF);
+
         // Step 6: Set Controller Configuration (CC)
-        // - EN = 1 (enable)
-        // - CSS = 0 (NVM command set)
-        // - MPS = 0 (4KB pages, matching CAP.MPSMIN typically)
-        // - IOSQES = 6 (64 bytes, 2^6)
-        // - IOCQES = 4 (16 bytes, 2^4)
-        // CC: EN=1, CSS=0 (NVM), MPS=0 (4KB), IOSQES=6 (64B), IOCQES=4 (16B)
-        let cc = 0x1 | (6 << 16) | (4 << 20);
-        self.write32(REG_CC, cc);
+        // NVMe spec §7.6.1: "The host configures CC.IOSQES, CC.IOCQES,
+        // CC.AMS, CC.MPS, and CC.CSS before setting CC.EN."
+        //
+        // Two-step: write fields with EN=0 first, then set EN=1.
+        // Some controllers (SM2263) latch config on EN=0→1 transition and
+        // may not see fields written simultaneously with EN=1.
+        //
+        // MPS=0 (4KB pages), CSS=0 (NVMe cmd set), AMS=0 (round-robin),
+        // IOSQES=6 (64-byte SQ entries), IOCQES=4 (16-byte CQ entries).
+        let cc_fields = (6u32 << 16) | (4u32 << 20); // All fields, EN=0
+        self.write32(REG_CC, cc_fields);
+
+        // Small delay to let fields stabilise before enable
+        for _ in 0..1000 {
+            core::hint::spin_loop();
+        }
+
+        // Now enable
+        self.write32(REG_CC, cc_fields | 0x1);
 
         // Step 7: Wait for CSTS.RDY = 1
         self.wait_ready()?;
@@ -273,6 +356,10 @@ impl NvmeController {
     pub fn ring_sq_doorbell(&self, qid: u16, tail: u16) {
         let offset = DOORBELL_BASE + (qid as usize * 2) * self.doorbell_stride;
         self.write32(offset, tail as u32);
+        // DSB to ensure the doorbell write is committed to the PCIe bus
+        // before we start polling for completions.
+        // SAFETY: DSB is always safe.
+        unsafe { core::arch::asm!("dsb sy", options(nostack, preserves_flags)) };
     }
 
     /// Ring the completion queue doorbell.
@@ -285,6 +372,34 @@ impl NvmeController {
     pub fn ring_cq_doorbell(&self, qid: u16, head: u16) {
         let offset = DOORBELL_BASE + (qid as usize * 2 + 1) * self.doorbell_stride;
         self.write32(offset, head as u32);
+    }
+
+    /// Read back ASQ register (for diagnostics).
+    #[inline]
+    #[must_use]
+    pub fn read_asq(&self) -> u64 {
+        self.read64(REG_ASQ)
+    }
+
+    /// Read back ACQ register (for diagnostics).
+    #[inline]
+    #[must_use]
+    pub fn read_acq(&self) -> u64 {
+        self.read64(REG_ACQ)
+    }
+
+    /// Read back AQA register (for diagnostics).
+    #[inline]
+    #[must_use]
+    pub fn read_aqa(&self) -> u32 {
+        self.read32(REG_AQA)
+    }
+
+    /// Read back CC register (for diagnostics).
+    #[inline]
+    #[must_use]
+    pub fn read_cc(&self) -> u32 {
+        self.read32(REG_CC)
     }
 
     /// Get the base address.

@@ -185,7 +185,7 @@ impl AsidControlObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_asid_pool_allocate() {
         let mut pool = AsidPoolObject::new(0);
         let vspace = ObjectRef::from_index(1);
@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(pool.allocated_count, 1);
     }
 
-    #[test]
+    #[test_case]
     fn test_asid_pool_free() {
         let mut pool = AsidPoolObject::new(0);
         let vspace = ObjectRef::from_index(1);
@@ -207,7 +207,7 @@ mod tests {
         assert_eq!(pool.allocated_count, 0);
     }
 
-    #[test]
+    #[test_case]
     fn test_asid_control() {
         let ctrl = AsidControlObject::new(16);
         assert!(ctrl.can_create_pool());

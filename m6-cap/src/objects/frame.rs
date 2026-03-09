@@ -139,7 +139,7 @@ impl FrameObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_frame_4k() {
         let frame = FrameObject::new_4k(PhysAddr::new(0x1000));
         assert_eq!(frame.size(), 4096);
@@ -148,7 +148,7 @@ mod tests {
         assert!(!frame.is_device);
     }
 
-    #[test]
+    #[test_case]
     fn test_frame_2m() {
         let frame = FrameObject::new_2m(PhysAddr::new(0x200000));
         assert_eq!(frame.size(), 2 * 1024 * 1024);
@@ -156,7 +156,7 @@ mod tests {
         assert!(!frame.is_4k());
     }
 
-    #[test]
+    #[test_case]
     fn test_map_count() {
         let mut frame = FrameObject::new_4k(PhysAddr::new(0x1000));
         assert!(!frame.is_mapped());

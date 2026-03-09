@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 description = "Capability-based security primitives for the M6 microkernel"
 
+[dev-dependencies]
+m6-testlib = { path = "../m6-testlib" }
+
 [dependencies]
 m6-common = { workspace = true }
 

@@ -150,7 +150,7 @@ impl Iterator for FlushIterator<'_> {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_quarantine_basic() {
         let mut queue = QuarantineQueue::new();
 
@@ -166,7 +166,7 @@ mod tests {
         assert_eq!(queue.bytes(), 64);
     }
 
-    #[test]
+    #[test_case]
     fn test_quarantine_dequeue() {
         let mut queue = QuarantineQueue::new();
 
@@ -188,5 +188,69 @@ mod tests {
         assert!(dequeued.is_some());
         assert_eq!(dequeued.unwrap().ptr, 0x1000 as *mut u8);
         assert_eq!(queue.count(), 1);
+    }
+
+    #[test_case]
+    fn test_quarantine_full_evicts_oldest() {
+        let mut queue = QuarantineQueue::new();
+        // Fill the queue to capacity.
+        for i in 0..QUARANTINE_SIZE {
+            let flushed = queue.quarantine(QuarantineEntry {
+                ptr: (0x1000 + i * 8) as *mut u8,
+                size: 8,
+                is_large: false,
+            });
+            assert!(flushed.is_none());
+        }
+        assert!(queue.is_full());
+        // Adding one more should evict the oldest (ptr = 0x1000).
+        let evicted = queue.quarantine(QuarantineEntry {
+            ptr: 0xDEAD as *mut u8,
+            size: 8,
+            is_large: false,
+        });
+        assert_eq!(evicted.unwrap().ptr, 0x1000 as *mut u8);
+    }
+
+    #[test_case]
+    fn test_flush_all_fifo_order() {
+        let mut queue = QuarantineQueue::new();
+        for i in 0..4usize {
+            queue.quarantine(QuarantineEntry {
+                ptr: (0x1000 + i * 8) as *mut u8,
+                size: 8,
+                is_large: false,
+            });
+        }
+        let mut iter = queue.flush_all();
+        assert_eq!(iter.next().unwrap().ptr, 0x1000 as *mut u8);
+        assert_eq!(iter.next().unwrap().ptr, 0x1008 as *mut u8);
+        assert_eq!(iter.next().unwrap().ptr, 0x1010 as *mut u8);
+        assert_eq!(iter.next().unwrap().ptr, 0x1018 as *mut u8);
+        assert!(iter.next().is_none());
+    }
+
+    #[test_case]
+    fn test_byte_limit_triggers_flush() {
+        let mut queue = QuarantineQueue::new();
+        // Each entry is just over half MAX_QUARANTINE_BYTES.
+        // Entry 1: bytes before = 0, no flush.  After: bytes = big_size.
+        // Entry 2: bytes before = big_size < MAX, no flush.  After: bytes = 2*big_size.
+        // Entry 3: bytes before = 2*big_size >= MAX → flush entry 1.
+        let big_size = MAX_QUARANTINE_BYTES / 2 + 1;
+        let mut evicted = 0usize;
+        for i in 0..3usize {
+            let flushed = queue.quarantine(QuarantineEntry {
+                ptr: (0x1000 + i * 0x1000) as *mut u8,
+                size: big_size,
+                is_large: true,
+            });
+            if flushed.is_some() {
+                evicted += 1;
+            }
+        }
+        assert_eq!(evicted, 1);
+        // Bytes in queue should not exceed two entries' worth.
+        assert!(queue.bytes() <= 2 * big_size);
     }
 }

@@ -290,14 +290,14 @@ mod tests {
     use super::*;
     use crate::objects::Endpoint;
 
-    #[test]
+    #[test_case]
     fn test_cptr_null() {
         let cptr: CPtr<Endpoint> = CPtr::null();
         assert!(cptr.is_null());
         assert_eq!(cptr.raw(), 0);
     }
 
-    #[test]
+    #[test_case]
     fn test_cptr_from_index() {
         // 8-bit radix (256 slots), index 5
         let cptr: RawCPtr = CPtr::from_index(5, 8);
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(index, 5);
     }
 
-    #[test]
+    #[test_case]
     fn test_cptr_guard_check() {
         // Create a CPtr with guard value 0b11 in top 2 bits
         let cptr: RawCPtr = CPtr::from_raw(0xC000_0000_0000_0000);
@@ -313,7 +313,7 @@ mod tests {
         assert!(!cptr.check_guard(0b10, 2, 0));
     }
 
-    #[test]
+    #[test_case]
     fn test_depth_tracking() {
         let depth = CptrDepth::START;
         assert_eq!(depth.bits_remaining(), 64);

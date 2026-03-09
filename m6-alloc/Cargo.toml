@@ -10,6 +10,9 @@ description = "Hardened userspace heap allocator for the M6 microkernel"
 [lib]
 name = "m6_alloc"
 
+[dev-dependencies]
+m6-testlib = { path = "../m6-testlib" }
+
 [dependencies]
 spin = { workspace = true }
 

@@ -13,11 +13,11 @@ use crate::PAGE_SIZE;
 pub trait MemKind: private::Sealed + Copy + Clone {}
 
 /// Physical address space marker
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Physical;
 
 /// Virtual address space marker
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Virtual;
 
 impl MemKind for Physical {}
@@ -273,5 +273,107 @@ impl<K: MemKind, T> fmt::UpperHex for Address<K, T> {
 impl<K: MemKind, T> Default for Address<K, T> {
     fn default() -> Self {
         Self::null()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_pa_is_page_aligned() {
+        assert!(PA::new(0).is_page_aligned());
+        assert!(PA::new(0x1000).is_page_aligned());
+        assert!(!PA::new(0x1001).is_page_aligned());
+        assert!(!PA::new(0x1FFF).is_page_aligned());
+        assert!(PA::new(0x2000).is_page_aligned());
+        // High address, aligned
+        assert!(PA::new(0x0000_FFFF_FFFF_F000).is_page_aligned());
+    }
+
+    #[test_case]
+    fn test_pa_page_align_down() {
+        assert_eq!(PA::new(0x1000).page_align_down(), PA::new(0x1000));
+        assert_eq!(PA::new(0x1001).page_align_down(), PA::new(0x1000));
+        assert_eq!(PA::new(0x1FFF).page_align_down(), PA::new(0x1000));
+        assert_eq!(PA::new(0).page_align_down(), PA::new(0));
+        assert_eq!(PA::new(0x2000).page_align_down(), PA::new(0x2000));
+    }
+
+    #[test_case]
+    fn test_pa_page_align_up() {
+        assert_eq!(PA::new(0x1000).page_align_up(), PA::new(0x1000));
+        assert_eq!(PA::new(0x1001).page_align_up(), PA::new(0x2000));
+        assert_eq!(PA::new(0x1FFF).page_align_up(), PA::new(0x2000));
+        assert_eq!(PA::new(0).page_align_up(), PA::new(0));
+    }
+
+    #[test_case]
+    fn test_pa_page_offset() {
+        assert_eq!(PA::new(0).page_offset(), 0);
+        assert_eq!(PA::new(0xFFF).page_offset(), 0xFFF);
+        assert_eq!(PA::new(0x1ABC).page_offset(), 0xABC);
+        assert_eq!(PA::new(0x2000).page_offset(), 0);
+    }
+
+    #[test_case]
+    fn test_pa_offset() {
+        assert_eq!(PA::new(0x1000).offset(0x200), PA::new(0x1200));
+        assert_eq!(PA::new(0).offset(0), PA::new(0));
+    }
+
+    #[test_case]
+    fn test_pa_to_untyped_preserves_value() {
+        #[allow(dead_code)]
+        struct Marker;
+        let typed = TPA::<Marker>::new(0xDEAD_BEEF);
+        let untyped = typed.to_untyped();
+        assert_eq!(untyped.value(), 0xDEAD_BEEF);
+    }
+
+    #[test_case]
+    fn test_pa_add_u64() {
+        assert_eq!(PA::new(0x1000) + 0x100u64, PA::new(0x1100));
+        assert_eq!(PA::new(0) + 0u64, PA::new(0));
+    }
+
+    #[test_case]
+    fn test_pa_add_usize() {
+        assert_eq!(PA::new(0x2000) + 0x800usize, PA::new(0x2800));
+    }
+
+    #[test_case]
+    fn test_pa_sub_addresses() {
+        assert_eq!(PA::new(0x2000) - PA::new(0x1000), 0x1000u64);
+        assert_eq!(PA::new(0x1000) - PA::new(0x1000), 0u64);
+    }
+
+    #[test_case]
+    fn test_pa_ordering() {
+        assert!(PA::new(0x1000) < PA::new(0x2000));
+        assert!(PA::new(0x2000) > PA::new(0x1000));
+        assert_eq!(PA::new(0x1000), PA::new(0x1000));
+    }
+
+    #[test_case]
+    fn test_va_as_ptr_non_null() {
+        let va = VA::new(0x1000);
+        let ptr: *const u8 = va.as_ptr();
+        assert!(!ptr.is_null());
+        assert_eq!(ptr as u64, 0x1000u64);
+    }
+
+    #[test_case]
+    fn test_va_as_mut_ptr() {
+        let va = VA::new(0x2000);
+        let ptr: *mut u8 = va.as_mut_ptr();
+        assert_eq!(ptr as u64, 0x2000u64);
+    }
+
+    #[test_case]
+    fn test_null_address() {
+        assert!(PA::null().is_null());
+        assert!(VA::null().is_null());
+        assert!(!PA::new(1).is_null());
     }
 }

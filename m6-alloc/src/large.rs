@@ -246,7 +246,7 @@ pub fn mapped_size(size: usize) -> usize {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_insert_lookup_remove() {
         let mut table = LargeSideTable::new();
 
@@ -275,7 +275,7 @@ mod tests {
         assert!(table.lookup(0x1000_0000).is_none());
     }
 
-    #[test]
+    #[test_case]
     fn test_collision_handling() {
         let mut table = LargeSideTable::new();
 
@@ -302,7 +302,7 @@ mod tests {
         }
     }
 
-    #[test]
+    #[test_case]
     fn test_pages_for_size() {
         assert_eq!(pages_for_size(1), 1);
         assert_eq!(pages_for_size(4096), 1);

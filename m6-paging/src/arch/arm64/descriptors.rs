@@ -767,3 +767,295 @@ impl core::fmt::Debug for L3Descriptor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::address::PA;
+    use crate::permissions::{MemoryType, PtePermissions};
+
+    fn bit(raw: u64, n: u32) -> u64 {
+        (raw >> n) & 1
+    }
+
+    fn bits(raw: u64, hi: u32, lo: u32) -> u64 {
+        (raw >> lo) & ((1u64 << (hi - lo + 1)) - 1)
+    }
+
+    // -- L3Descriptor
+
+    #[test_case]
+    fn test_l3_valid_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::ro(false));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 1, 0), 0b11, "bits[1:0] must be 0b11 for a valid L3 page");
+        assert_eq!(bit(raw, 10), 1, "AF (bit 10) must always be set");
+    }
+
+    #[test_case]
+    fn test_l3_is_valid_and_invalid() {
+        let valid = L3Descriptor::new_mapping(PA::new(0x2000), MemoryType::Normal, PtePermissions::rw(false));
+        let invalid = L3Descriptor::invalid();
+        assert!(valid.is_valid());
+        assert!(!invalid.is_valid());
+        assert_eq!(invalid.as_raw(), 0);
+    }
+
+    #[test_case]
+    fn test_l3_normal_attr_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::ro(false));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 4, 2), 0, "Normal ATTR_INDEX = 0");
+        assert_eq!(bits(raw, 9, 8), 0b11, "Normal SH = InnerShareable");
+    }
+
+    #[test_case]
+    fn test_l3_device_attr_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Device, PtePermissions::rw(false));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 4, 2), 1, "Device ATTR_INDEX = 1");
+        assert_eq!(bits(raw, 9, 8), 0b00, "Device SH = NonShareable");
+    }
+
+    #[test_case]
+    fn test_l3_normal_noncacheable_attr_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::NormalNonCacheable, PtePermissions::rw(false));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 4, 2), 2, "NNC ATTR_INDEX = 2");
+        assert_eq!(bits(raw, 9, 8), 0b10, "NNC SH = OuterShareable");
+    }
+
+    #[test_case]
+    fn test_l3_kernel_ro_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::ro(false));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 7, 6), 0b10, "ro(kernel) AP = RO_EL1");
+        assert_eq!(bit(raw, 53), 1, "ro: PXN must be set");
+        assert_eq!(bit(raw, 54), 1, "ro: UXN must be set");
+        assert_eq!(bit(raw, 11), 0, "kernel mapping: nG = 0 (global)");
+        assert_eq!(bit(raw, 55), 0, "no COW");
+    }
+
+    #[test_case]
+    fn test_l3_kernel_rw_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::rw(false));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 7, 6), 0b00, "rw(kernel) AP = RW_EL1");
+        assert_eq!(bit(raw, 53), 1, "rw: PXN must be set");
+        assert_eq!(bit(raw, 54), 1, "rw: UXN must be set");
+        assert_eq!(bit(raw, 11), 0, "kernel mapping: nG = 0");
+    }
+
+    #[test_case]
+    fn test_l3_kernel_rx_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::rx(false));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 7, 6), 0b10, "rx(kernel) AP = RO_EL1");
+        assert_eq!(bit(raw, 53), 0, "rx(kernel): PXN = 0 (kernel may execute)");
+        assert_eq!(bit(raw, 54), 1, "rx(kernel): UXN = 1 (user may not execute)");
+        assert_eq!(bit(raw, 11), 0, "kernel mapping: nG = 0");
+    }
+
+    #[test_case]
+    fn test_l3_kernel_rwx_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::rwx(false));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 7, 6), 0b00, "rwx(kernel) AP = RW_EL1");
+        assert_eq!(bit(raw, 53), 0, "rwx(kernel): PXN = 0");
+        assert_eq!(bit(raw, 54), 1, "rwx(kernel): UXN = 1");
+        assert_eq!(bit(raw, 11), 0, "kernel mapping: nG = 0");
+    }
+
+    #[test_case]
+    fn test_l3_user_ro_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::ro(true));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 7, 6), 0b11, "ro(user) AP = RO_EL0");
+        assert_eq!(bit(raw, 53), 1, "ro: PXN = 1");
+        assert_eq!(bit(raw, 54), 1, "ro: UXN = 1");
+        assert_eq!(bit(raw, 11), 1, "user mapping: nG = 1 (per-ASID)");
+    }
+
+    #[test_case]
+    fn test_l3_user_rw_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::rw(true));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 7, 6), 0b01, "rw(user) AP = RW_EL0");
+        assert_eq!(bit(raw, 53), 1, "rw: PXN = 1");
+        assert_eq!(bit(raw, 54), 1, "rw: UXN = 1");
+        assert_eq!(bit(raw, 11), 1, "user mapping: nG = 1");
+    }
+
+    #[test_case]
+    fn test_l3_user_rx_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::rx(true));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 7, 6), 0b11, "rx(user) AP = RO_EL0");
+        assert_eq!(bit(raw, 53), 0, "rx(user): PXN = 0 (executable)");
+        assert_eq!(bit(raw, 54), 0, "rx(user): UXN = 0 (user may execute)");
+        assert_eq!(bit(raw, 11), 1, "user mapping: nG = 1");
+    }
+
+    #[test_case]
+    fn test_l3_user_rwx_bits() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::rwx(true));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 7, 6), 0b01, "rwx(user) AP = RW_EL0");
+        assert_eq!(bit(raw, 53), 0, "rwx(user): PXN = 0");
+        assert_eq!(bit(raw, 54), 0, "rwx(user): UXN = 0");
+        assert_eq!(bit(raw, 11), 1, "user mapping: nG = 1");
+    }
+
+    #[test_case]
+    fn test_l3_permissions_round_trip() {
+        let perms_set = [
+            PtePermissions::ro(false),
+            PtePermissions::rw(false),
+            PtePermissions::rx(false),
+            PtePermissions::rwx(false),
+            PtePermissions::ro(true),
+            PtePermissions::rw(true),
+            PtePermissions::rx(true),
+            PtePermissions::rwx(true),
+        ];
+        for perms in perms_set {
+            let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, perms);
+            assert_eq!(desc.permissions(), Some(perms), "round-trip failed for {:?}", perms);
+        }
+    }
+
+    #[test_case]
+    fn test_l3_memory_type_round_trip() {
+        for mem_type in [MemoryType::Normal, MemoryType::Device, MemoryType::NormalNonCacheable] {
+            let desc = L3Descriptor::new_mapping(PA::new(0x1000), mem_type, PtePermissions::ro(false));
+            assert_eq!(desc.memory_type(), Some(mem_type));
+        }
+    }
+
+    #[test_case]
+    fn test_l3_output_address_preserved() {
+        let pa = PA::new(0xABCD_E000); // 4KB-aligned
+        let desc = L3Descriptor::new_mapping(pa, MemoryType::Normal, PtePermissions::ro(false));
+        assert_eq!(desc.mapped_address(), Some(pa));
+    }
+
+    #[test_case]
+    fn test_l3_cow_bit() {
+        let desc = L3Descriptor::new_mapping(PA::new(0x1000), MemoryType::Normal, PtePermissions::rw(false).into_cow());
+        let raw = desc.as_raw();
+        assert_eq!(bit(raw, 55), 1, "COW bit (55) must be set");
+        assert_eq!(bits(raw, 7, 6), 0b10, "COW downgrades to read-only: AP = RO_EL1");
+        let perms = desc.permissions().unwrap();
+        assert!(perms.cow);
+        assert!(!perms.write);
+    }
+
+    // -- L2Descriptor
+
+    #[test_case]
+    fn test_l2_block_bits() {
+        let desc = L2Descriptor::new_mapping(PA::new(0x0020_0000), MemoryType::Normal, PtePermissions::ro(false));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 1, 0), 0b01, "L2 block: bits[1:0] = 0b01");
+        assert!(desc.is_block());
+        assert!(desc.is_valid());
+        assert!(!desc.is_table());
+    }
+
+    #[test_case]
+    fn test_l2_table_bits() {
+        let desc = L2Descriptor::new_table(PA::new(0x3000));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 1, 0), 0b11, "L2 table: bits[1:0] = 0b11");
+        assert!(!desc.is_block());
+        assert!(desc.is_valid());
+        assert!(desc.is_table());
+    }
+
+    #[test_case]
+    fn test_l2_permissions_round_trip() {
+        let perms = PtePermissions::rw(false);
+        let desc = L2Descriptor::new_mapping(PA::new(0x0020_0000), MemoryType::Normal, perms);
+        assert_eq!(desc.permissions(), Some(perms));
+    }
+
+    #[test_case]
+    fn test_l2_memory_type_round_trip() {
+        for mem_type in [MemoryType::Normal, MemoryType::Device, MemoryType::NormalNonCacheable] {
+            let desc = L2Descriptor::new_mapping(PA::new(0x0020_0000), mem_type, PtePermissions::ro(false));
+            assert_eq!(desc.memory_type(), Some(mem_type));
+        }
+    }
+
+    #[test_case]
+    fn test_l2_invalid() {
+        let desc = L2Descriptor::invalid();
+        assert!(!desc.is_valid());
+        assert!(!desc.is_block());
+        assert!(desc.permissions().is_none());
+        assert!(desc.memory_type().is_none());
+        assert!(desc.mapped_address().is_none());
+    }
+
+    // -- L1Descriptor
+
+    #[test_case]
+    fn test_l1_block_bits() {
+        let desc = L1Descriptor::new_mapping(PA::new(0x4000_0000), MemoryType::Normal, PtePermissions::ro(false));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 1, 0), 0b01, "L1 block: bits[1:0] = 0b01");
+        assert!(desc.is_block());
+        assert!(desc.is_valid());
+        assert!(!desc.is_table());
+    }
+
+    #[test_case]
+    fn test_l1_table_bits() {
+        let desc = L1Descriptor::new_table(PA::new(0x2000));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 1, 0), 0b11, "L1 table: bits[1:0] = 0b11");
+        assert!(!desc.is_block());
+        assert!(desc.is_valid());
+        assert!(desc.is_table());
+    }
+
+    #[test_case]
+    fn test_l1_permissions_round_trip() {
+        let perms = PtePermissions::rx(false);
+        let desc = L1Descriptor::new_mapping(PA::new(0x4000_0000), MemoryType::Normal, perms);
+        assert_eq!(desc.permissions(), Some(perms));
+    }
+
+    #[test_case]
+    fn test_l1_memory_type_round_trip() {
+        for mem_type in [MemoryType::Normal, MemoryType::Device, MemoryType::NormalNonCacheable] {
+            let desc = L1Descriptor::new_mapping(PA::new(0x4000_0000), mem_type, PtePermissions::ro(false));
+            assert_eq!(desc.memory_type(), Some(mem_type));
+        }
+    }
+
+    // -- L0Descriptor
+
+    #[test_case]
+    fn test_l0_table_always_valid() {
+        let desc = L0Descriptor::new_table(PA::new(0x5000));
+        let raw = desc.as_raw();
+        assert_eq!(bits(raw, 1, 0), 0b11, "L0 always a table: bits[1:0] = 0b11");
+        assert!(desc.is_valid());
+        assert!(desc.is_table());
+    }
+
+    #[test_case]
+    fn test_l0_next_table_address() {
+        let pa = PA::new(0x6000);
+        let desc = L0Descriptor::new_table(pa);
+        assert_eq!(desc.next_table_address(), Some(pa));
+    }
+
+    #[test_case]
+    fn test_l0_invalid() {
+        let desc = L0Descriptor::invalid();
+        assert!(!desc.is_valid());
+        assert!(desc.next_table_address().is_none());
+    }
+}

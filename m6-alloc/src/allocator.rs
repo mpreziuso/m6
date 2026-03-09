@@ -417,7 +417,7 @@ where
         #[cfg(feature = "stats")]
         {
             let mut stats = self.stats.lock();
-            stats.live_bytes = stats.live_bytes.saturating_sub(slot_size);
+            stats.live_bytes = stats.live_bytes.saturating_sub(SIZE_CLASSES[class_idx].size);
             stats.total_frees += 1;
         }
 
@@ -585,5 +585,134 @@ where
     #[cfg(feature = "stats")]
     pub fn stats(&self) -> crate::stats::AllocatorStats {
         self.stats.lock().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Allocator, AllocatorConfig};
+    use crate::traits::{AllocatedPages, PagePool, SecretProvider, VmProvider, VmRights};
+    use core::alloc::Layout;
+
+    // -- mock backends
+
+    struct MockVm;
+    struct MockPool;
+    struct MockSecret;
+
+    impl VmProvider for MockVm {
+        type Error = ();
+        fn map_frame(&self, _vaddr: usize, _cptr: u64, _rights: VmRights) -> Result<(), ()> {
+            Ok(())
+        }
+        fn unmap_frame(&self, _vaddr: usize) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+
+    impl PagePool for MockPool {
+        type Error = ();
+        fn alloc_pages(&self, count: usize) -> Result<AllocatedPages, ()> {
+            Ok(AllocatedPages { frame_cptr: 1, count })
+        }
+        fn free_pages(&self, _pages: AllocatedPages) -> Result<(), ()> {
+            Ok(())
+        }
+    }
+
+    impl SecretProvider for MockSecret {
+        fn get_secret(&self) -> u64 {
+            0xDEAD_BEEF_CAFE_BABE
+        }
+    }
+
+    #[test_case]
+    fn test_alloc_dealloc_cycle() {
+        let heap = [0u8; 64 * 1024];
+        let alloc = Allocator::new(
+            MockVm,
+            MockPool,
+            MockSecret,
+            AllocatorConfig { heap_base: heap.as_ptr() as usize, heap_size: heap.len() },
+        );
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let ptr = alloc.alloc(layout);
+        assert!(!ptr.is_null());
+        assert!(!alloc.is_poisoned());
+        // SAFETY: ptr was returned by this allocator with the same layout.
+        unsafe { alloc.dealloc(ptr, layout) };
+        assert!(!alloc.is_poisoned());
+    }
+
+    #[test_case]
+    fn test_two_allocs_same_size_class_both_succeed() {
+        let heap = [0u8; 64 * 1024];
+        let alloc = Allocator::new(
+            MockVm,
+            MockPool,
+            MockSecret,
+            AllocatorConfig { heap_base: heap.as_ptr() as usize, heap_size: heap.len() },
+        );
+        let layout = Layout::from_size_align(64, 8).unwrap();
+        let p1 = alloc.alloc(layout);
+        let p2 = alloc.alloc(layout);
+        assert!(!p1.is_null());
+        assert!(!p2.is_null());
+        assert_ne!(p1, p2);
+        assert!(!alloc.is_poisoned());
+        unsafe {
+            alloc.dealloc(p1, layout);
+            alloc.dealloc(p2, layout);
+        }
+        assert!(!alloc.is_poisoned());
+    }
+
+    #[test_case]
+    fn test_alloc_beyond_span_capacity_creates_new_span() {
+        // Size class 14: 1024-byte slots, 2 pages, 8 slots per span.
+        // Allocating 9 times fills span 1 and starts span 2.
+        let heap = [0u8; 256 * 1024];
+        let alloc = Allocator::new(
+            MockVm,
+            MockPool,
+            MockSecret,
+            AllocatorConfig { heap_base: heap.as_ptr() as usize, heap_size: heap.len() },
+        );
+        let layout = Layout::from_size_align(1024, 8).unwrap();
+        let mut ptrs = [core::ptr::null_mut::<u8>(); 9];
+        for p in &mut ptrs {
+            *p = alloc.alloc(layout);
+            assert!(!p.is_null(), "allocation should succeed");
+        }
+        assert!(!alloc.is_poisoned());
+        for p in ptrs {
+            unsafe { alloc.dealloc(p, layout) };
+        }
+        assert!(!alloc.is_poisoned());
+    }
+
+    #[test_case]
+    fn test_size_class_boundary_small_vs_large() {
+        // Exactly MAX_SMALL_SIZE → small path; MAX_SMALL_SIZE + 1 → large path.
+        let heap = [0u8; 256 * 1024];
+        let alloc = Allocator::new(
+            MockVm,
+            MockPool,
+            MockSecret,
+            AllocatorConfig { heap_base: heap.as_ptr() as usize, heap_size: heap.len() },
+        );
+        let small_layout = Layout::from_size_align(2048, 8).unwrap();
+        let large_layout = Layout::from_size_align(2049, 8).unwrap();
+        let small_ptr = alloc.alloc(small_layout);
+        let large_ptr = alloc.alloc(large_layout);
+        assert!(!small_ptr.is_null());
+        assert!(!large_ptr.is_null());
+        assert_ne!(small_ptr, large_ptr);
+        assert!(!alloc.is_poisoned());
+        unsafe {
+            alloc.dealloc(small_ptr, small_layout);
+            alloc.dealloc(large_ptr, large_layout);
+        }
+        assert!(!alloc.is_poisoned());
     }
 }

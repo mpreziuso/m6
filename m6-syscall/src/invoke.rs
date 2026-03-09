@@ -687,14 +687,15 @@ pub fn map_frame(vspace: u64, frame: u64, vaddr: u64, rights: u64, attr: u64) ->
 ///
 /// # Arguments
 ///
-/// * `frame` - CPtr to the frame capability to unmap
+/// * `vspace` - CPtr to the VSpace capability
+/// * `vaddr` - Virtual address of the mapping to remove (page-aligned)
 ///
 /// # Returns
 ///
 /// 0 on success, negative error code on failure.
 #[inline]
-pub fn unmap_frame(frame: u64) -> SyscallResult {
-    check_result(invoke2(frame, method::vspace::UNMAP_FRAME))
+pub fn unmap_frame(vspace: u64, vaddr: u64) -> SyscallResult {
+    check_result(invoke3(vspace, method::vspace::UNMAP_FRAME, vaddr))
 }
 
 /// Map a page table into a VSpace.
@@ -1193,6 +1194,40 @@ pub fn iospace_bind_stream(iospace: u64, smmu_control: u64, stream_id: u32) -> S
 #[inline]
 pub fn iospace_unbind_stream(iospace: u64, smmu_control: u64, stream_id: u32) -> SyscallResult {
     check_result(invoke4(iospace, method::iospace::UNBIND_STREAM, smmu_control, stream_id as u64))
+}
+
+/// Set a fault handler for a bound SMMU stream.
+///
+/// Configures the SMMU to deliver fault notifications for the specified
+/// stream ID. When a DMA fault occurs, the notification cap is signalled
+/// with the given badge OR'd into the notification word.
+///
+/// # Arguments
+///
+/// * `iospace` - CPtr to the IOSpace capability
+/// * `stream_id` - Stream ID to configure
+/// * `notification` - CPtr to the Notification capability for fault delivery
+/// * `badge` - Badge to OR with fault info
+///
+/// # Returns
+///
+/// 0 on success, negative error code on failure.
+#[inline]
+pub fn iospace_set_fault_handler(
+    iospace: u64,
+    stream_id: u32,
+    notification: u64,
+    badge: u64,
+) -> SyscallResult {
+    check_result(invoke(
+        iospace,
+        method::iospace::SET_FAULT_HANDLER,
+        stream_id as u64,
+        notification,
+        badge,
+        0,
+        0,
+    ))
 }
 
 /// Create a DmaPool for IOVA allocation.

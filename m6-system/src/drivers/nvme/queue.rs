@@ -9,6 +9,7 @@ use super::command::{NvmeCommand, NvmeCompletion};
 use super::controller::NvmeController;
 use core::ptr::{read_volatile, write_volatile};
 use core::sync::atomic::{Ordering, fence};
+use m6_syscall::invoke::{cache_clean, cache_invalidate};
 
 /// Status field offset in NvmeCompletion (byte offset of `status` field)
 const COMPLETION_STATUS_OFFSET: usize = 14;
@@ -104,6 +105,10 @@ impl NvmeSq {
             write_volatile(self.entries.add(slot as usize), cmd);
         }
 
+        // Flush SQ entry to DRAM so the device can read it via non-coherent DMA
+        let entry_vaddr = unsafe { self.entries.add(slot as usize) } as u64;
+        let _ = cache_clean(entry_vaddr, core::mem::size_of::<NvmeCommand>());
+
         // Memory barrier before doorbell
         fence(Ordering::Release);
 
@@ -195,9 +200,20 @@ impl NvmeCq {
         self.depth
     }
 
+    /// Get the virtual address of a specific entry (for diagnostics).
+    #[inline]
+    #[must_use]
+    pub fn entry_vaddr(&self, index: u16) -> usize {
+        unsafe { self.entries.add((index % self.depth) as usize) as usize }
+    }
+
     /// Check if there's a valid completion to process.
     #[must_use]
     pub fn has_completion(&self) -> bool {
+        // Invalidate CQ entry cache line so we see DMA-written data from device
+        let entry_vaddr = unsafe { self.entries.add(self.head as usize) } as u64;
+        let _ = cache_invalidate(entry_vaddr, core::mem::size_of::<NvmeCompletion>());
+
         fence(Ordering::Acquire);
 
         // SAFETY: entries is valid, head is within bounds
@@ -212,6 +228,11 @@ impl NvmeCq {
         if !self.has_completion() {
             return None;
         }
+
+        // Invalidate again before final read (has_completion already did once,
+        // but re-invalidate in case of cache prefetch between the two reads)
+        let entry_vaddr = unsafe { self.entries.add(self.head as usize) } as u64;
+        let _ = cache_invalidate(entry_vaddr, core::mem::size_of::<NvmeCompletion>());
 
         // SAFETY: entries is valid, head is within bounds
         let entry = unsafe { read_volatile(self.entries.add(self.head as usize)) };

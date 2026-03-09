@@ -235,3 +235,117 @@ impl From<VirtAddr> for u64 {
         addr.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- PhysAddr
+
+    #[test_case]
+    fn test_phys_is_page_aligned() {
+        assert!(PhysAddr::new(0).is_page_aligned());
+        assert!(PhysAddr::new(0x1000).is_page_aligned());
+        assert!(!PhysAddr::new(0x1001).is_page_aligned());
+        assert!(!PhysAddr::new(0x1FFF).is_page_aligned());
+        assert!(PhysAddr::new(0x2000).is_page_aligned());
+    }
+
+    #[test_case]
+    fn test_phys_page_align_down() {
+        assert_eq!(PhysAddr::new(0x1000).page_align_down(), PhysAddr::new(0x1000));
+        assert_eq!(PhysAddr::new(0x1001).page_align_down(), PhysAddr::new(0x1000));
+        assert_eq!(PhysAddr::new(0x1FFF).page_align_down(), PhysAddr::new(0x1000));
+        assert_eq!(PhysAddr::new(0).page_align_down(), PhysAddr::new(0));
+    }
+
+    #[test_case]
+    fn test_phys_page_align_up() {
+        assert_eq!(PhysAddr::new(0x1000).page_align_up(), PhysAddr::new(0x1000));
+        assert_eq!(PhysAddr::new(0x1001).page_align_up(), PhysAddr::new(0x2000));
+        assert_eq!(PhysAddr::new(0x1FFF).page_align_up(), PhysAddr::new(0x2000));
+        assert_eq!(PhysAddr::new(0).page_align_up(), PhysAddr::new(0));
+    }
+
+    #[test_case]
+    fn test_phys_offset() {
+        assert_eq!(PhysAddr::new(0x1000).offset(0x200), PhysAddr::new(0x1200));
+        assert_eq!(PhysAddr::new(0).offset(0), PhysAddr::new(0));
+        // wrapping addition: u64::MAX + 1 wraps to 0
+        assert_eq!(PhysAddr::new(u64::MAX).offset(1), PhysAddr::new(0));
+    }
+
+    #[test_case]
+    fn test_phys_null() {
+        assert!(PhysAddr::new(0).is_null());
+        assert!(!PhysAddr::new(1).is_null());
+    }
+
+    #[test_case]
+    fn test_phys_as_u64() {
+        assert_eq!(PhysAddr::new(0xDEAD_BEEF).as_u64(), 0xDEAD_BEEF);
+    }
+
+    #[test_case]
+    fn test_phys_ordering() {
+        assert!(PhysAddr::new(0x1000) < PhysAddr::new(0x2000));
+        assert!(PhysAddr::new(0x2000) > PhysAddr::new(0x1000));
+        assert_eq!(PhysAddr::new(0x1000), PhysAddr::new(0x1000));
+    }
+
+    #[test_case]
+    fn test_phys_align_down_then_up_round_trip() {
+        // align_down(align_up(x)) == align_up(x) for any x
+        let addr = PhysAddr::new(0x1800);
+        assert_eq!(addr.page_align_up().page_align_down(), addr.page_align_up());
+    }
+
+    #[test_case]
+    fn test_phys_from_u64_round_trip() {
+        let pa: PhysAddr = 0xCAFE_0000u64.into();
+        let val: u64 = pa.into();
+        assert_eq!(val, 0xCAFE_0000u64);
+    }
+
+    // -- VirtAddr
+
+    #[test_case]
+    fn test_virt_is_page_aligned() {
+        assert!(VirtAddr::new(0).is_page_aligned());
+        assert!(VirtAddr::new(0x1000).is_page_aligned());
+        assert!(!VirtAddr::new(0x1001).is_page_aligned());
+        assert!(!VirtAddr::new(0xFFF).is_page_aligned());
+    }
+
+    #[test_case]
+    fn test_virt_page_align_down() {
+        assert_eq!(VirtAddr::new(0x1FFF).page_align_down(), VirtAddr::new(0x1000));
+        assert_eq!(VirtAddr::new(0).page_align_down(), VirtAddr::new(0));
+    }
+
+    #[test_case]
+    fn test_virt_page_align_up() {
+        assert_eq!(VirtAddr::new(0x1001).page_align_up(), VirtAddr::new(0x2000));
+        assert_eq!(VirtAddr::new(0).page_align_up(), VirtAddr::new(0));
+    }
+
+    #[test_case]
+    fn test_virt_offset_wrapping() {
+        assert_eq!(VirtAddr::new(u64::MAX).offset(1), VirtAddr::new(0));
+    }
+
+    #[test_case]
+    fn test_virt_as_ptr_non_null() {
+        let va = VirtAddr::new(0x1000);
+        let ptr: *const u8 = va.as_ptr();
+        assert!(!ptr.is_null());
+        assert_eq!(ptr as u64, 0x1000u64);
+    }
+
+    #[test_case]
+    fn test_virt_as_mut_ptr() {
+        let va = VirtAddr::new(0x2000);
+        let ptr: *mut u8 = va.as_mut_ptr();
+        assert_eq!(ptr as u64, 0x2000u64);
+    }
+}

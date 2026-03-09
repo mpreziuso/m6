@@ -493,18 +493,175 @@ pub fn revoke_subtree<C: CdtOps, R: RevocationCallback>(
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_cdt_node_id() {
         assert!(CdtNodeId::NULL.is_null());
         assert!(!CdtNodeId::from_index(1).is_null());
     }
 
-    #[test]
+    #[test_case]
     fn test_cdt_node_creation() {
         let node = CdtNode::new(ObjectRef::from_index(1), ObjectRef::from_index(2), 5);
         assert!(node.is_root());
         assert!(node.is_leaf());
         assert!(!node.has_children());
         assert!(!node.has_siblings());
+    }
+
+    // -- mock CDT backed by a fixed-size array (no alloc needed)
+
+    const MOCK_CDT_SIZE: usize = 32;
+
+    struct MockCdt {
+        nodes: [Option<CdtNode>; MOCK_CDT_SIZE],
+        len: usize,
+    }
+
+    impl MockCdt {
+        fn new() -> Self {
+            const NONE: Option<CdtNode> = None;
+            Self {
+                nodes: [NONE; MOCK_CDT_SIZE],
+                len: 1, // index 0 = NULL sentinel
+            }
+        }
+
+        fn new_node(&mut self) -> CdtNodeId {
+            let id = CdtNodeId::from_index(self.len as u32);
+            self.nodes[self.len] = Some(CdtNode::default());
+            self.len += 1;
+            id
+        }
+    }
+
+    impl CdtOps for MockCdt {
+        fn alloc_node(&mut self) -> Option<CdtNodeId> {
+            if self.len >= MOCK_CDT_SIZE {
+                return None;
+            }
+            let id = CdtNodeId::from_index(self.len as u32);
+            self.nodes[self.len] = Some(CdtNode::default());
+            self.len += 1;
+            Some(id)
+        }
+
+        fn free_node(&mut self, id: CdtNodeId) {
+            if id.is_valid() && (id.index() as usize) < self.len {
+                self.nodes[id.index() as usize] = None;
+            }
+        }
+
+        fn get_node(&self, id: CdtNodeId) -> Option<&CdtNode> {
+            if id.is_null() {
+                return None;
+            }
+            self.nodes.get(id.index() as usize)?.as_ref()
+        }
+
+        fn get_node_mut(&mut self, id: CdtNodeId) -> Option<&mut CdtNode> {
+            if id.is_null() {
+                return None;
+            }
+            self.nodes.get_mut(id.index() as usize)?.as_mut()
+        }
+    }
+
+    #[test_case]
+    fn test_insert_child_links() {
+        let mut cdt = MockCdt::new();
+        let parent = cdt.new_node();
+        let child = cdt.new_node();
+        cdt.insert_child(parent, child);
+        assert_eq!(cdt.get_node(parent).unwrap().first_child, child);
+        assert_eq!(cdt.get_node(child).unwrap().parent, parent);
+        assert!(cdt.get_node(child).unwrap().prev_sibling.is_null());
+        assert!(cdt.get_node(child).unwrap().next_sibling.is_null());
+    }
+
+    #[test_case]
+    fn test_insert_sibling_doubly_linked() {
+        let mut cdt = MockCdt::new();
+        let parent = cdt.new_node();
+        let a = cdt.new_node();
+        let b = cdt.new_node();
+        let c = cdt.new_node();
+        cdt.insert_child(parent, a); // parent → a
+        cdt.insert_sibling(a, b);    // a → b
+        cdt.insert_sibling(b, c);    // a → b → c
+        // Verify doubly-linked chain: a↔b↔c.
+        assert_eq!(cdt.get_node(a).unwrap().next_sibling, b);
+        assert_eq!(cdt.get_node(b).unwrap().prev_sibling, a);
+        assert_eq!(cdt.get_node(b).unwrap().next_sibling, c);
+        assert_eq!(cdt.get_node(c).unwrap().prev_sibling, b);
+    }
+
+    #[test_case]
+    fn test_remove_from_parent_updates_links() {
+        let mut cdt = MockCdt::new();
+        let parent = cdt.new_node();
+        let a = cdt.new_node();
+        let b = cdt.new_node();
+        cdt.insert_child(parent, a);
+        cdt.insert_sibling(a, b); // a → b
+        // Remove a (the first child).
+        cdt.remove_from_parent(a);
+        assert_eq!(cdt.get_node(parent).unwrap().first_child, b);
+        assert!(cdt.get_node(b).unwrap().prev_sibling.is_null());
+        assert!(cdt.get_node(a).unwrap().parent.is_null());
+    }
+
+    #[test_case]
+    fn test_reparent_children() {
+        let mut cdt = MockCdt::new();
+        let old_parent = cdt.new_node();
+        let new_parent = cdt.new_node();
+        let c1 = cdt.new_node();
+        let c2 = cdt.new_node();
+        cdt.insert_child(old_parent, c1);
+        cdt.insert_child(old_parent, c2); // prepend: old_parent → c2 → c1
+        cdt.reparent_children(old_parent, new_parent);
+        assert!(cdt.get_node(old_parent).unwrap().first_child.is_null());
+        // Both children should now report new_parent.
+        assert_eq!(cdt.get_node(c1).unwrap().parent, new_parent);
+        assert_eq!(cdt.get_node(c2).unwrap().parent, new_parent);
+    }
+
+    #[test_case]
+    fn test_revoke_subtree_visits_all() {
+        let mut cdt = MockCdt::new();
+        let root = cdt.new_node();
+        let child1 = cdt.new_node();
+        let child2 = cdt.new_node();
+        let grandchild = cdt.new_node();
+        cdt.insert_child(root, child1);
+        cdt.insert_child(root, child2);
+        cdt.insert_child(child1, grandchild);
+        // root + child1 + child2 + grandchild = 4 nodes revoked.
+        struct Counter(usize);
+        impl RevocationCallback for Counter {
+            fn on_revoke(&mut self, _: &CdtNode) {
+                self.0 += 1;
+            }
+        }
+        let mut counter = Counter(0);
+        let n = revoke_subtree(&mut cdt, root, &mut counter);
+        assert_eq!(n, 4);
+        assert_eq!(counter.0, 4);
+    }
+
+    #[test_case]
+    fn test_count_descendants() {
+        let mut cdt = MockCdt::new();
+        let root = cdt.new_node();
+        let child1 = cdt.new_node();
+        let child2 = cdt.new_node();
+        let grandchild = cdt.new_node();
+        cdt.insert_child(root, child1);
+        cdt.insert_child(root, child2);
+        cdt.insert_child(child1, grandchild);
+        assert_eq!(cdt.count_descendants(root), 3); // child1, child2, grandchild
+        assert_eq!(cdt.count_descendants(child1), 1); // grandchild only
+        assert_eq!(cdt.count_descendants(child2), 0);
+        assert_eq!(cdt.count_descendants(grandchild), 0);
     }
 }

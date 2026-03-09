@@ -182,3 +182,53 @@ const _: () = assert!(
     core::mem::align_of::<IpcBuffer>() <= 8,
     "IpcBuffer must have reasonable alignment"
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_ipc_buffer_fits_in_one_page() {
+        assert!(core::mem::size_of::<IpcBuffer>() <= IPC_BUFFER_SIZE);
+    }
+
+    #[test_case]
+    fn test_mint_args_badge_set() {
+        let args = MintArgs::new(1, 2, 0xFF, Some(0xABCD));
+        assert!(args.should_set_badge());
+        assert_eq!(args.badge(), Some(0xABCD));
+    }
+
+    #[test_case]
+    fn test_mint_args_no_badge() {
+        let args = MintArgs::new(1, 2, 0xFF, None);
+        assert!(!args.should_set_badge());
+        assert_eq!(args.badge(), None);
+    }
+
+    #[test_case]
+    fn test_mint_args_badge_zero_value() {
+        // Badge value of 0 with set_badge=1 is valid
+        let args = MintArgs::new(0, 0, 0, Some(0));
+        assert!(args.should_set_badge());
+        assert_eq!(args.badge(), Some(0));
+    }
+
+    #[test_case]
+    fn test_mint_args_fields_preserved() {
+        let args = MintArgs::new(5, 3, 0b101, Some(0xDEAD_BEEF));
+        assert_eq!(args.dest_depth, 5);
+        assert_eq!(args.src_depth, 3);
+        assert_eq!(args.new_rights, 0b101);
+        assert_eq!(args.badge_value, 0xDEAD_BEEF);
+    }
+
+    #[test_case]
+    fn test_ipc_buffer_default_is_zeroed() {
+        let buf = IpcBuffer::default();
+        assert_eq!(buf.caps_or_badges, [0u64; 4]);
+        assert_eq!(buf.extra_caps, 0);
+        assert_eq!(buf.recv_extra_caps, 0);
+        assert!(!buf.mint_args.should_set_badge());
+    }
+}

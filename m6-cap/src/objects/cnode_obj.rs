@@ -138,14 +138,14 @@ impl CNodeObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_cnode_size() {
         let cnode = CNodeObject::new(PhysAddr::new(0x1000), 8, ObjectRef::NULL);
         assert_eq!(cnode.num_slots(), 256);
         assert_eq!(cnode.size_bytes(), 4096);
     }
 
-    #[test]
+    #[test_case]
     fn test_cnode_valid_radix() {
         assert!(!CNodeObject::is_valid_radix(0));
         assert!(CNodeObject::is_valid_radix(1));

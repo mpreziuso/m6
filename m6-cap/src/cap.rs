@@ -265,7 +265,7 @@ mod tests {
     use crate::objects::Endpoint;
     use crate::slot::SlotFlags;
 
-    #[test]
+    #[test_case]
     fn test_cap_creation() {
         let slot = CapSlot::new(
             ObjectRef::from_index(1),
@@ -284,7 +284,7 @@ mod tests {
         assert!(!cap.can_grant());
     }
 
-    #[test]
+    #[test_case]
     fn test_cap_type_name() {
         let slot = CapSlot::new(
             ObjectRef::from_index(1),
@@ -298,7 +298,7 @@ mod tests {
         assert_eq!(cap.type_name(), "Endpoint");
     }
 
-    #[test]
+    #[test_case]
     fn test_try_from_slot() {
         let slot = CapSlot::new(
             ObjectRef::from_index(1),

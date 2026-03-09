@@ -147,13 +147,13 @@ impl PageTableObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_level_coverage() {
         assert_eq!(PageTableLevel::L3.entry_coverage(), 4096);
         assert_eq!(PageTableLevel::L2.entry_coverage(), 2 * 1024 * 1024);
     }
 
-    #[test]
+    #[test_case]
     fn test_level_progression() {
         assert_eq!(PageTableLevel::L0.next_level(), Some(PageTableLevel::L1));
         assert_eq!(PageTableLevel::L3.next_level(), None);

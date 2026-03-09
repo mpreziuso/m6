@@ -198,14 +198,14 @@ impl Default for TcbObject {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_thread_state() {
         assert!(!ThreadState::Inactive.is_runnable());
         assert!(ThreadState::Running.is_runnable());
         assert!(ThreadState::BlockedOnSend.is_blocked());
     }
 
-    #[test]
+    #[test_case]
     fn test_tcb_creation() {
         let tcb = TcbObject::new();
         assert!(!tcb.is_configured());

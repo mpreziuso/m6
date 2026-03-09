@@ -203,7 +203,7 @@ impl StreamBinding {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_smmu_control_creation() {
         let ctrl = SmmuControlObject::new(0xfc900000, 0xffff_fffe_fc90_0000, 0, 1024);
         assert!(!ctrl.is_ready);
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(ctrl.iospace_count, 0);
     }
 
-    #[test]
+    #[test_case]
     fn test_stream_claiming() {
         let mut ctrl = SmmuControlObject::new(0xfc900000, 0xffff_fffe_fc90_0000, 0, 1024);
 
@@ -224,7 +224,7 @@ mod tests {
         assert!(ctrl.is_stream_available(0));
     }
 
-    #[test]
+    #[test_case]
     fn test_ioasid_allocation() {
         let mut ctrl = SmmuControlObject::new(0xfc900000, 0xffff_fffe_fc90_0000, 0, 1024);
 
@@ -235,7 +235,7 @@ mod tests {
         assert_eq!(ioasid2, Some(2));
     }
 
-    #[test]
+    #[test_case]
     fn test_claimed_stream_count() {
         let mut ctrl = SmmuControlObject::new(0xfc900000, 0xffff_fffe_fc90_0000, 0, 1024);
 
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(ctrl.claimed_stream_count(), 3);
     }
 
-    #[test]
+    #[test_case]
     fn test_stream_binding() {
         let mut binding = StreamBinding::new(ObjectRef::from_index(1));
         assert!(!binding.has_fault_handler());

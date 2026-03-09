@@ -213,13 +213,13 @@ pub unsafe fn push_freelist(span: &SpanMeta, slot_addr: usize, secret: u64) {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_encode_decode_null() {
         let encoded = EncodedPtr::encode(core::ptr::null_mut(), 0x1000, 0xDEADBEEF);
         assert!(encoded.is_null());
     }
 
-    #[test]
+    #[test_case]
     fn test_encode_decode_roundtrip() {
         let secret = 0xDEADBEEF12345678u64;
         let slot_addr = 0x1000usize;
@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(decoded, ptr);
     }
 
-    #[test]
+    #[test_case]
     fn test_different_slot_addrs_produce_different_encodings() {
         let secret = 0xDEADBEEF12345678u64;
         let ptr = 0x2000 as *mut u8;
@@ -242,5 +242,61 @@ mod tests {
         let encoded2 = EncodedPtr::encode(ptr, 0x1008, secret);
 
         assert_ne!(encoded1.0, encoded2.0);
+    }
+
+    // -- span-level freelist operations
+
+    #[test_case]
+    fn test_pop_freelist_first_slot_at_base() {
+        use crate::span::SpanMeta;
+        let secret = 0xDEAD_BEEF_CAFE_BABEu64;
+        // Size class 14: 1024-byte slots, 2 pages → 8 slots per span.
+        let mut memory = [0u8; 8192];
+        let base = memory.as_mut_ptr() as usize;
+        // SAFETY: zeroed is valid; init() overwrites all fields before use.
+        let mut span: SpanMeta = unsafe { core::mem::zeroed() };
+        span.init(base, 14, 2, 0);
+        // SAFETY: memory is valid and writable; span is fully initialised.
+        unsafe { init_span_freelist(&span, secret) };
+        let slot = unsafe { pop_freelist(&span, secret) }.unwrap();
+        assert_eq!(slot, Some(base));
+    }
+
+    #[test_case]
+    fn test_pop_all_leaves_empty() {
+        use crate::span::SpanMeta;
+        let secret = 0x1111_2222_3333_4444u64;
+        let mut memory = [0u8; 8192];
+        let base = memory.as_mut_ptr() as usize;
+        let mut span: SpanMeta = unsafe { core::mem::zeroed() };
+        span.init(base, 14, 2, 0); // 8 slots
+        unsafe { init_span_freelist(&span, secret) };
+        for _ in 0..8 {
+            let r = unsafe { pop_freelist(&span, secret) }.unwrap();
+            assert!(r.is_some());
+        }
+        let empty = unsafe { pop_freelist(&span, secret) }.unwrap();
+        assert!(empty.is_none());
+    }
+
+    #[test_case]
+    fn test_push_restores_slot() {
+        use crate::span::SpanMeta;
+        let secret = 0xABCD_EF01_2345_6789u64;
+        let mut memory = [0u8; 8192];
+        let base = memory.as_mut_ptr() as usize;
+        let mut span: SpanMeta = unsafe { core::mem::zeroed() };
+        span.init(base, 14, 2, 0); // 8 slots
+        unsafe { init_span_freelist(&span, secret) };
+        // Drain all 8 slots.
+        let mut addrs = [0usize; 8];
+        for a in &mut addrs {
+            *a = unsafe { pop_freelist(&span, secret) }.unwrap().unwrap();
+        }
+        assert!(unsafe { pop_freelist(&span, secret) }.unwrap().is_none());
+        // Push one back and verify it can be popped again.
+        unsafe { push_freelist(&span, addrs[0], secret) };
+        let back = unsafe { pop_freelist(&span, secret) }.unwrap();
+        assert_eq!(back, Some(addrs[0]));
     }
 }

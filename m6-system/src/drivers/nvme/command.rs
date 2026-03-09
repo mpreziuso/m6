@@ -311,6 +311,33 @@ impl NvmeCommand {
         cmd
     }
 
+    /// Create an Abort command.
+    ///
+    /// Aborts the command with `target_cid` on submission queue `sqid`.
+    /// If the target command does not exist, the device returns a successful
+    /// CQE with result DW0 bit[0]=1. No data buffer is required — only a
+    /// CQE write to the admin CQ. Useful for probing CQE DMA reachability.
+    #[inline]
+    #[must_use]
+    pub fn abort(cid: u16, sqid: u16, target_cid: u16) -> Self {
+        let mut cmd = Self::new(admin_opcode::ABORT, cid);
+        // CDW10: SQID[15:0], CID_to_abort[31:16]
+        cmd.cdw10 = ((target_cid as u32) << 16) | (sqid as u32);
+        cmd
+    }
+
+    /// Create a Set Features - Number of Queues command (FID=0x07).
+    ///
+    /// `nsqr` and `ncqr` are 0-based (desired count minus 1).
+    #[inline]
+    #[must_use]
+    pub fn set_features_num_queues(cid: u16, nsqr: u16, ncqr: u16) -> Self {
+        let mut cmd = Self::new(admin_opcode::SET_FEATURES, cid);
+        cmd.cdw10 = 0x07; // Feature ID: Number of Queues
+        cmd.cdw11 = ((ncqr as u32) << 16) | (nsqr as u32);
+        cmd
+    }
+
     /// Create a Create I/O Completion Queue command.
     #[inline]
     #[must_use]

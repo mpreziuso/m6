@@ -25,6 +25,7 @@
 use core::mem::ManuallyDrop;
 use core::sync::atomic::Ordering;
 
+use m6_arch::cache::{cache_clean_range, cache_invalidate_range};
 use m6_cap::objects::{DmaPoolObject, IOSpaceObject, Ioasid};
 use m6_cap::{Badge, CapRights, CapSlot, ObjectType, SlotFlags};
 
@@ -109,8 +110,10 @@ fn make_table_descriptor(table_phys: u64) -> u64 {
 /// Creates a descriptor with:
 /// - Valid bit set
 /// - AF (Access Flag) set
-/// - Normal memory attributes
+/// - nG (non-Global) for per-ASID IOTLB isolation
+/// - Normal memory attributes (AttrIndx=0 → MAIR entry 0)
 /// - Inner Shareable
+/// - Unprivileged access (AP[1]=1) — PCIe devices generate unprivileged DMA
 /// - Read/write permissions based on `writable`
 #[inline]
 fn make_page_descriptor(frame_phys: u64, writable: bool) -> u64 {
@@ -119,15 +122,23 @@ fn make_page_descriptor(frame_phys: u64, writable: bool) -> u64 {
     // Set Access Flag (bit 10)
     desc |= 1 << 10;
 
+    // Set nG (non-Global, bit 11) — IOTLB entries tagged with ASID for isolation
+    desc |= 1 << 11;
+
     // Set shareability to Inner Shareable (bits [9:8] = 0b11)
     desc |= 0b11 << 8;
 
-    // Set permissions
-    if !writable {
-        // AP = 0b10 (read-only at EL1)
-        desc |= 0b10 << 6;
+    // Set permissions — AP[2:1] at bits [7:6]
+    // PCIe devices generate unprivileged (EL0-equivalent) DMA transactions,
+    // so AP[1] (bit 6) must be set for unprivileged access.
+    // Without this, the SMMU returns a permission fault on every DMA access.
+    if writable {
+        // AP[2:1] = 0b01 → RW for unprivileged (device) access
+        desc |= 0b01 << 6;
+    } else {
+        // AP[2:1] = 0b11 → RO for unprivileged (device) access
+        desc |= 0b11 << 6;
     }
-    // else AP = 0b00 (read/write at EL1) which is the default
 
     // Disable execution (UXN=1, PXN=1) - DMA buffers shouldn't be executable
     desc |= 1 << 54; // UXN
@@ -176,9 +187,12 @@ fn iospace_map_page(
     } else {
         // Allocate L1 table
         let new_table = alloc_frame_zeroed().ok_or(SyscallError::NoMemory)?;
+        // Flush zeroed table to DRAM — SMMU page walker is non-coherent
+        cache_clean_range(phys_to_virt(new_table) as u64, PAGE_SIZE as usize);
         let desc = make_table_descriptor(new_table);
         // SAFETY: Writing to a valid page table entry
         unsafe { l0_table.add(l0_idx).write_volatile(desc) };
+        cache_clean_range(unsafe { l0_table.add(l0_idx) } as u64, 8);
         new_table
     };
 
@@ -196,9 +210,11 @@ fn iospace_map_page(
     } else {
         // Allocate L2 table
         let new_table = alloc_frame_zeroed().ok_or(SyscallError::NoMemory)?;
+        cache_clean_range(phys_to_virt(new_table) as u64, PAGE_SIZE as usize);
         let desc = make_table_descriptor(new_table);
         // SAFETY: Writing to a valid page table entry
         unsafe { l1_table.add(l1_idx).write_volatile(desc) };
+        cache_clean_range(unsafe { l1_table.add(l1_idx) } as u64, 8);
         new_table
     };
 
@@ -216,9 +232,11 @@ fn iospace_map_page(
     } else {
         // Allocate L3 table
         let new_table = alloc_frame_zeroed().ok_or(SyscallError::NoMemory)?;
+        cache_clean_range(phys_to_virt(new_table) as u64, PAGE_SIZE as usize);
         let desc = make_table_descriptor(new_table);
         // SAFETY: Writing to a valid page table entry
         unsafe { l2_table.add(l2_idx).write_volatile(desc) };
+        cache_clean_range(unsafe { l2_table.add(l2_idx) } as u64, 8);
         new_table
     };
 
@@ -234,6 +252,8 @@ fn iospace_map_page(
     let page_desc = make_page_descriptor(frame_phys, writable);
     // SAFETY: Writing to a valid page table entry
     unsafe { l3_table.add(l3_idx).write_volatile(page_desc) };
+    // Flush L3 PTE to DRAM for non-coherent SMMU page walker
+    cache_clean_range(unsafe { l3_table.add(l3_idx) } as u64, 8);
 
     // Memory barrier to ensure visibility
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
@@ -301,6 +321,8 @@ fn iospace_unmap_page(root_table_phys: u64, iova: u64) -> Result<u64, SyscallErr
     // Clear the entry (0 = invalid descriptor)
     // SAFETY: Writing to a valid page table entry
     unsafe { l3_table.add(l3_idx).write_volatile(0) };
+    // Flush cleared entry to DRAM for non-coherent SMMU
+    cache_clean_range(unsafe { l3_table.add(l3_idx) } as u64, 8);
 
     // Memory barrier
     core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
@@ -405,6 +427,8 @@ pub fn handle_iospace_create(args: &SyscallArgs) -> SyscallResult {
     unsafe {
         core::ptr::write_bytes(root_table_virt as *mut u8, 0, 4096);
     }
+    // Flush zeros to DRAM — SMMU page walker is non-coherent
+    cache_clean_range(root_table_virt as u64, 4096);
 
     // Get SMMU index from SmmuControl
     let smmu_index =
@@ -558,6 +582,24 @@ pub fn handle_iospace_map_frame(args: &SyscallArgs) -> SyscallResult {
         frame_phys,
         writable
     );
+
+    // Diagnostic: dump IO page table walk for the first mapping to verify
+    // entries are correct in DRAM (after cache flush).
+    static DUMP_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if !DUMP_DONE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+        debug_walk_io_page_table(root_table, iova);
+
+        // Issue SMMU CMD_PREFETCH_ADDR for ALL bound streams to test the
+        // hardware page table walk. If any walk fails, an event appears
+        // in the event queue.
+        match smmu::with_smmu(smmu_index, |smmu| {
+            smmu.prefetch_all_for_iospace(iospace_ref, iova)
+        }) {
+            Ok(0) => log::info!("SMMU prefetch: no streams bound yet, skipping"),
+            Ok(n) => log::info!("SMMU prefetch: tested {} stream(s)", n),
+            Err(e) => log::warn!("SMMU prefetch error: {:?}", e),
+        }
+    }
 
     Ok(0)
 }
@@ -715,7 +757,8 @@ pub fn handle_iospace_bind_stream(args: &SyscallArgs) -> SyscallResult {
 
         // Create context descriptor for this IOSpace
         // T0SZ=16 for 48-bit address space with 4KB pages
-        let cd = ContextDescriptor::new_stage1(root_table, ioasid, 16);
+        // IPS from IDR5.OAS — controls max physical address size in translations
+        let cd = ContextDescriptor::new_stage1(root_table, ioasid, 16, smmu.oas());
 
         // Install CD at index 0 in CD table
         // SAFETY: We just allocated and zeroed this frame, and cd_table_virt is valid
@@ -723,6 +766,9 @@ pub fn handle_iospace_bind_stream(args: &SyscallArgs) -> SyscallResult {
             let cd_ptr = cd_table_virt as *mut ContextDescriptor;
             core::ptr::write_volatile(cd_ptr, cd);
         }
+
+        // Flush CD to DRAM — SMMU is non-coherent and reads CD from memory
+        cache_clean_range(cd_table_virt as u64, core::mem::size_of::<ContextDescriptor>());
 
         // Memory barrier to ensure CD is written before STE
         core::sync::atomic::fence(Ordering::Release);
@@ -741,6 +787,9 @@ pub fn handle_iospace_bind_stream(args: &SyscallArgs) -> SyscallResult {
             m6_cap::ObjectRef::NULL,
             0,
         )?;
+
+        // Diagnostic dump of SMMU state after binding
+        smmu.dump_state(stream_id);
 
         Ok::<(), SmmuError>(())
     })
@@ -903,7 +952,7 @@ pub fn handle_iospace_set_fault_handler(args: &SyscallArgs) -> SyscallResult {
 
     // Verify IOSpace capability
     let iospace_loc = cspace::resolve_cptr(iospace_cptr, 0)?;
-    let (iospace_ref, smmu_index) = cspace::with_slot(&iospace_loc, |slot| {
+    let iospace_ref = cspace::with_slot(&iospace_loc, |slot| {
         if slot.is_empty() {
             return Err(SyscallError::EmptySlot);
         }
@@ -913,14 +962,13 @@ pub fn handle_iospace_set_fault_handler(args: &SyscallArgs) -> SyscallResult {
         if !slot.rights().contains(CapRights::WRITE) {
             return Err(SyscallError::NoRights);
         }
-
-        // Get SMMU index from IOSpace
-        let smmu_index =
-            object_table::with_iospace_mut(slot.object_ref(), |iospace| iospace.smmu_index)
-                .ok_or(SyscallError::Revoked)?;
-
-        Ok((slot.object_ref(), smmu_index))
+        Ok(slot.object_ref())
     })?;
+
+    // Get SMMU index (separate lock acquisition to avoid deadlock)
+    let smmu_index =
+        object_table::with_iospace_mut(iospace_ref, |iospace| iospace.smmu_index)
+            .ok_or(SyscallError::Revoked)?;
 
     // Verify notification capability
     let notification_loc = cspace::resolve_cptr(notification_cptr, 0)?;
@@ -937,19 +985,26 @@ pub fn handle_iospace_set_fault_handler(args: &SyscallArgs) -> SyscallResult {
         Ok(slot.object_ref())
     })?;
 
-    // Update stream binding fault handler
+    // Update stream binding fault handler.
+    // stream_id=0 means "any stream bound to this IOSpace" — drivers
+    // typically don't know their PCIe RID.
     smmu::with_smmu(smmu_index, |smmu| {
-        // Verify stream is bound to this IOSpace
-        let binding = smmu
-            .get_stream_binding(stream_id)
-            .ok_or(SmmuError::InvalidStreamId)?;
-
-        if binding.iospace_ref != iospace_ref {
-            return Err(SmmuError::InvalidConfig);
-        }
+        let resolved_sid = if stream_id == 0 {
+            smmu.find_stream_for_iospace(iospace_ref)
+                .ok_or(SmmuError::InvalidStreamId)?
+        } else {
+            // Verify explicit stream is bound to this IOSpace
+            let binding = smmu
+                .get_stream_binding(stream_id)
+                .ok_or(SmmuError::InvalidStreamId)?;
+            if binding.iospace_ref != iospace_ref {
+                return Err(SmmuError::InvalidConfig);
+            }
+            stream_id
+        };
 
         // Set fault handler
-        smmu.set_fault_handler(stream_id, notification_ref, badge)?;
+        smmu.set_fault_handler(resolved_sid, notification_ref, badge)?;
 
         Ok(())
     })
@@ -1180,4 +1235,80 @@ pub fn handle_dma_pool_free(args: &SyscallArgs) -> SyscallResult {
 
     log::trace!("DmaPoolFree: bump allocator does not support individual frees");
     Ok(0)
+}
+
+// -- Diagnostic helpers
+
+/// Walk IO page tables and log each level's descriptor for debugging.
+///
+/// Invalidates cache before each read so we see what the SMMU sees in DRAM.
+/// Only called once (gated by `DUMP_DONE` in `handle_iospace_map_frame`).
+fn debug_walk_io_page_table(root_table_phys: u64, iova: u64) {
+    let idx0 = l0_index(iova);
+    let idx1 = l1_index(iova);
+    let idx2 = l2_index(iova);
+    let idx3 = l3_index(iova);
+
+    log::info!(
+        "IO page walk: iova={:#x} indices=[{},{},{},{}] root={:#x}",
+        iova, idx0, idx1, idx2, idx3, root_table_phys
+    );
+
+    // L0
+    let l0_table = phys_to_virt(root_table_phys) as *const u64;
+    let l0_ptr = unsafe { l0_table.add(idx0) } as u64;
+    cache_invalidate_range(l0_ptr, 8);
+    // SAFETY: root_table_phys is a valid kernel-mapped page table
+    let l0_entry = unsafe { l0_table.add(idx0).read_volatile() };
+    log::info!("  L0[{}] @ {:#x} = {:#018x}", idx0, l0_ptr, l0_entry);
+    if !is_valid(l0_entry) || !is_table(l0_entry) {
+        log::info!("  L0 invalid/block — walk stops");
+        return;
+    }
+
+    // L1
+    let l1_phys = table_address(l0_entry);
+    let l1_table = phys_to_virt(l1_phys) as *const u64;
+    let l1_ptr = unsafe { l1_table.add(idx1) } as u64;
+    cache_invalidate_range(l1_ptr, 8);
+    let l1_entry = unsafe { l1_table.add(idx1).read_volatile() };
+    log::info!("  L1[{}] @ {:#x} = {:#018x} (table={:#x})", idx1, l1_ptr, l1_entry, l1_phys);
+    if !is_valid(l1_entry) || !is_table(l1_entry) {
+        log::info!("  L1 invalid/block — walk stops");
+        return;
+    }
+
+    // L2
+    let l2_phys = table_address(l1_entry);
+    let l2_table = phys_to_virt(l2_phys) as *const u64;
+    let l2_ptr = unsafe { l2_table.add(idx2) } as u64;
+    cache_invalidate_range(l2_ptr, 8);
+    let l2_entry = unsafe { l2_table.add(idx2).read_volatile() };
+    log::info!("  L2[{}] @ {:#x} = {:#018x} (table={:#x})", idx2, l2_ptr, l2_entry, l2_phys);
+    if !is_valid(l2_entry) || !is_table(l2_entry) {
+        log::info!("  L2 invalid/block — walk stops");
+        return;
+    }
+
+    // L3
+    let l3_phys = table_address(l2_entry);
+    let l3_table = phys_to_virt(l3_phys) as *const u64;
+    let l3_ptr = unsafe { l3_table.add(idx3) } as u64;
+    cache_invalidate_range(l3_ptr, 8);
+    let l3_entry = unsafe { l3_table.add(idx3).read_volatile() };
+    log::info!("  L3[{}] @ {:#x} = {:#018x} (table={:#x})", idx3, l3_ptr, l3_entry, l3_phys);
+
+    if is_valid(l3_entry) {
+        let output_addr = l3_entry & 0x0000_FFFF_FFFF_F000;
+        let af = (l3_entry >> 10) & 1;
+        let ap = (l3_entry >> 6) & 0b11;
+        let sh = (l3_entry >> 8) & 0b11;
+        let attr_idx = (l3_entry >> 2) & 0b111;
+        log::info!(
+            "  => phys={:#x} AF={} AP={:#04b} SH={:#04b} AttrIdx={}",
+            output_addr, af, ap, sh, attr_idx
+        );
+    } else {
+        log::info!("  L3 invalid — no mapping");
+    }
 }

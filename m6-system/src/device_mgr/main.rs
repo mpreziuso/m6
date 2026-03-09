@@ -289,6 +289,23 @@ fn enumerate_pcie_devices(registry: &mut Registry, dtb_data: &[u8]) {
             }
         }
 
+        // Log host details for diagnostics
+        io::puts("[device-mgr] PCIe host: config=");
+        io::put_hex(host.config_base);
+        io::puts(" mem32=[");
+        io::put_hex(host.mem32_pci);
+        io::puts("->"); io::put_hex(host.mem32_cpu);
+        io::puts(" sz="); io::put_hex(host.mem32_size);
+        io::puts("] mem64=[");
+        io::put_hex(host.mem64_pci);
+        io::puts("->"); io::put_hex(host.mem64_cpu);
+        io::puts(" sz="); io::put_hex(host.mem64_size);
+        io::puts("] iommu=");
+        io::put_hex(host.iommu_phandle as u64);
+        io::puts(" sid_base=");
+        io::put_hex(host.iommu_stream_base as u64);
+        io::newline();
+
         // Map config space for enumeration
         // For large config spaces (256MB), we only map enough for scanning
         let config_size_to_map = core::cmp::min(host.config_size, 16 * 1024 * 1024) as usize;
@@ -301,7 +318,7 @@ fn enumerate_pcie_devices(registry: &mut Registry, dtb_data: &[u8]) {
             &cptr,
             host_index,
         ) {
-            Some((config_vaddr, config_slot, _pt_slots, mapped_size)) => {
+            Some((config_vaddr, _config_slot, _pt_slots, mapped_size)) => {
                 host_index += 1; // Increment for next mapping to use different vaddr
 
                 // SAFETY: Config space is mapped for mapped_size bytes
@@ -316,9 +333,23 @@ fn enumerate_pcie_devices(registry: &mut Registry, dtb_data: &[u8]) {
                     add_pcie_device_to_registry(registry, host, device);
                 }
 
+                // For DWC hosts: scan the secondary bus behind the root port.
+                // The root port itself is the device at bus_start — check if any
+                // device on that bus is a bridge with a secondary bus assigned.
+                if host.host_type == pcie::PcieHostType::DesignWareDwc {
+                    scan_dwc_secondary_bus(
+                        host,
+                        config_vaddr,
+                        config_vaddr as u64, // pcie_probe_vaddr
+                        registry,
+                        boot_info,
+                        &cptr,
+                    );
+                }
+
                 // Unmap config space
                 // Note: We keep individual device frames for later driver spawning
-                if let Err(e) = unmap_frame(cptr(config_slot)) {
+                if let Err(e) = unmap_frame(cptr(slots::ROOT_VSPACE), config_vaddr as u64) {
                     io::puts("[device-mgr] WARN: unmap config frame failed: ");
                     io::puts(e.name());
                     io::puts("\n");
@@ -344,7 +375,7 @@ fn check_rk3588_link_status(
     cptr: &impl Fn(u64) -> u64,
 ) -> Option<bool> {
     use m6_cap::ObjectType;
-    use m6_syscall::invoke::{map_frame, retype, unmap_frame};
+    use m6_syscall::invoke::{map_frame, map_page_table, retype, unmap_frame};
 
     // Find device untyped covering this address
     let (device_untyped_slot, _untyped_size, untyped_base) =
@@ -353,23 +384,21 @@ fn check_rk3588_link_status(
     // Allocate slot for the frame
     let frame_slot = registry.alloc_slot();
 
-    // Calculate offset within the untyped region (in pages)
+    // Calculate byte offset within the untyped region
     let aligned_base = apbdbg_base & !0xFFF;
     if aligned_base < untyped_base {
         return None;
     }
     let offset_in_untyped = aligned_base - untyped_base;
-    let offset_in_pages = offset_in_untyped >> 12;
 
     // Retype to 4KB DeviceFrame
-    // For DeviceFrame, the 6th argument is the offset within the device untyped (in pages)
     if retype(
         cptr(device_untyped_slot),
         ObjectType::DeviceFrame as u64,
         12, // 4KB
         cptr(slots::ROOT_CNODE),
         frame_slot,
-        offset_in_pages,
+        offset_in_untyped,
     )
     .is_err()
     {
@@ -380,7 +409,46 @@ fn check_rk3588_link_status(
     let offset_within_page = (apbdbg_base & 0xFFF) as usize;
 
     // Map to a temporary virtual address
-    const APBDBG_VADDR: u64 = 0x0000_B000_0000; // Temporary mapping address
+    const APBDBG_VADDR: u64 = 0x0000_B000_0000;
+
+    // Create page tables for APBDBG_VADDR.
+    // Multiple DWC hosts share the same L1/L2/L3 VA range, so subsequent
+    // calls may return AlreadyMapped — that's fine, we ignore the error.
+    let l1_slot = registry.alloc_slot();
+    let _ = retype(
+        cptr(slots::RAM_UNTYPED),
+        5, // PageTableL1
+        0,
+        cptr(slots::ROOT_CNODE),
+        l1_slot,
+        1,
+    );
+    let l1_base = APBDBG_VADDR & !(512 * 1024 * 1024 * 1024 - 1);
+    let _ = map_page_table(cptr(slots::ROOT_VSPACE), cptr(l1_slot), l1_base, 1);
+
+    let l2_slot = registry.alloc_slot();
+    let _ = retype(
+        cptr(slots::RAM_UNTYPED),
+        6, // PageTableL2
+        0,
+        cptr(slots::ROOT_CNODE),
+        l2_slot,
+        1,
+    );
+    let l2_base = APBDBG_VADDR & !(1024 * 1024 * 1024 - 1);
+    let _ = map_page_table(cptr(slots::ROOT_VSPACE), cptr(l2_slot), l2_base, 2);
+
+    let l3_slot = registry.alloc_slot();
+    let _ = retype(
+        cptr(slots::RAM_UNTYPED),
+        7, // PageTableL3
+        0,
+        cptr(slots::ROOT_CNODE),
+        l3_slot,
+        1,
+    );
+    let l3_base = APBDBG_VADDR & !(2 * 1024 * 1024 - 1);
+    let _ = map_page_table(cptr(slots::ROOT_VSPACE), cptr(l3_slot), l3_base, 3);
 
     if map_frame(
         cptr(slots::ROOT_VSPACE),
@@ -394,20 +462,37 @@ fn check_rk3588_link_status(
         return None;
     }
 
-    // Check link status
-    // SAFETY: We just mapped the APBDBG region
-    let link_up = unsafe {
+    // SAFETY: We just mapped the client register region
+    let link_result = unsafe {
         pcie::check_rk3588_link_status((APBDBG_VADDR + offset_within_page as u64) as usize)
     };
 
+    // Read the raw LTSSM status register for diagnostics
+    let ltssm_vaddr = APBDBG_VADDR + offset_within_page as u64 + 0x300;
+    let raw_status =
+        unsafe { core::ptr::read_volatile(ltssm_vaddr as *const u32) };
+
+    io::puts("[device-mgr] APBDBG ");
+    io::put_hex(apbdbg_base);
+    io::puts(" LTSSM=");
+    io::put_hex(raw_status as u64);
+    match link_result {
+        Some(true) => io::puts(" LINK_UP"),
+        Some(false) => io::puts(" LINK_DOWN"),
+        None => io::puts(" UNKNOWN(clk?)"),
+    }
+    io::newline();
+
     // Unmap
-    if let Err(e) = unmap_frame(cptr(frame_slot)) {
+    if let Err(e) = unmap_frame(cptr(slots::ROOT_VSPACE), APBDBG_VADDR) {
         io::puts("[device-mgr] WARN: unmap APBDBG frame failed: ");
         io::puts(e.name());
         io::puts("\n");
     }
 
-    Some(link_up)
+    // Return: Some(true) = link up, Some(false) = link confirmed down,
+    // None = register not responding (caller should use fallback logic)
+    link_result
 }
 
 /// Map a PCIe region (config space or DBI) for enumeration.
@@ -425,7 +510,7 @@ fn map_pcie_region(
     use m6_syscall::invoke::{map_frame, map_page_table, retype};
 
     // Find device untyped covering this address
-    let (device_untyped_slot, untyped_size, _untyped_base) =
+    let (device_untyped_slot, untyped_size, untyped_base) =
         boot_info.find_device_untyped(phys_base)?;
 
     // Virtual address for temporary mapping (PCIe probe region)
@@ -510,13 +595,17 @@ fn map_pcie_region(
     }
 
     // Retype device untyped to DeviceFrame
+    // Compute byte offset of the frame-aligned physical address within the untyped
+    let frame_align = 1u64 << frame_size_bits;
+    let aligned_base = phys_base & !(frame_align - 1);
+    let offset = aligned_base.saturating_sub(untyped_base);
     if retype(
         cptr(device_untyped_slot),
         ObjectType::DeviceFrame as u64,
         frame_size_bits as u64,
         cptr(slots::ROOT_CNODE),
         frame_slot,
-        1,
+        offset,
     )
     .is_err()
     {
@@ -544,10 +633,274 @@ fn map_pcie_region(
     ))
 }
 
+/// Map a single 4KB device page and return the frame slot.
+///
+/// Assumes page tables already exist for `vaddr` (e.g. created by `map_pcie_region`).
+fn map_pcie_page(
+    phys_addr: u64,
+    vaddr: u64,
+    registry: &mut Registry,
+    boot_info: &DevMgrBootInfo,
+    cptr: &impl Fn(u64) -> u64,
+) -> Option<u64> {
+    use m6_cap::ObjectType;
+    use m6_syscall::invoke::{map_frame, retype};
+
+    let (device_untyped_slot, _size, untyped_base) =
+        boot_info.find_device_untyped(phys_addr)?;
+    let frame_slot = registry.alloc_slot();
+    let offset = phys_addr.saturating_sub(untyped_base);
+    retype(
+        cptr(device_untyped_slot),
+        ObjectType::DeviceFrame as u64,
+        12, // 4KB
+        cptr(slots::ROOT_CNODE),
+        frame_slot,
+        offset,
+    )
+    .ok()?;
+    map_frame(
+        cptr(slots::ROOT_VSPACE),
+        cptr(frame_slot),
+        vaddr,
+        0b011, // RW, device memory
+        0,
+    )
+    .ok()?;
+    Some(frame_slot)
+}
+
+/// Scan the secondary bus behind a DWC PCIe root port.
+///
+/// On DWC controllers, the root port's config space is in the DBI registers
+/// (not accessible via the ECAM window). This function:
+/// 1. Maps the DBI config page to read the root port's Type 1 header
+/// 2. Reads the secondary bus number from the bridge header
+/// 3. Programmes the iATU for downstream config access
+/// 4. Maps and scans the secondary bus for devices
+fn scan_dwc_secondary_bus(
+    host: &pcie::PcieHostBridge,
+    _config_vaddr: usize,
+    pcie_probe_vaddr: u64,
+    registry: &mut Registry,
+    boot_info: &DevMgrBootInfo,
+    cptr: &impl Fn(u64) -> u64,
+) {
+    use m6_syscall::invoke::unmap_frame;
+
+    // Resolve DBI base. The DBI provides direct access to the root port's
+    // Type 1 configuration header and the iATU registers.
+    // Prefer the DTB-provided dbi_base; if > 4GB and no device untyped
+    // covers it, fall back to the low-address DBI derived from config_base.
+    let dbi_base = if host.dbi_base != 0 {
+        if boot_info.find_device_untyped(host.dbi_base).is_some() {
+            Some(host.dbi_base)
+        } else {
+            pcie::dbi_low_addr_for_config(host.config_base)
+        }
+    } else {
+        pcie::dbi_low_addr_for_config(host.config_base)
+    };
+
+    let Some(dbi_base) = dbi_base else {
+        io::puts("[device-mgr] PCIe: no usable DBI base for secondary scan\n");
+        return;
+    };
+
+    io::puts("[device-mgr] PCIe: DBI base=");
+    io::put_hex(dbi_base);
+    io::newline();
+
+    // Map DBI config page (offset 0 = root port's PCIe config header)
+    let dbi_config_vaddr = pcie_probe_vaddr + 0x3000;
+    let Some(_dbi_config_slot) =
+        map_pcie_page(dbi_base, dbi_config_vaddr, registry, boot_info, cptr)
+    else {
+        io::puts("[device-mgr] PCIe: failed to map DBI config page at ");
+        io::put_hex(dbi_base);
+        io::newline();
+        return;
+    };
+
+    // Read bridge info from DBI. The DBI mirrors the root port's Type 1
+    // config header at offset 0x000-0xFFF. Use rel_bus=0, dev=0, func=0
+    // because the DBI page IS the root port's config space.
+    // SAFETY: DBI config page is mapped at dbi_config_vaddr
+    let bridge = unsafe { pcie::read_bridge_info(dbi_config_vaddr as usize, 0, 0, 0) };
+    // Keep DBI config page mapped — we need it after enumeration to update
+    // bridge memory windows for downstream device BAR forwarding.
+
+    let Some(bridge) = bridge else {
+        let _ = unmap_frame(cptr(slots::ROOT_VSPACE), dbi_config_vaddr);
+        io::puts("[device-mgr] PCIe: DBI header is not a bridge\n");
+        return;
+    };
+
+    if bridge.secondary_bus == 0 || bridge.secondary_bus == 0xFF {
+        let _ = unmap_frame(cptr(slots::ROOT_VSPACE), dbi_config_vaddr);
+        io::puts("[device-mgr] PCIe: no secondary bus assigned (sec=");
+        io::put_u64(bridge.secondary_bus as u64);
+        io::puts(")\n");
+        return;
+    }
+
+    let secondary_bus = bridge.secondary_bus;
+
+    io::puts("[device-mgr] PCIe: root port bridge -> secondary bus ");
+    io::put_u64(secondary_bus as u64);
+    io::newline();
+
+    // Enable Memory Space and Bus Master on the root port via DBI.
+    // Without BME, the root complex drops inbound DMA TLPs from downstream
+    // devices (NVMe, etc.), causing all DMA to silently fail.
+    // SAFETY: DBI config page is mapped at dbi_config_vaddr
+    unsafe {
+        pcie::enable_bus_master(dbi_config_vaddr as usize, 0, 0, 0);
+    }
+    // Map iATU registers (DBI + 0x300000) for outbound ATU programming.
+    let iatu_phys = dbi_base + pcie::IATU_OFFSET;
+    let iatu_vaddr = pcie_probe_vaddr + 0x2000;
+    let Some(_iatu_slot) = map_pcie_page(iatu_phys, iatu_vaddr, registry, boot_info, cptr) else {
+        let _ = unmap_frame(cptr(slots::ROOT_VSPACE), dbi_config_vaddr);
+        io::puts("[device-mgr] PCIe: failed to map iATU registers\n");
+        return;
+    };
+
+    // Disable all inbound iATU windows that UEFI may have left enabled.
+    // SAFETY: iATU registers are mapped at iatu_vaddr
+    unsafe {
+        pcie::disable_all_inbound_iatu(iatu_vaddr as usize);
+    }
+
+    // Programme ATU region 0 for CFG0 access to the secondary bus.
+    // Use offset 1MB (slot 1) into the config window — slot 0 is the root
+    // port itself (accessed via DBI internally). The ATU's target_bus tells
+    // the hardware which PCIe bus to reach, regardless of the ECAM offset.
+    // Note: UEFI may number buses differently from the DTB bus-range, so we
+    // don't rely on bus_range.0 here.
+    let sec_cpu_addr = host.config_base + (1u64 << 20);
+    // SAFETY: iATU registers are mapped at iatu_vaddr
+    unsafe {
+        pcie::programme_iatu_for_config(
+            iatu_vaddr as usize,
+            0, // region 0
+            pcie::IATU_TYPE_CFG0,
+            sec_cpu_addr,
+            1 << 20, // 1MB per bus
+            secondary_bus,
+        );
+    }
+
+    // Map a 4KB page of the secondary bus's config space
+    let sec_config_phys = sec_cpu_addr;
+    let sec_config_vaddr = pcie_probe_vaddr + 0x1000;
+    let _sec_frame_slot =
+        match map_pcie_page(sec_config_phys, sec_config_vaddr, registry, boot_info, cptr) {
+            Some(slot) => slot,
+            None => {
+                io::puts("[device-mgr] PCIe: failed to map secondary bus config\n");
+                let _ = unmap_frame(cptr(slots::ROOT_VSPACE), iatu_vaddr);
+                let _ = unmap_frame(cptr(slots::ROOT_VSPACE), dbi_config_vaddr);
+                return;
+            }
+        };
+
+    // Scan the secondary bus for devices
+    // SAFETY: secondary bus config page mapped at sec_config_vaddr for 4KB
+    let sec_devices =
+        unsafe { pcie::enumerate_devices_at(host, sec_config_vaddr as usize, secondary_bus, 4096) };
+
+    let has_devices = sec_devices.iter().any(|d| d.is_valid());
+
+    for device in &sec_devices {
+        if device.is_valid() {
+            add_pcie_device_to_registry(registry, host, device);
+        }
+    }
+
+    // Enable MSI-X in config space while we still have the ATU in CFG0 mode
+    // and the secondary bus config page mapped. This must happen here because
+    // after the ATU is reprogrammed for MEM access, the device untyped regions
+    // for iATU/config are consumed and cannot be re-retyped during driver spawn.
+    for device in &sec_devices {
+        if device.is_valid() && device.msix.present {
+            let cap_vaddr = sec_config_vaddr as usize + device.msix.cap_offset as usize;
+            // SAFETY: secondary config page is mapped at sec_config_vaddr,
+            // cap_offset is within the 4KB page (validated during enumeration)
+            unsafe {
+                let msg_ctrl_addr = cap_vaddr + 2;
+                let msg_ctrl = core::ptr::read_volatile(msg_ctrl_addr as *const u16);
+                // Set MSI-X Enable (bit 15); leave Function Mask clear —
+                // individual vector masks default to 1, so no spurious interrupts.
+                let new_msg_ctrl = (msg_ctrl | (1 << 15)) & !(1 << 14);
+                core::ptr::write_volatile(msg_ctrl_addr as *mut u16, new_msg_ctrl);
+
+                let readback = core::ptr::read_volatile(msg_ctrl_addr as *const u16);
+                if readback & (1 << 15) == 0 {
+                    io::puts("[device-mgr] PCIe: WARN MSI-X enable failed for BDF ");
+                    io::put_hex(device.bdf.0 as u64);
+                    io::puts(":");
+                    io::put_hex(device.bdf.1 as u64);
+                    io::puts(".");
+                    io::put_hex(device.bdf.2 as u64);
+                    io::newline();
+                }
+            }
+        }
+    }
+
+    // If we found downstream devices, set up the root port for runtime access:
+    // 1. Update bridge Memory Base/Limit so the root port forwards MEM TLPs
+    // 2. Reprogram ATU region 0 for MEM (not CFG0) so CPU accesses translate
+    //    to memory read/write TLPs rather than config TLPs
+    if has_devices && host.mem32_size > 0 {
+        // Bridge Memory Base/Limit uses PCI addresses (the address space seen
+        // on the PCIe bus after ATU translation), not CPU addresses.
+        let mem_base_pci = host.mem32_pci;
+        let mem_limit_pci = host.mem32_pci + host.mem32_size - 1;
+
+        // SAFETY: DBI config page is still mapped at dbi_config_vaddr
+        unsafe {
+            pcie::set_bridge_memory_window(
+                dbi_config_vaddr as usize,
+                mem_base_pci,
+                mem_limit_pci,
+            );
+        }
+
+        // SAFETY: iATU registers are still mapped at iatu_vaddr
+        unsafe {
+            pcie::programme_iatu_for_mem(
+                iatu_vaddr as usize,
+                0, // region 0 (was CFG0, now MEM)
+                host.mem32_cpu,
+                host.mem32_pci,
+                host.mem32_size,
+            );
+        }
+
+        // Inbound DMA path: on RK3588, the DWC PCIe RC passes all inbound
+        // TLPs through to the AXI bus by default when no inbound iATU windows
+        // are enabled. Linux's DWC core confirms this: when dma-ranges is
+        // absent (as on RK3588), dw_pcie_iatu_setup() skips inbound iATU
+        // programming entirely, and dw_pcie_setup_rc() zeroes BAR0 at the end.
+        // DMA works through default pass-through behaviour.
+        //
+        // We already disabled all inbound iATU above. Match Linux: zero BAR0.
+        // SAFETY: DBI config page is mapped
+        unsafe { pcie::setup_rc_bar0_for_dma(dbi_config_vaddr as usize) };
+    }
+
+    // Clean up temporary mappings
+    let _ = unmap_frame(cptr(slots::ROOT_VSPACE), sec_config_vaddr);
+    let _ = unmap_frame(cptr(slots::ROOT_VSPACE), iatu_vaddr);
+    let _ = unmap_frame(cptr(slots::ROOT_VSPACE), dbi_config_vaddr);
+}
+
 /// Add a PCIe device to the registry.
 fn add_pcie_device_to_registry(
     registry: &mut Registry,
-    _host: &pcie::PcieHostBridge,
+    host: &pcie::PcieHostBridge,
     device: &pcie::PcieDevice,
 ) {
     use registry::DeviceEntry;
@@ -588,6 +941,7 @@ fn add_pcie_device_to_registry(
     // Set PCIe-specific fields
     entry.pcie_bdf = Some(device.bdf);
     entry.stream_id = device.stream_id;
+    entry.smmu_phandle = host.iommu_phandle;
 
     // Copy MSI-X capability info if present
     if device.msix.present {
@@ -776,8 +1130,9 @@ fn probe_virtio_devices(registry: &mut Registry) {
     }
 
     // Unmap frames from device-mgr's address space (but keep capabilities for reuse)
-    for &slot in &frame_slots {
-        if let Err(e) = unmap_frame(cptr(slot)) {
+    for (i, &_slot) in frame_slots.iter().enumerate() {
+        let vaddr = PROBE_VADDR + (i * 4096) as u64;
+        if let Err(e) = unmap_frame(cptr(slots::ROOT_VSPACE), vaddr) {
             io::puts("[device-mgr] WARN: unmap VirtIO frame failed: ");
             io::puts(e.name());
             io::puts("\n");

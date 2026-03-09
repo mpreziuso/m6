@@ -133,10 +133,26 @@ pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
         match unsafe { m6_kernel::smmu::init(smmu_config.base_addr, smmu_virt, index as u8) } {
             Ok(()) => {
                 log::info!("SMMU #{} at {:#x} initialised", index, smmu_config.base_addr);
+
+                // Register event queue IRQ (skip if IRQ is 0 = not parsed)
                 let event_irq = smmu_config.event_irq;
-                gic::register_handler(event_irq, smmu_event_irq_handler);
-                gic::set_priority(event_irq, 0x90);
-                gic::enable_irq(event_irq);
+                if event_irq != 0 {
+                    gic::register_handler(event_irq, smmu_event_irq_handler);
+                    gic::set_priority(event_irq, 0x90);
+                    gic::enable_irq(event_irq);
+                    log::info!("SMMU #{}: event IRQ {} registered", index, event_irq);
+                } else {
+                    log::warn!("SMMU #{}: event_irq=0, SMMU faults will be invisible!", index);
+                }
+
+                // Register global error IRQ (often a separate SPI)
+                let gerror_irq = smmu_config.gerror_irq;
+                if gerror_irq != 0 && gerror_irq != event_irq {
+                    gic::register_handler(gerror_irq, smmu_event_irq_handler);
+                    gic::set_priority(gerror_irq, 0x90);
+                    gic::enable_irq(gerror_irq);
+                    log::info!("SMMU #{}: gerror IRQ {} registered", index, gerror_irq);
+                }
             }
             Err(e) => {
                 log::error!("SMMU #{} init failed: {:?}", index, e);
@@ -244,12 +260,18 @@ fn irq_handler(ctx: &mut exceptions::ExceptionContext) {
     // Dispatch to GIC (this calls timer_irq_handler, etc.)
     gic::dispatch_irq();
 
-    // Only reschedule if the interrupt came from userspace (EL0).
-    // If we interrupted kernel code (EL1), ctx contains a kernel context
-    // and doing a context switch would corrupt the TCB's saved userspace
-    // state and leave the kernel stack inconsistent.
+    // Allow context switch when interrupted from EL0 (normal case) OR when
+    // the idle task is running at EL1h. The idle task has no user context to
+    // corrupt, and the exception frame only saves SP_EL0 (which idle never
+    // uses); SP_EL1 is managed implicitly by the symmetric sub/add in the
+    // exception stub, so there is no kernel stack corruption.
+    //
+    // Do NOT context switch when interrupted from arbitrary EL1 kernel code
+    // (non-idle), as ctx would contain a kernel register state and saving it
+    // to the current TCB would overwrite the saved userspace context.
     let from_el0 = (ctx.spsr & 0b1111) == 0b0000; // SPSR.M[3:0] == EL0t
-    if from_el0 && m6_kernel::sched::should_reschedule() {
+    let from_idle_el1 = !from_el0 && m6_kernel::sched::current_task_is_idle();
+    if (from_el0 || from_idle_el1) && m6_kernel::sched::should_reschedule() {
         m6_kernel::sched::timer_context_switch(ctx);
     }
 }
@@ -283,6 +305,22 @@ fn timer_irq_handler(_intid: u32) {
         // Get CPU count from platform (cached after init)
         let cpu_count = platform::platform().cpu_count().unwrap_or(1) as usize;
         m6_kernel::sched::balance::periodic_balance(cpu_count);
+    }
+
+    // Periodic SMMU event queue polling (every ~100ms, on CPU 0 only).
+    // The SMMU event IRQ is often not registered because the fdt parser
+    // can't decode GICv3 3-cell interrupt entries (returns 0). Without
+    // this fallback, SMMU faults are completely invisible.
+    if m6_arch::cpu::cpu_id() == 0 {
+        static SMMU_POLL_COUNTER: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let count = SMMU_POLL_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if count % 2 == 0 {
+            // Poll all SMMU instances
+            for i in 0..4u8 {
+                let _ = m6_kernel::smmu::process_events(i);
+            }
+        }
     }
 
     // Check if preemption is needed and request reschedule

@@ -84,12 +84,12 @@ mod tests {
     use super::*;
     use crate::config::NUM_SIZE_CLASSES;
 
-    #[test]
+    #[test_case]
     fn test_zero_size() {
         assert_eq!(find_size_class(0), Some(0));
     }
 
-    #[test]
+    #[test_case]
     fn test_exact_sizes() {
         // Test exact size class boundaries
         assert_eq!(find_size_class(8), Some(0));
@@ -98,7 +98,7 @@ mod tests {
         assert_eq!(find_size_class(2048), Some(NUM_SIZE_CLASSES - 1));
     }
 
-    #[test]
+    #[test_case]
     fn test_intermediate_sizes() {
         // Test sizes between classes
         assert_eq!(find_size_class(9), Some(1)); // 9 -> 16
@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(find_size_class(33), Some(3)); // 33 -> 48
     }
 
-    #[test]
+    #[test_case]
     fn test_large_sizes() {
         // Sizes above MAX_SMALL_SIZE should return None
         assert_eq!(find_size_class(2049), None);
@@ -114,7 +114,7 @@ mod tests {
         assert_eq!(find_size_class(1024 * 1024), None);
     }
 
-    #[test]
+    #[test_case]
     fn test_aligned_selection() {
         // Alignment 8 should work with most classes
         assert_eq!(find_size_class_aligned(8, 8), Some(0));
@@ -130,7 +130,7 @@ mod tests {
         assert_eq!(class.size % 64, 0);
     }
 
-    #[test]
+    #[test_case]
     fn test_large_alignment() {
         // Very large alignments should fall back to large allocation
         assert_eq!(find_size_class_aligned(8, 4096), None);

@@ -64,7 +64,12 @@ impl RunQueue {
             return;
         }
 
-        // First, ensure the task is not already in the queue
+        // First, ensure the task is not already in the queue.
+        // Check both sched links AND head/tail pointers — a sole element
+        // has NULL links but is still at head/tail.
+        if tcb_ref == self.head || tcb_ref == self.tail {
+            return;
+        }
         let already_in_queue = object_table::with_object(tcb_ref, |obj| {
             if obj.obj_type == KernelObjectType::Tcb {
                 // SAFETY: We verified the type.
@@ -244,25 +249,9 @@ impl RunQueue {
             return;
         }
 
-        // Get the task's links
-        let (prev, next) = object_table::with_object(tcb_ref, |obj| {
-            if obj.obj_type == KernelObjectType::Tcb {
-                // SAFETY: We verified the type.
-                let tcb = unsafe { &*obj.data.tcb_ptr };
-                if tcb.is_in_sched_queue() {
-                    Some((tcb.sched_prev, tcb.sched_next))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .flatten()
-        .unwrap_or((ObjectRef::NULL, ObjectRef::NULL));
-
-        // Check if task was in queue
-        let was_in_queue = object_table::with_object(tcb_ref, |obj| {
+        // Check if the task is in this queue. A sole element has NULL
+        // sched links but is still at head/tail, so check both.
+        let in_queue_by_links = object_table::with_object(tcb_ref, |obj| {
             if obj.obj_type == KernelObjectType::Tcb {
                 // SAFETY: We verified the type.
                 let tcb = unsafe { &*obj.data.tcb_ptr };
@@ -273,9 +262,22 @@ impl RunQueue {
         })
         .unwrap_or(false);
 
+        let was_in_queue = in_queue_by_links || tcb_ref == self.head || tcb_ref == self.tail;
         if !was_in_queue {
             return;
         }
+
+        // Get the task's links (may be NULL for sole element)
+        let (prev, next) = object_table::with_object(tcb_ref, |obj| {
+            if obj.obj_type == KernelObjectType::Tcb {
+                // SAFETY: We verified the type.
+                let tcb = unsafe { &*obj.data.tcb_ptr };
+                (tcb.sched_prev, tcb.sched_next)
+            } else {
+                (ObjectRef::NULL, ObjectRef::NULL)
+            }
+        })
+        .unwrap_or((ObjectRef::NULL, ObjectRef::NULL));
 
         // Update prev's next link
         if prev.is_valid() {

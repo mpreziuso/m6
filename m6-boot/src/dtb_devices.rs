@@ -138,6 +138,8 @@ pub fn parse_device_regions(
                 // For PCIe controllers, create device untypeds for ALL reg entries
                 // RK3588 has multiple regions: APBDBG, DBI, Config space
                 if device_type == DeviceType::Pcie {
+                    let mut config_base: Option<u64> = None;
+
                     for reg in reg_iter {
                         let phys_base = reg.starting_address as u64;
                         let raw_size = reg.size.unwrap_or(0x1000) as u64;
@@ -178,6 +180,79 @@ pub fn parse_device_regions(
                         );
 
                         result.add(region);
+
+                        // Synthesise DBI2 region for high-address DBI entries.
+                        // DBI2 (shadow registers at DBI+0x100000) controls BAR
+                        // aperture size. Without a covering untyped, the mask
+                        // writes fail silently and inbound DMA is rejected.
+                        if aligned_base >= 0x1_0000_0000 {
+                            let dbi2_base = aligned_base + 0x10_0000;
+                            if !ram_regions.overlaps_ram(dbi2_base, dbi2_base + 0x1000) {
+                                let dbi2_region = DeviceRegion {
+                                    phys_base: PhysAddr::new(dbi2_base),
+                                    size: 0x1000,
+                                    size_bits: 12,
+                                    device_type,
+                                    _reserved: [0; 6],
+                                };
+                                log::debug!(
+                                    "Synthesised PCIe DBI2 region at {:#x} for {}",
+                                    dbi2_base,
+                                    node.name
+                                );
+                                result.add(dbi2_region);
+                            }
+                        }
+
+                        // Track the config-space entry (lowest address, < 4GB)
+                        if aligned_base < 0x1_0000_0000
+                            && config_base.is_none_or(|cb| aligned_base < cb)
+                        {
+                            config_base = Some(aligned_base);
+                        }
+                    }
+
+                    // Synthesise low-address DBI and DBI2 regions.
+                    // On RK3588, the high-address DBI (>4GB) doesn't expose
+                    // DBI2 shadow registers. The low-address DBI derived from
+                    // config_base provides direct register access including DBI2.
+                    if let Some(cfg_base) = config_base
+                        && let Some(low_dbi) = dbi_low_addr_for_config(cfg_base)
+                    {
+                        // Low DBI config page
+                        if !ram_regions.overlaps_ram(low_dbi, low_dbi + 0x1000) {
+                            let dbi_region = DeviceRegion {
+                                phys_base: PhysAddr::new(low_dbi),
+                                size: 0x1000,
+                                size_bits: 12,
+                                device_type,
+                                _reserved: [0; 6],
+                            };
+                            log::debug!(
+                                "Synthesised PCIe low DBI region at {:#x} for {}",
+                                low_dbi,
+                                node.name
+                            );
+                            result.add(dbi_region);
+                        }
+
+                        // Low DBI2 (shadow registers for BAR mask)
+                        let low_dbi2 = low_dbi + 0x10_0000;
+                        if !ram_regions.overlaps_ram(low_dbi2, low_dbi2 + 0x1000) {
+                            let dbi2_region = DeviceRegion {
+                                phys_base: PhysAddr::new(low_dbi2),
+                                size: 0x1000,
+                                size_bits: 12,
+                                device_type,
+                                _reserved: [0; 6],
+                            };
+                            log::debug!(
+                                "Synthesised PCIe low DBI2 region at {:#x} for {}",
+                                low_dbi2,
+                                node.name
+                            );
+                            result.add(dbi2_region);
+                        }
                     }
 
                     // Also add memory windows from ranges property
@@ -383,6 +458,21 @@ fn classify_device(compat_list: &[&str]) -> DeviceType {
     }
 
     DeviceType::Unknown
+}
+
+/// Map RK3588 PCIe config base to the low-address DBI base.
+///
+/// RK3588 has both high-address (> 4GB) and low-address DBI mappings.
+/// This returns the low-address DBI derived from the config base per TRM.
+fn dbi_low_addr_for_config(config_base: u64) -> Option<u64> {
+    match config_base {
+        0xF000_0000 => Some(0xF500_0000),
+        0xF100_0000 => Some(0xF540_0000),
+        0xF200_0000 => Some(0xF580_0000),
+        0xF300_0000 => Some(0xF5C0_0000),
+        0xF400_0000 => Some(0xF600_0000),
+        _ => None,
+    }
 }
 
 /// Parse PCIe ranges property to extract memory windows as device regions.

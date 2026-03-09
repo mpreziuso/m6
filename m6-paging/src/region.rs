@@ -214,3 +214,179 @@ impl<K: MemKind> Default for MemoryRegion<K> {
         Self::empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn phys(start: u64, size: usize) -> PhysMemoryRegion {
+        PhysMemoryRegion::new(PA::new(start), size)
+    }
+
+    #[test_case]
+    fn test_overlaps_no_overlap() {
+        let a = phys(0x1000, 0x1000);
+        let b = phys(0x3000, 0x1000);
+        assert!(!a.overlaps(&b));
+        assert!(!b.overlaps(&a));
+    }
+
+    #[test_case]
+    fn test_overlaps_adjacent_not_overlapping() {
+        let a = phys(0x1000, 0x1000); // ends at 0x2000
+        let b = phys(0x2000, 0x1000); // starts at 0x2000
+        assert!(!a.overlaps(&b));
+        assert!(!b.overlaps(&a));
+    }
+
+    #[test_case]
+    fn test_overlaps_partial() {
+        let a = phys(0x1000, 0x2000); // 0x1000..0x3000
+        let b = phys(0x2000, 0x2000); // 0x2000..0x4000
+        assert!(a.overlaps(&b));
+        assert!(b.overlaps(&a));
+    }
+
+    #[test_case]
+    fn test_overlaps_full_containment() {
+        let outer = phys(0x1000, 0x4000);
+        let inner = phys(0x2000, 0x1000);
+        assert!(outer.overlaps(&inner));
+        assert!(inner.overlaps(&outer));
+    }
+
+    #[test_case]
+    fn test_overlaps_empty_regions() {
+        let a = phys(0x1000, 0x1000);
+        let empty = PhysMemoryRegion::empty();
+        assert!(!a.overlaps(&empty));
+        assert!(!empty.overlaps(&a));
+    }
+
+    #[test_case]
+    fn test_contains_full() {
+        let outer = phys(0x1000, 0x4000);
+        let inner = phys(0x2000, 0x1000);
+        assert!(outer.contains(&inner));
+        assert!(!inner.contains(&outer));
+    }
+
+    #[test_case]
+    fn test_contains_exact_boundaries() {
+        let a = phys(0x1000, 0x2000);
+        assert!(a.contains(&a));
+    }
+
+    #[test_case]
+    fn test_contains_partial() {
+        let a = phys(0x1000, 0x2000); // 0x1000..0x3000
+        let b = phys(0x2000, 0x2000); // 0x2000..0x4000
+        assert!(!a.contains(&b)); // b extends beyond a
+        assert!(!b.contains(&a));
+    }
+
+    #[test_case]
+    fn test_split_at_page_sizes_sum() {
+        let r = phys(0x0, PAGE_SIZE * 4);
+        let (before, after) = r.split_at_page(2);
+        assert_eq!(before.size() + after.size(), r.size());
+        assert_eq!(before.size(), PAGE_SIZE * 2);
+        assert_eq!(after.size(), PAGE_SIZE * 2);
+    }
+
+    #[test_case]
+    fn test_split_at_page_boundaries() {
+        let r = phys(0x1000, PAGE_SIZE * 3);
+        let (before, after) = r.split_at_page(1);
+        assert_eq!(before.start().value(), 0x1000);
+        assert_eq!(before.size(), PAGE_SIZE);
+        assert_eq!(after.start().value(), 0x1000 + PAGE_SIZE as u64);
+        assert_eq!(after.size(), PAGE_SIZE * 2);
+    }
+
+    #[test_case]
+    fn test_split_at_page_zero() {
+        let r = phys(0x1000, PAGE_SIZE * 3);
+        let (before, after) = r.split_at_page(0);
+        assert_eq!(before.size(), 0);
+        assert!(before.is_empty());
+        assert_eq!(after.size(), PAGE_SIZE * 3);
+    }
+
+    #[test_case]
+    fn test_split_at_page_beyond_end() {
+        let r = phys(0x1000, PAGE_SIZE * 2);
+        let (before, after) = r.split_at_page(10);
+        assert_eq!(before.size(), PAGE_SIZE * 2);
+        assert!(after.is_empty());
+    }
+
+    #[test_case]
+    fn test_page_align_expand_aligned() {
+        let r = phys(0x2000, PAGE_SIZE * 3);
+        let expanded = r.page_align_expand();
+        assert_eq!(expanded.start().value(), 0x2000);
+        assert_eq!(expanded.size(), PAGE_SIZE * 3);
+    }
+
+    #[test_case]
+    fn test_page_align_expand_unaligned() {
+        let r = phys(0x1800, 0x2000); // start unaligned, end unaligned
+        let expanded = r.page_align_expand();
+        assert!(expanded.start().is_page_aligned());
+        assert!(expanded.size() % PAGE_SIZE == 0);
+        // Expanded start is below original start
+        assert!(expanded.start().value() <= r.start().value());
+        // Expanded end is at or above original end
+        assert!(expanded.end().value() >= r.end().value());
+    }
+
+    #[test_case]
+    fn test_page_align_shrink_aligned() {
+        let r = phys(0x2000, PAGE_SIZE * 3);
+        let shrunk = r.page_align_shrink();
+        assert_eq!(shrunk.start().value(), 0x2000);
+        assert_eq!(shrunk.size(), PAGE_SIZE * 3);
+    }
+
+    #[test_case]
+    fn test_page_align_shrink_unaligned() {
+        // Region that shrinks to empty
+        let r = phys(0x1001, 0x100); // entirely within one page
+        let shrunk = r.page_align_shrink();
+        assert!(shrunk.is_empty());
+    }
+
+    #[test_case]
+    fn test_iter_pages_count() {
+        let r = phys(0x0, PAGE_SIZE * 5);
+        let count = r.iter_pages().count();
+        assert_eq!(count, r.page_count());
+        assert_eq!(count, 5);
+    }
+
+    #[test_case]
+    fn test_iter_pages_order() {
+        let r = phys(0x2000, PAGE_SIZE * 3);
+        let mut iter = r.iter_pages();
+        assert_eq!(iter.next().unwrap().value(), 0x2000);
+        assert_eq!(iter.next().unwrap().value(), 0x2000 + PAGE_SIZE as u64);
+        assert_eq!(iter.next().unwrap().value(), 0x2000 + 2 * PAGE_SIZE as u64);
+        assert!(iter.next().is_none());
+    }
+
+    #[test_case]
+    fn test_add_pages() {
+        let r = phys(0x1000, PAGE_SIZE * 4);
+        let r2 = r.add_pages(2);
+        assert_eq!(r2.start().value(), 0x1000 + 2 * PAGE_SIZE as u64);
+        assert_eq!(r2.size(), PAGE_SIZE * 2);
+    }
+
+    #[test_case]
+    fn test_add_pages_all() {
+        let r = phys(0x1000, PAGE_SIZE * 4);
+        let r2 = r.add_pages(4);
+        assert!(r2.is_empty());
+    }
+}

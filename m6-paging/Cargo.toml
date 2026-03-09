@@ -6,6 +6,9 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[dev-dependencies]
+m6-testlib = { path = "../m6-testlib" }
+
 [dependencies]
 tock-registers = { workspace = true }
 spin = { workspace = true }

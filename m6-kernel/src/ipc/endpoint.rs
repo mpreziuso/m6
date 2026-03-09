@@ -43,53 +43,23 @@ pub fn do_send(
         WouldBlock,
     }
 
-    let action = object_table::with_endpoint_mut(ep_ref, |endpoint| {
-        match endpoint.state {
-            EndpointState::RecvQueue => {
-                // Get receiver from queue head
-                let receiver_ref = endpoint.queue_head;
-                if !receiver_ref.is_valid() {
-                    panic!("RecvQueue but empty queue");
-                }
-                Action::DeliverTo(receiver_ref)
-            }
-            EndpointState::Idle | EndpointState::SendQueue => {
-                if !blocking {
-                    Action::WouldBlock
-                } else {
-                    Action::BlockInSendQueue { old_tail: endpoint.queue_tail }
-                }
+    let action = match object_table::ipc_dequeue_recv(ep_ref)
+        .ok_or(SyscallError::InvalidCap)?
+    {
+        object_table::IpcDequeueResult::Dequeued(receiver_ref) => Action::DeliverTo(receiver_ref),
+        object_table::IpcDequeueResult::NoneQueued { old_tail } => {
+            if !blocking {
+                Action::WouldBlock
+            } else {
+                Action::BlockInSendQueue { old_tail }
             }
         }
-    })
-    .ok_or(SyscallError::InvalidCap)?;
+    };
 
     // Execute action OUTSIDE the endpoint lock
     match action {
         Action::DeliverTo(receiver_ref) => {
-            // Get next in queue and clear receiver's links
-            let next_in_queue: ObjectRef = object_table::with_tcb_mut(receiver_ref, |tcb| {
-                let next = tcb.ipc_next;
-                tcb.clear_ipc_links();
-                next
-            });
-
-            // Update endpoint queue state
-            object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                endpoint.queue_head = next_in_queue;
-                if !next_in_queue.is_valid() {
-                    endpoint.queue_tail = ObjectRef::NULL;
-                    endpoint.state = EndpointState::Idle;
-                }
-            });
-
-            // Clear prev link of new head if it exists
-            if next_in_queue.is_valid() {
-                let _: () = object_table::with_tcb_mut(next_in_queue, |new_head| {
-                    new_head.ipc_prev = ObjectRef::NULL;
-                });
-            }
-
+            // Dequeue was performed atomically inside the initial endpoint lock.
             // Transfer capabilities if Grant right present
             if let Err(e) =
                 super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant)
@@ -228,55 +198,23 @@ pub fn do_recv(
         WouldBlock,
     }
 
-    let action = object_table::with_endpoint_mut(ep_ref, |endpoint| {
-        match endpoint.state {
-            EndpointState::SendQueue => {
-                // Get sender from queue head (don't dequeue inside lock!)
-                let sender_ref = endpoint.queue_head;
-                if !sender_ref.is_valid() {
-                    panic!("SendQueue but empty queue");
-                }
-                Action::ReceiveFrom(sender_ref)
-            }
-
-            EndpointState::Idle | EndpointState::RecvQueue => {
-                // No sender waiting
-                if !blocking {
-                    Action::WouldBlock
-                } else {
-                    Action::Block { old_tail: endpoint.queue_tail }
-                }
+    let action = match object_table::ipc_dequeue_send(ep_ref)
+        .ok_or(SyscallError::InvalidCap)?
+    {
+        object_table::IpcDequeueResult::Dequeued(sender_ref) => Action::ReceiveFrom(sender_ref),
+        object_table::IpcDequeueResult::NoneQueued { old_tail } => {
+            if !blocking {
+                Action::WouldBlock
+            } else {
+                Action::Block { old_tail }
             }
         }
-    })
-    .ok_or(SyscallError::InvalidCap)?;
+    };
 
     // Now execute the action WITHOUT holding any locks
     match action {
         Action::ReceiveFrom(sender_ref) => {
-            // Get next in queue and clear sender's links (outside endpoint lock)
-            let next_in_queue: ObjectRef = object_table::with_tcb_mut(sender_ref, |tcb| {
-                let next = tcb.ipc_next;
-                tcb.clear_ipc_links();
-                next
-            });
-
-            // Update endpoint queue state
-            object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                endpoint.queue_head = next_in_queue;
-                if !next_in_queue.is_valid() {
-                    endpoint.queue_tail = ObjectRef::NULL;
-                    endpoint.state = EndpointState::Idle;
-                }
-            });
-
-            // Clear prev link of new head if it exists
-            if next_in_queue.is_valid() {
-                let _: () = object_table::with_tcb_mut(next_in_queue, |new_head| {
-                    new_head.ipc_prev = ObjectRef::NULL;
-                });
-            }
-
+            // Dequeue was performed atomically inside the initial endpoint lock.
             // Transfer capabilities if Grant right present
             if let Err(e) =
                 super::cap_transfer::transfer_capabilities(sender_ref, receiver_ref, has_grant)
@@ -426,49 +364,19 @@ pub fn do_call(
         BlockInSendQueue { old_tail: ObjectRef },
     }
 
-    let action = object_table::with_endpoint_mut(ep_ref, |endpoint| {
-        match endpoint.state {
-            EndpointState::RecvQueue => {
-                // Get receiver from queue head
-                let receiver_ref = endpoint.queue_head;
-                if !receiver_ref.is_valid() {
-                    panic!("RecvQueue but empty queue");
-                }
-                Action::DeliverTo(receiver_ref)
-            }
-            EndpointState::Idle | EndpointState::SendQueue => {
-                Action::BlockInSendQueue { old_tail: endpoint.queue_tail }
-            }
+    let action = match object_table::ipc_dequeue_recv(ep_ref)
+        .ok_or(SyscallError::InvalidCap)?
+    {
+        object_table::IpcDequeueResult::Dequeued(receiver_ref) => Action::DeliverTo(receiver_ref),
+        object_table::IpcDequeueResult::NoneQueued { old_tail } => {
+            Action::BlockInSendQueue { old_tail }
         }
-    })
-    .ok_or(SyscallError::InvalidCap)?;
+    };
 
     // Execute action OUTSIDE the endpoint lock
     match action {
         Action::DeliverTo(receiver_ref) => {
-            // Get next in queue and clear receiver's links (outside endpoint lock)
-            let next_in_queue: ObjectRef = object_table::with_tcb_mut(receiver_ref, |tcb| {
-                let next = tcb.ipc_next;
-                tcb.clear_ipc_links();
-                next
-            });
-
-            // Update endpoint queue state
-            object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                endpoint.queue_head = next_in_queue;
-                if !next_in_queue.is_valid() {
-                    endpoint.queue_tail = ObjectRef::NULL;
-                    endpoint.state = EndpointState::Idle;
-                }
-            });
-
-            // Clear prev link of new head if it exists
-            if next_in_queue.is_valid() {
-                let _: () = object_table::with_tcb_mut(next_in_queue, |new_head| {
-                    new_head.ipc_prev = ObjectRef::NULL;
-                });
-            }
-
+            // Dequeue was performed atomically inside the initial endpoint lock.
             // Transfer capabilities if Grant right present
             if let Err(e) =
                 super::cap_transfer::transfer_capabilities(caller_ref, receiver_ref, has_grant)

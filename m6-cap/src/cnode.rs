@@ -346,21 +346,21 @@ pub trait CNodeOps {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_guard_creation() {
         let guard = CNodeGuard::new(0xFF, 8);
         assert_eq!(guard.value, 0xFF);
         assert_eq!(guard.bits, 8);
     }
 
-    #[test]
+    #[test_case]
     fn test_guard_masking() {
         // Value should be masked to guard bits
         let guard = CNodeGuard::new(0xFFFF, 4);
         assert_eq!(guard.value, 0x0F);
     }
 
-    #[test]
+    #[test_case]
     fn test_meta_creation() {
         let meta = CNodeMeta::new(8, CNodeGuard::NONE).unwrap();
         assert_eq!(meta.radix(), 8);
@@ -368,13 +368,13 @@ mod tests {
         assert_eq!(meta.size_bytes(), 4096);
     }
 
-    #[test]
+    #[test_case]
     fn test_invalid_radix() {
         assert!(CNodeMeta::new(0, CNodeGuard::NONE).is_err());
         assert!(CNodeMeta::new(13, CNodeGuard::NONE).is_err());
     }
 
-    #[test]
+    #[test_case]
     fn test_bits_consumed() {
         let meta = CNodeMeta::new(8, CNodeGuard::new(0, 4)).unwrap();
         assert_eq!(meta.bits_consumed(), 12); // 4 guard + 8 radix

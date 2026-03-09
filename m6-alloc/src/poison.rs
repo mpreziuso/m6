@@ -59,7 +59,7 @@ pub fn verify_alloc_poison(ptr: *const u8, len: usize) -> bool {
 mod tests {
     use super::*;
 
-    #[test]
+    #[test_case]
     fn test_poison_patterns() {
         let mut buf = [0u8; 64];
 

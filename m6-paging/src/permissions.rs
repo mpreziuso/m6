@@ -175,3 +175,136 @@ impl Default for PtePermissions {
         Self::NONE
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test_case]
+    fn test_ro_kernel() {
+        let p = PtePermissions::ro(false);
+        assert!(p.read);
+        assert!(!p.write);
+        assert!(!p.execute);
+        assert!(!p.user);
+        assert!(!p.cow);
+        assert!(p.global);
+    }
+
+    #[test_case]
+    fn test_ro_user() {
+        let p = PtePermissions::ro(true);
+        assert!(p.read);
+        assert!(!p.write);
+        assert!(!p.execute);
+        assert!(p.user);
+        assert!(!p.cow);
+        assert!(!p.global);
+    }
+
+    #[test_case]
+    fn test_rw_kernel() {
+        let p = PtePermissions::rw(false);
+        assert!(p.read);
+        assert!(p.write);
+        assert!(!p.execute);
+        assert!(!p.user);
+        assert!(p.global);
+    }
+
+    #[test_case]
+    fn test_rw_user() {
+        let p = PtePermissions::rw(true);
+        assert!(p.write);
+        assert!(!p.execute);
+        assert!(p.user);
+        assert!(!p.global);
+    }
+
+    #[test_case]
+    fn test_rx_kernel() {
+        let p = PtePermissions::rx(false);
+        assert!(!p.write);
+        assert!(p.execute);
+        assert!(!p.user);
+        assert!(p.global);
+    }
+
+    #[test_case]
+    fn test_rx_user() {
+        let p = PtePermissions::rx(true);
+        assert!(!p.write);
+        assert!(p.execute);
+        assert!(p.user);
+        assert!(!p.global);
+    }
+
+    #[test_case]
+    fn test_rwx_kernel() {
+        let p = PtePermissions::rwx(false);
+        assert!(p.write);
+        assert!(p.execute);
+        assert!(!p.user);
+        assert!(p.global);
+    }
+
+    #[test_case]
+    fn test_rwx_user() {
+        let p = PtePermissions::rwx(true);
+        assert!(p.write);
+        assert!(p.execute);
+        assert!(p.user);
+        assert!(!p.global);
+    }
+
+    #[test_case]
+    fn test_into_cow() {
+        let p = PtePermissions::rw(false).into_cow();
+        assert!(p.cow);
+        assert!(!p.write);
+        assert!(p.read);
+    }
+
+    #[test_case]
+    fn test_from_cow() {
+        let p = PtePermissions::rw(false).into_cow().from_cow();
+        assert!(!p.cow);
+        assert!(p.write);
+    }
+
+    #[test_case]
+    fn test_is_kernel_only() {
+        assert!(PtePermissions::rw(false).is_kernel_only());
+        assert!(!PtePermissions::rw(true).is_kernel_only());
+    }
+
+    #[test_case]
+    fn test_none() {
+        let p = PtePermissions::NONE;
+        assert!(!p.read);
+        assert!(!p.write);
+        assert!(!p.execute);
+        assert!(!p.user);
+        assert!(!p.cow);
+        assert!(!p.global);
+    }
+
+    #[test_case]
+    fn test_global_mirrors_user() {
+        // Kernel mappings are global (nG=0), user mappings are per-ASID (nG=1)
+        assert!(PtePermissions::ro(false).global);
+        assert!(!PtePermissions::ro(true).global);
+        assert!(PtePermissions::rwx(false).global);
+        assert!(!PtePermissions::rwx(true).global);
+    }
+
+    #[test_case]
+    fn test_helper_predicates() {
+        assert!(PtePermissions::rw(false).is_writable());
+        assert!(!PtePermissions::ro(false).is_writable());
+        assert!(PtePermissions::rx(false).is_executable());
+        assert!(!PtePermissions::rw(false).is_executable());
+        assert!(PtePermissions::rw(false).into_cow().is_cow());
+        assert!(!PtePermissions::rw(false).is_cow());
+    }
+}

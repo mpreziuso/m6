@@ -38,7 +38,8 @@ use ipc::{DeviceInfo, request, response, status};
 use queue::{NvmeCq, NvmeSq};
 
 use m6_syscall::invoke::{
-    dma_pool_alloc, iospace_map_frame, iospace_unmap_frame, ipc_get_recv_caps, ipc_set_recv_slots,
+    cache_flush, cache_invalidate, cap_delete, dma_pool_alloc, dma_pool_free, iospace_map_frame,
+    iospace_set_fault_handler, iospace_unmap_frame, ipc_get_recv_caps, ipc_set_recv_slots,
     irq_set_handler, map_frame, recv, reply_recv, sched_yield,
 };
 
@@ -51,6 +52,7 @@ const fn cptr(slot: u64) -> u64 {
     slot << (64 - CNODE_RADIX)
 }
 
+const ROOT_CNODE: u64 = cptr(0);
 const ROOT_VSPACE: u64 = cptr(2);
 const DEVICE_FRAME: u64 = cptr(10);
 const IRQ_HANDLER: u64 = cptr(11);
@@ -58,6 +60,10 @@ const SERVICE_EP: u64 = cptr(12);
 const IOSPACE: u64 = cptr(13);
 const IRQ_NOTIF: u64 = cptr(14);
 const DMA_POOL: u64 = cptr(16);
+
+// Extended MMIO frame slots (pages 1+ of BAR0, provided by device-mgr)
+// Must match slots::driver::EXTENDED_MMIO_START
+const EXTENDED_MMIO_START: u64 = 64;
 
 // DMA buffer frame slots (provided by device-mgr for DMA-capable drivers)
 const DMA_BUFFER_START: u64 = 21;
@@ -70,10 +76,11 @@ const fn dma_buffer_frame(index: usize) -> u64 {
 }
 
 // MSI-X slots (provided by device-mgr for PCIe devices with MSI-X)
+// IRQHandler caps: slots 48..55, Notification caps: slots 56..63
+// Must match slots::driver::MSIX_IRQ_START / MSIX_NOTIF_START
 #[allow(dead_code)]
-// TODO: Import from shared slot constants crate
 const MSIX_IRQ_START: u64 = 48;
-const MSIX_NOTIF_START: u64 = 48;
+const MSIX_NOTIF_START: u64 = 56;
 const MSIX_MAX_VECTORS: usize = 8;
 
 /// Get CPtr for MSI-X IRQ handler at vector index
@@ -99,8 +106,10 @@ const PAGE_SIZE: u64 = 4096;
 const QUEUE_DEPTH: u16 = 64;
 /// IRQ badge
 const IRQ_BADGE: u64 = 1;
+/// DMA fault badge (distinct from IRQ_BADGE)
+const DMA_FAULT_BADGE: u64 = 0x8000;
 /// First free slot for dynamic allocations
-const FIRST_FREE_SLOT: u64 = 100;
+const FIRST_FREE_SLOT: u64 = 144;
 
 /// Slot allocator for dynamic capability allocation
 struct SlotAllocator {
@@ -211,14 +220,12 @@ impl DmaBuffers {
 
     /// Get virtual address of PRP list page
     #[inline]
-    #[allow(dead_code)]
     fn prp_list_vaddr(&self) -> *mut u8 {
         self.vaddrs[5] as *mut u8
     }
 
     /// Get IOVA of PRP list page
     #[inline]
-    #[allow(dead_code)]
     fn prp_list_iova(&self) -> u64 {
         self.iovas[5]
     }
@@ -235,6 +242,23 @@ impl DmaBuffers {
     #[allow(dead_code)]
     fn data_iova(&self) -> u64 {
         self.iovas[6]
+    }
+}
+
+/// IPC response with label and up to 3 data registers.
+struct IpcResponse {
+    label: u64,
+    msg: [u64; 3],
+}
+
+impl IpcResponse {
+    /// Create a simple response with only a label (no data registers).
+    #[inline]
+    const fn simple(label: u64) -> Self {
+        Self {
+            label,
+            msg: [0; 3],
+        }
     }
 }
 
@@ -259,26 +283,19 @@ struct NvmeDevice {
     irq_config: IrqConfig,
     /// Namespace ID
     nsid: u32,
-    /// Next command ID for admin queue
-    next_admin_cid: u16,
-    /// Next command ID for I/O queue
-    next_io_cid: u16,
 }
 
-/// Map DMA buffer frames to driver's address space and IOSpace.
+/// Map DMA buffer frames to IOSpace and populate addresses.
 ///
-/// Returns a DmaBuffers struct with vaddrs and iovas populated.
+/// VSpace mapping is already done by the spawner (device-mgr). This function
+/// allocates IOVAs from the DMA pool and maps frames into the IOSpace for
+/// device DMA access.
 fn map_dma_buffers() -> Result<DmaBuffers, &'static str> {
     let mut dma = DmaBuffers::new();
 
     for i in 0..DMA_BUFFER_COUNT {
         let frame_cap = dma_buffer_frame(i);
         let vaddr = DMA_BUFFER_VADDR + (i as u64) * PAGE_SIZE;
-
-        // Map frame to driver's address space (RW, non-exec)
-        if map_frame(ROOT_VSPACE, frame_cap, vaddr, 0b011, 0).is_err() {
-            return Err("DMA frame map failed");
-        }
 
         // Allocate IOVA for this page
         let iova = dma_pool_alloc(DMA_POOL, PAGE_SIZE, PAGE_SIZE)
@@ -293,11 +310,14 @@ fn map_dma_buffers() -> Result<DmaBuffers, &'static str> {
         dma.iovas[i] = iova;
         dma.count = i + 1;
 
-        // Zero the page
-        // SAFETY: We just mapped this memory
+        // Zero the page (VSpace mapping provided by spawner)
+        // SAFETY: DMA buffer frames are pre-mapped at DMA_BUFFER_VADDR by device-mgr
         unsafe {
             core::ptr::write_bytes(vaddr as *mut u8, 0, PAGE_SIZE as usize);
         }
+
+        // Flush zeros to DRAM so device sees them via non-coherent DMA
+        let _ = cache_flush(vaddr, PAGE_SIZE as usize);
     }
 
     Ok(dma)
@@ -311,7 +331,7 @@ fn map_dma_buffers() -> Result<DmaBuffers, &'static str> {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
-    // Map the DeviceFrame (BAR0) to our address space
+    // Map the DeviceFrame (BAR0 page 0) to our address space
     if let Err(e) = map_frame(ROOT_VSPACE, DEVICE_FRAME, NVME_MMIO_VADDR, 0b011, 0) {
         io::puts("[drv-nvme] ERROR: Failed to map MMIO: ");
         io::put_u64(e as u64);
@@ -319,30 +339,68 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
         halt();
     }
 
-    let device_addr = NVME_MMIO_VADDR + device_offset;
+    // Map extended MMIO frames (BAR0 pages 1+, for doorbell registers)
+    for i in 0..16u64 {
+        let frame_cptr = cptr(EXTENDED_MMIO_START + i);
+        let vaddr = NVME_MMIO_VADDR + (i + 1) * PAGE_SIZE;
+        match map_frame(ROOT_VSPACE, frame_cptr, vaddr, 0b011, 0) {
+            Ok(_) => {}
+            Err(m6_syscall::error::SyscallError::InvalidCap)
+            | Err(m6_syscall::error::SyscallError::EmptySlot) => break,
+            Err(_) => break,
+        }
+    }
+
+    // device_offset is the full physical address; extract intra-page offset
+    let device_addr = NVME_MMIO_VADDR + (device_offset & (PAGE_SIZE - 1));
 
     // Map DMA buffer frames
     let dma = match map_dma_buffers() {
         Ok(dma) => dma,
         Err(e) => {
-            io::puts("[drv-nvme] ERROR: ");
+            io::puts("[drv-nvme] ERROR: DMA setup: ");
             io::puts(e);
             io::newline();
             halt();
         }
     };
 
+    // Register DMA fault handler for observability. Uses the MSI-X vector 0
+    // notification cap with a distinct badge so fault signals can be
+    // distinguished from IRQ completions.
+    if let Err(_) = iospace_set_fault_handler(IOSPACE, 0, msix_notif(0), DMA_FAULT_BADGE) {
+        io::puts("[drv-nvme] WARN: DMA fault handler not available\n");
+    }
+
     // Create controller instance
     // SAFETY: We just mapped the device at this address
     let mut ctrl = unsafe { NvmeController::new(device_addr as usize) };
 
-    // Initialise controller with admin queues
+    // Initialise controller with admin queues (includes NSSR if supported)
     if let Err(e) = ctrl.init(dma.admin_sq_iova(), dma.admin_cq_iova(), QUEUE_DEPTH) {
         io::puts("[drv-nvme] ERROR: Controller init failed: ");
         io::puts(e);
+        io::puts(" CSTS=");
+        io::put_hex(ctrl.status() as u64);
         io::newline();
         halt();
     }
+
+    // Read the admin SQ doorbell before writing it for the first time.
+    // This serves two purposes:
+    //   1. Forces a TLB fill for the doorbell page (BAR0 offset 0x1000),
+    //      which is freshly mapped via map_frame above. Some CPU/kernel
+    //      configurations require a load from a new mapping before a store
+    //      is safe.
+    //   2. Acts as a PCIe read barrier: the non-posted read completes only
+    //      after all prior posted writes (CC.EN=1, AQA, ASQ, ACQ) from
+    //      init() have been delivered to the device.
+    // SAFETY: Extended MMIO page (BAR0 offset 0x1000) was mapped above.
+    let _db_fence = unsafe {
+        core::ptr::read_volatile((ctrl.base() + 0x1000) as *const u32)
+    };
+
+    io::puts("[drv-nvme] controller ready\n");
 
     // Create admin queues
     // SAFETY: DMA buffers are properly mapped
@@ -350,6 +408,13 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
         unsafe { NvmeSq::new(dma.admin_sq_vaddr(), dma.admin_sq_iova(), QUEUE_DEPTH, 0) };
     let mut admin_cq =
         unsafe { NvmeCq::new(dma.admin_cq_vaddr(), dma.admin_cq_iova(), QUEUE_DEPTH, 0) };
+
+    // Probe: issue an Abort of a non-existent command to test the CQE DMA path
+    // independently of data buffer DMA. If this times out the SMMU or inbound
+    // PCIe DMA is fundamentally broken.
+    if !probe_admin_cq(&ctrl, &mut admin_sq, &mut admin_cq) {
+        halt();
+    }
 
     // Issue Identify Controller command
     let identify_ctrl = match identify_controller(&ctrl, &mut admin_sq, &mut admin_cq, &dma) {
@@ -401,11 +466,16 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
         optimal_alignment: 1,
     };
 
+    // Set Features: Number of Queues (required before creating I/O queues)
+    if !set_num_queues(&ctrl, &mut admin_sq, &mut admin_cq) {
+        halt();
+    }
+
     // Set up IRQ handling
     let irq_config = setup_irq();
 
     // Create I/O queues via admin commands
-    let (io_sq, io_cq) = match create_io_queues(&ctrl, &mut admin_sq, &mut admin_cq, &dma) {
+    let (io_sq, io_cq) = match create_io_queues(&ctrl, &mut admin_sq, &mut admin_cq, &dma, &irq_config) {
         Some(queues) => queues,
         None => {
             io::puts("[drv-nvme] ERROR: Failed to create I/O queues\n");
@@ -424,8 +494,6 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
         info,
         irq_config,
         nsid,
-        next_admin_cid: 0,
-        next_io_cid: 0,
     };
 
     // Enter service loop
@@ -439,8 +507,15 @@ fn halt() -> ! {
     }
 }
 
-/// Maximum command completion timeout (iterations)
+/// Maximum command completion timeout (iterations).
+///
+/// Each iteration does a cache_invalidate syscall + volatile read + yield,
+/// costing ~5-10 µs. Total wall-clock timeout ≈ 0.5-1 second.
 const CMD_TIMEOUT: usize = 100_000;
+
+/// How often to yield the CPU during polling (every N iterations).
+/// Kept low so other tasks (keyboard, USB) stay responsive during NVMe waits.
+const YIELD_INTERVAL: usize = 4;
 
 /// Submit an admin command and wait for completion.
 ///
@@ -455,13 +530,12 @@ fn submit_admin_cmd(
     let cid = sq.submit(cmd)?;
     sq.ring_doorbell(ctrl);
 
-    // Poll for completion
-    for _ in 0..CMD_TIMEOUT {
+    // Poll for completion with periodic yield
+    for i in 0..CMD_TIMEOUT {
         if cq.has_completion() {
             let completion = cq.pop()?;
             cq.ring_doorbell(ctrl);
 
-            // Check if this is our command
             if completion.cid == cid {
                 if completion.is_success() {
                     return Some(completion);
@@ -475,12 +549,37 @@ fn submit_admin_cmd(
                 }
             }
         }
-        core::hint::spin_loop();
+
+        // Sparse progress: print at i=0 and 10K intervals to confirm polling
+        if i == 0 || (i > 0 && i % 10_000 == 0) {
+            io::puts("[drv-nvme] poll i=");
+            io::put_u64(i as u64);
+            io::puts(" CSTS=");
+            io::put_hex(ctrl.status() as u64);
+            io::newline();
+        }
+
+        if i % YIELD_INTERVAL == 0 && i > 0 {
+            sched_yield();
+        }
     }
 
     io::puts("[drv-nvme] Admin command timeout (CID=");
     io::put_u64(cid as u64);
-    io::puts(")\n");
+    io::puts(") CSTS=");
+    io::put_hex(ctrl.status() as u64);
+    io::newline();
+
+    // Check for DMA fault notification
+    if let Ok(badge) = m6_syscall::invoke::poll(msix_notif(0)) {
+        let badge = badge as u64;
+        if badge & DMA_FAULT_BADGE != 0 {
+            io::puts("[drv-nvme] DMA FAULT detected (badge=");
+            io::put_hex(badge);
+            io::puts(")\n");
+        }
+    }
+
     None
 }
 
@@ -498,6 +597,9 @@ fn identify_controller(
 
     // Submit and wait
     submit_admin_cmd(ctrl, sq, cq, cmd)?;
+
+    // Invalidate identify buffer so we read device-written DMA data
+    let _ = cache_invalidate(dma.identify_vaddr() as u64, 4096);
 
     // Copy data from DMA buffer
     // SAFETY: identify buffer is valid and properly mapped
@@ -523,12 +625,83 @@ fn identify_namespace(
     // Submit and wait
     submit_admin_cmd(ctrl, sq, cq, cmd)?;
 
+    // Invalidate identify buffer so we read device-written DMA data
+    let _ = cache_invalidate(dma.identify_vaddr() as u64, 4096);
+
     // Copy data from DMA buffer
     // SAFETY: identify buffer is valid and properly mapped
     let data =
         unsafe { core::ptr::read_volatile(dma.identify_vaddr() as *const IdentifyNamespace) };
 
     Some(data)
+}
+
+/// Set Features - Number of Queues (FID=0x07).
+///
+/// Required by the NVMe spec before creating any I/O queues. Requests 1 I/O SQ
+/// and 1 I/O CQ. Logs the controller's allocation in response DW0.
+fn set_num_queues(
+    ctrl: &NvmeController,
+    admin_sq: &mut NvmeSq,
+    admin_cq: &mut NvmeCq,
+) -> bool {
+    // Request 1 SQ and 1 CQ (0-based → value 0)
+    let cmd = NvmeCommand::set_features_num_queues(0, 0, 0);
+    match submit_admin_cmd(ctrl, admin_sq, admin_cq, cmd) {
+        Some(cqe) => {
+            let nsqa = (cqe.result & 0xFFFF) as u16;
+            let ncqa = (cqe.result >> 16) as u16;
+            io::puts("[drv-nvme] Set Features OK: NSQA=");
+            io::put_u64(nsqa as u64 + 1);
+            io::puts(" NCQA=");
+            io::put_u64(ncqa as u64 + 1);
+            io::newline();
+            true
+        }
+        None => {
+            io::puts("[drv-nvme] ERROR: Set Features (Number of Queues) failed\n");
+            false
+        }
+    }
+}
+
+/// Probe whether admin CQE DMA works by issuing an Abort of a non-existent command.
+///
+/// The Abort command requires no data DMA — only a CQE write to the admin CQ.
+/// This isolates CQE reachability from data buffer DMA issues.
+///
+/// Returns `true` if any CQE arrived (DMA path works), `false` on timeout.
+fn probe_admin_cq(
+    ctrl: &NvmeController,
+    admin_sq: &mut NvmeSq,
+    admin_cq: &mut NvmeCq,
+) -> bool {
+    // Write a sentinel to CQ entry 0 so we can distinguish "no DMA" (sentinel
+    // intact) from "DMA wrote zeros" (sentinel overwritten with 0).
+    let cq_entry0_vaddr = admin_cq.entry_vaddr(0);
+    unsafe {
+        core::ptr::write_volatile(cq_entry0_vaddr as *mut u32, 0xDEAD_BEEF);
+        core::ptr::write_volatile((cq_entry0_vaddr + 4) as *mut u32, 0xCAFE_BABE);
+        core::ptr::write_volatile((cq_entry0_vaddr + 8) as *mut u32, 0xFEED_FACE);
+        core::ptr::write_volatile((cq_entry0_vaddr + 12) as *mut u32, 0xBADC_0FFE);
+    }
+    let _ = cache_flush(cq_entry0_vaddr as u64, 16);
+
+    // Abort a non-existent CID (0xFFFF) on admin SQ. Per NVMe spec §5.1,
+    // the controller always writes a successful CQE with DW0[0]=1 (not found).
+    // No data DMA needed: only a CQE write to admin CQ is required.
+    let cmd = NvmeCommand::abort(0, 0, 0xFFFF);
+    match submit_admin_cmd(ctrl, admin_sq, admin_cq, cmd) {
+        Some(_) => {
+            io::puts("[drv-nvme] Admin CQ DMA OK (Abort CQE received)\n");
+            true
+        }
+        None => {
+            io::puts("[drv-nvme] ERROR: Admin CQ DMA FAILED — no CQE for Abort command\n");
+            io::puts("[drv-nvme] Likely cause: SMMU translation fault or inbound PCIe DMA broken\n");
+            false
+        }
+    }
 }
 
 /// Create I/O queue pair (QID=1).
@@ -539,17 +712,18 @@ fn create_io_queues(
     admin_sq: &mut NvmeSq,
     admin_cq: &mut NvmeCq,
     dma: &DmaBuffers,
+    irq_config: &IrqConfig,
 ) -> Option<(NvmeSq, NvmeCq)> {
     // Create I/O Completion Queue (QID=1)
-    // - Uses interrupt vector 0 (or 1 if MSI-X has multiple vectors)
-    // - Interrupts enabled
+    // Only enable interrupts if IRQ handling is configured; otherwise the
+    // NVMe controller would assert unhandled interrupts (potential storm).
     let cq_cmd = NvmeCommand::create_io_cq(
-        0,                // CID
-        1,                // QID
-        dma.io_cq_iova(), // PRP1
-        QUEUE_DEPTH,      // Queue size
-        0,                // Interrupt vector
-        true,             // Interrupts enabled
+        0,                  // CID
+        1,                  // QID
+        dma.io_cq_iova(),   // PRP1
+        QUEUE_DEPTH,        // Queue size
+        0,                  // Interrupt vector
+        irq_config.enabled, // Interrupts enabled only if IRQ is set up
     );
 
     submit_admin_cmd(ctrl, admin_sq, admin_cq, cq_cmd)?;
@@ -602,7 +776,7 @@ impl IrqConfig {
 ///
 /// Tries MSI-X first (vectors 0+), falls back to legacy IRQ.
 fn setup_irq() -> IrqConfig {
-    // First try MSI-X - device-mgr puts vectors in slots 40-47 (IRQ) and 48-55 (notif)
+    // First try MSI-X - device-mgr puts IRQHandler caps in slots 48-55 and Notification caps in slots 56-63
     // The IRQ handlers are already bound to notifications by device-mgr
 
     // Check if MSI-X vector 0 notification exists by trying to use it
@@ -627,6 +801,10 @@ fn setup_irq() -> IrqConfig {
                 }
             }
 
+            io::puts("[drv-nvme] MSI-X: ");
+            io::put_u64(msix_vectors as u64);
+            io::puts(" vectors detected\n");
+
             return IrqConfig {
                 enabled: true,
                 msix: true,
@@ -635,7 +813,7 @@ fn setup_irq() -> IrqConfig {
             };
         }
         Err(_) => {
-            // MSI-X not available, fall back to legacy
+            io::puts("[drv-nvme] MSI-X: not available, trying legacy IRQ\n");
         }
     }
 
@@ -668,7 +846,7 @@ fn service_loop(device: &mut NvmeDevice) -> ! {
     loop {
         match result {
             Ok(ipc_result) => {
-                let response = handle_request(
+                let resp = handle_request(
                     device,
                     &mut tracker,
                     ipc_result.badge,
@@ -676,7 +854,7 @@ fn service_loop(device: &mut NvmeDevice) -> ! {
                     &ipc_result.msg,
                 );
 
-                result = reply_recv(SERVICE_EP, response, 0, 0, 0);
+                result = reply_recv(SERVICE_EP, resp.label, resp.msg[0], resp.msg[1], resp.msg[2]);
             }
             Err(_) => {
                 sched_yield();
@@ -693,33 +871,34 @@ fn handle_request(
     badge: u64,
     label: u64,
     msg: &[u64; 4],
-) -> u64 {
+) -> IpcResponse {
     match label & 0xFFFF {
         request::GET_INFO => handle_get_info(device),
         request::GET_STATUS => handle_get_status(device),
         request::READ_SECTOR => handle_read_sector(device, tracker, badge, msg),
         request::WRITE_SECTOR => handle_write_sector(device, tracker, badge, msg),
         request::FLUSH => handle_flush(device),
-        request::DISCARD => response::ERR_UNSUPPORTED,
-        _ => response::ERR_INVALID,
+        request::DISCARD => IpcResponse::simple(response::ERR_UNSUPPORTED),
+        _ => IpcResponse::simple(response::ERR_INVALID),
     }
 }
 
 /// Handle GET_INFO request
-fn handle_get_info(device: &NvmeDevice) -> u64 {
-    // In a real implementation, we'd pack info into reply registers
-    let _ = device.info.pack();
-    response::OK
+fn handle_get_info(device: &NvmeDevice) -> IpcResponse {
+    let (msg1, msg2, msg3) = device.info.pack();
+    IpcResponse {
+        label: response::OK,
+        msg: [msg1, msg2, msg3],
+    }
 }
 
 /// Handle GET_STATUS request
-fn handle_get_status(_device: &NvmeDevice) -> u64 {
-    let mut flags = status::READY;
-    flags |= status::FLUSH_SUPPORTED;
-    // Check if volatile write cache is enabled
-    // flags |= status::VOLATILE_WRITE_CACHE;
-    let _ = flags;
-    response::OK
+fn handle_get_status(_device: &NvmeDevice) -> IpcResponse {
+    let flags = status::READY | status::FLUSH_SUPPORTED;
+    IpcResponse {
+        label: response::OK,
+        msg: [flags, 0, 0],
+    }
 }
 
 /// Submit an I/O command and wait for completion.
@@ -731,8 +910,8 @@ fn submit_io_cmd(device: &mut NvmeDevice, cmd: NvmeCommand) -> Option<NvmeComple
     let cid = io_sq.submit(cmd)?;
     io_sq.ring_doorbell(&device.ctrl);
 
-    // Poll for completion
-    for _ in 0..CMD_TIMEOUT {
+    // Poll for completion with periodic yield
+    for i in 0..CMD_TIMEOUT {
         if io_cq.has_completion() {
             let completion = io_cq.pop()?;
             io_cq.ring_doorbell(&device.ctrl);
@@ -751,7 +930,10 @@ fn submit_io_cmd(device: &mut NvmeDevice, cmd: NvmeCommand) -> Option<NvmeComple
                 }
             }
         }
-        core::hint::spin_loop();
+
+        if i % YIELD_INTERVAL == 0 && i > 0 {
+            sched_yield();
+        }
     }
 
     io::puts("[drv-nvme] I/O command timeout (CID=");
@@ -768,29 +950,29 @@ fn handle_read_sector(
     _tracker: &mut SlotAllocator,
     _badge: u64,
     msg: &[u64; 4],
-) -> u64 {
+) -> IpcResponse {
     let lba = msg[0];
     let count = msg[1] as u16;
 
     // Validate
     if lba + count as u64 > device.info.capacity_blocks {
-        return response::ERR_INVALID_SECTOR;
+        return IpcResponse::simple(response::ERR_INVALID_SECTOR);
     }
     if count == 0 || count > 8 {
-        return response::ERR_INVALID;
+        return IpcResponse::simple(response::ERR_INVALID);
     }
 
     // Check we have I/O queues
     if device.io_sq.is_none() || device.io_cq.is_none() {
         io::puts("[drv-nvme] ERROR: I/O queues not initialised\n");
-        return response::ERR_IO;
+        return IpcResponse::simple(response::ERR_IO);
     }
 
     // Get received frame capability
     // SAFETY: IPC buffer is mapped
     let recv_caps = unsafe { ipc_get_recv_caps() };
     if recv_caps[0] == 0 {
-        return response::ERR_INVALID;
+        return IpcResponse::simple(response::ERR_INVALID);
     }
 
     let client_frame_slot = recv_caps[0];
@@ -799,33 +981,37 @@ fn handle_read_sector(
     let data_size = (count as u64) * (device.info.block_size as u64);
     let data_iova = match dma_pool_alloc(DMA_POOL, data_size, PAGE_SIZE) {
         Ok(iova) => iova,
-        Err(_) => return response::ERR_IO,
+        Err(_) => return IpcResponse::simple(response::ERR_IO),
     };
 
     // Map client's frame into IOSpace for device DMA access
     if iospace_map_frame(IOSPACE, cptr(client_frame_slot), data_iova, 0b11).is_err() {
-        return response::ERR_IO;
+        let _ = dma_pool_free(DMA_POOL, data_iova, data_size);
+        return IpcResponse::simple(response::ERR_IO);
     }
 
-    // Build and submit NVMe Read command
-    // PRP2 is only needed if transfer spans multiple pages
-    let prp2 = if data_size > PAGE_SIZE {
-        data_iova + PAGE_SIZE
-    } else {
-        0
-    };
+    // Build PRP chain for the transfer
+    let prp_result = prp::build_prp(
+        data_iova,
+        data_size,
+        device.dma.prp_list_iova(),
+        device.dma.prp_list_vaddr() as *mut prp::PrpListPage,
+    );
 
-    let cmd = NvmeCommand::read(0, device.nsid, lba, count, data_iova, prp2);
+    let cmd = NvmeCommand::read(0, device.nsid, lba, count, prp_result.prp1, prp_result.prp2);
 
     let result = submit_io_cmd(device, cmd);
 
-    // Clean up - unmap from IOSpace
+    // Clean up — unmap from IOSpace, free IOVA, and delete the received cap
+    // so the recv slot is free for the next IPC receive.
     let _ = iospace_unmap_frame(IOSPACE, data_iova);
+    let _ = dma_pool_free(DMA_POOL, data_iova, data_size);
+    let _ = cap_delete(ROOT_CNODE, client_frame_slot, CNODE_RADIX as u64);
 
     if result.is_some() {
-        response::OK | (data_size << 16)
+        IpcResponse::simple(response::OK | (data_size << 16))
     } else {
-        response::ERR_IO
+        IpcResponse::simple(response::ERR_IO)
     }
 }
 
@@ -837,29 +1023,29 @@ fn handle_write_sector(
     _tracker: &mut SlotAllocator,
     _badge: u64,
     msg: &[u64; 4],
-) -> u64 {
+) -> IpcResponse {
     let lba = msg[0];
     let count = msg[1] as u16;
 
     // Validate
     if lba + count as u64 > device.info.capacity_blocks {
-        return response::ERR_INVALID_SECTOR;
+        return IpcResponse::simple(response::ERR_INVALID_SECTOR);
     }
     if count == 0 || count > 8 {
-        return response::ERR_INVALID;
+        return IpcResponse::simple(response::ERR_INVALID);
     }
 
     // Check we have I/O queues
     if device.io_sq.is_none() || device.io_cq.is_none() {
         io::puts("[drv-nvme] ERROR: I/O queues not initialised\n");
-        return response::ERR_IO;
+        return IpcResponse::simple(response::ERR_IO);
     }
 
     // Get received frame capability
     // SAFETY: IPC buffer is mapped
     let recv_caps = unsafe { ipc_get_recv_caps() };
     if recv_caps[0] == 0 {
-        return response::ERR_INVALID;
+        return IpcResponse::simple(response::ERR_INVALID);
     }
 
     let client_frame_slot = recv_caps[0];
@@ -868,51 +1054,56 @@ fn handle_write_sector(
     let data_size = (count as u64) * (device.info.block_size as u64);
     let data_iova = match dma_pool_alloc(DMA_POOL, data_size, PAGE_SIZE) {
         Ok(iova) => iova,
-        Err(_) => return response::ERR_IO,
+        Err(_) => return IpcResponse::simple(response::ERR_IO),
     };
 
     // Map client's frame into IOSpace for device DMA access
     if iospace_map_frame(IOSPACE, cptr(client_frame_slot), data_iova, 0b11).is_err() {
-        return response::ERR_IO;
+        let _ = dma_pool_free(DMA_POOL, data_iova, data_size);
+        return IpcResponse::simple(response::ERR_IO);
     }
 
-    // Build and submit NVMe Write command
-    let prp2 = if data_size > PAGE_SIZE {
-        data_iova + PAGE_SIZE
-    } else {
-        0
-    };
+    // Build PRP chain for the transfer
+    let prp_result = prp::build_prp(
+        data_iova,
+        data_size,
+        device.dma.prp_list_iova(),
+        device.dma.prp_list_vaddr() as *mut prp::PrpListPage,
+    );
 
-    let cmd = NvmeCommand::write(0, device.nsid, lba, count, data_iova, prp2);
+    let cmd = NvmeCommand::write(0, device.nsid, lba, count, prp_result.prp1, prp_result.prp2);
 
     let result = submit_io_cmd(device, cmd);
 
-    // Clean up - unmap from IOSpace
+    // Clean up — unmap from IOSpace, free IOVA, and delete the received cap
+    // so the recv slot is free for the next IPC receive.
     let _ = iospace_unmap_frame(IOSPACE, data_iova);
+    let _ = dma_pool_free(DMA_POOL, data_iova, data_size);
+    let _ = cap_delete(ROOT_CNODE, client_frame_slot, CNODE_RADIX as u64);
 
     if result.is_some() {
-        response::OK | (data_size << 16)
+        IpcResponse::simple(response::OK | (data_size << 16))
     } else {
-        response::ERR_IO
+        IpcResponse::simple(response::ERR_IO)
     }
 }
 
 /// Handle FLUSH request.
 ///
 /// Flushes the volatile write cache to non-volatile storage.
-fn handle_flush(device: &mut NvmeDevice) -> u64 {
+fn handle_flush(device: &mut NvmeDevice) -> IpcResponse {
     // Check we have I/O queues
     if device.io_sq.is_none() || device.io_cq.is_none() {
         io::puts("[drv-nvme] ERROR: I/O queues not initialised\n");
-        return response::ERR_IO;
+        return IpcResponse::simple(response::ERR_IO);
     }
 
     // Build and submit NVMe Flush command
     let cmd = NvmeCommand::flush(0, device.nsid);
 
     if submit_io_cmd(device, cmd).is_some() {
-        response::OK
+        IpcResponse::simple(response::OK)
     } else {
-        response::ERR_IO
+        IpcResponse::simple(response::ERR_IO)
     }
 }

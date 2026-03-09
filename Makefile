@@ -1,4 +1,4 @@
-.PHONY: clean check clippy run debug fmt fmt-check sysroot system user image
+.PHONY: clean check clippy run debug fmt fmt-check sysroot system user image test
 
 all: boot kernel initrd-full
 
@@ -101,6 +101,14 @@ debug: all
 
 debug-full: boot kernel initrd-full
 	./scripts/run-qemu.sh -s -S
+
+TESTABLE_CRATES = m6-common m6-paging m6-syscall m6-cap m6-alloc
+
+test:
+	CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUNNER="$(CURDIR)/scripts/qemu-test.sh" \
+	RUSTFLAGS="-C link-arg=--gc-sections -C link-arg=-T$(CURDIR)/m6-testlib/test.ld" \
+	cargo test --target aarch64-unknown-none \
+	  $(addprefix -p ,$(TESTABLE_CRATES))
 
 fmt:
 	cargo fmt --all
