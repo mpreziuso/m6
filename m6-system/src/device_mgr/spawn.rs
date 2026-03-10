@@ -33,7 +33,7 @@ fn resolve_smmu_phandle_to_slot(phandle: u32) -> Option<u64> {
     match phandle {
         0x190 => Some(slots::SMMU_CONTROL_0), // PCIe SMMU
         0x191 => Some(slots::SMMU_CONTROL_1), // PHP SMMU (USB, etc.)
-        0 => None, // No SMMU
+        0 => None,                            // No SMMU
         _ => {
             log::warn!("Unknown SMMU phandle {:#x}, refusing to bind", phandle);
             None
@@ -260,7 +260,9 @@ pub fn spawn_driver(
 
     // Check device untyped exists before allocating slots
     // (Skip for VirtIO devices which reuse probe frames instead of device untyped)
-    if registry.find_virtio_probe_frame(config.device_info.phys_base).is_none()
+    if registry
+        .find_virtio_probe_frame(config.device_info.phys_base)
+        .is_none()
         && boot_info
             .find_device_untyped(config.device_info.phys_base)
             .is_none()
@@ -388,8 +390,12 @@ pub fn spawn_driver(
     create_device_frame(device_frame_slot, &config.device_info, registry, &cptr)?;
 
     // Create extended MMIO frames for devices with large MMIO regions (e.g., DWC3)
-    let extended_mmio_slots =
-        create_extended_mmio_frames(&config.device_info, config.manifest.mmio_pages, registry, &cptr)?;
+    let extended_mmio_slots = create_extended_mmio_frames(
+        &config.device_info,
+        config.manifest.mmio_pages,
+        registry,
+        &cptr,
+    )?;
 
     // Create additional device frames (GRF, CRU, PHY, etc.) if the driver needs them
     // Large MMIO regions (>4KB) are split: first page goes in additional_frame_slots,
@@ -400,10 +406,18 @@ pub fn spawn_driver(
 
     // Claim IRQ handler if needed
     if let Some(irq_slot) = irq_handler_slot {
-        log::info!("Claiming IRQ {} for {}", config.device_info.irq, config.manifest.compatible);
+        log::info!(
+            "Claiming IRQ {} for {}",
+            config.device_info.irq,
+            config.manifest.compatible
+        );
         claim_irq(irq_slot, config.device_info.irq, &cptr)?;
     } else if config.manifest.needs_irq && !config.manifest.needs_msix {
-        log::warn!("needs_irq but irq={} for {}", config.device_info.irq, config.manifest.compatible);
+        log::warn!(
+            "needs_irq but irq={} for {}",
+            config.device_info.irq,
+            config.manifest.compatible
+        );
     }
 
     // Create notification for IRQ delivery if needed
@@ -425,8 +439,15 @@ pub fn spawn_driver(
             // Resolve device's SMMU phandle to the correct SmmuControl slot
             let slot = resolve_smmu_phandle_to_slot(config.device_info.smmu_phandle);
             match slot {
-                Some(s) => log::debug!("SMMU phandle {:#x} -> slot {}", config.device_info.smmu_phandle, s),
-                None => log::debug!("SMMU phandle {:#x} -> None", config.device_info.smmu_phandle),
+                Some(s) => log::debug!(
+                    "SMMU phandle {:#x} -> slot {}",
+                    config.device_info.smmu_phandle,
+                    s
+                ),
+                None => log::debug!(
+                    "SMMU phandle {:#x} -> None",
+                    config.device_info.smmu_phandle
+                ),
             }
             slot
         } else {
@@ -434,7 +455,11 @@ pub fn spawn_driver(
         };
         create_iospace(io_slot, smmu_slot, config.device_info.stream_id, &cptr)?;
         if let Some(sid) = config.device_info.stream_id {
-            log::info!("IOSpace created for {} with stream ID {:#x}", config.manifest.binary_name, sid);
+            log::info!(
+                "IOSpace created for {} with stream ID {:#x}",
+                config.manifest.binary_name,
+                sid
+            );
         } else {
             log::info!("IOSpace created for {}", config.manifest.binary_name);
         }
@@ -456,8 +481,7 @@ pub fn spawn_driver(
     }
 
     // Create DmaPool for IOVA allocation (driver maps DMA buffers itself)
-    let dma_pool_slot = if let (Some(iospace), Some(_)) =
-        (iospace_slot, dma_buffer_slots.as_ref())
+    let dma_pool_slot = if let (Some(iospace), Some(_)) = (iospace_slot, dma_buffer_slots.as_ref())
     {
         let pool_slot = registry.alloc_slot();
 
@@ -569,7 +593,13 @@ pub fn spawn_driver(
     // Ensure page tables exist for heap region (drivers use 0x4000_0000 for heap)
     const HEAP_BASE: u64 = 0x4000_0000;
     const HEAP_SIZE: u64 = 128 * 1024 * 1024; // 128MB heap
-    ensure_page_tables(vspace_slot, HEAP_BASE, HEAP_BASE + HEAP_SIZE, registry, &cptr)?;
+    ensure_page_tables(
+        vspace_slot,
+        HEAP_BASE,
+        HEAP_BASE + HEAP_SIZE,
+        registry,
+        &cptr,
+    )?;
 
     // Ensure page tables exist for INSTANCE_INFO region (used by SMMU drivers)
     // SMMU drivers map instance info frame at 0x70000000 to read their instance index
@@ -656,7 +686,7 @@ pub fn spawn_driver(
         device_frame_slot,         // device frame slot number
         irq_handler_slot,          // optional irq handler slot
         irq_notif_slot,            // optional notification for IRQ delivery
-        iospace_slot,    // optional iospace slot (only if actually created)
+        iospace_slot,              // optional iospace slot (only if actually created)
         smmu_to_copy,              // optional smmu control slot
         dma_pool_slot,             // optional DMA pool slot
         instance_info_slot,        // optional instance info frame (for SMMU drivers)
@@ -685,8 +715,13 @@ pub fn spawn_driver(
             &cptr,
         ) {
             Ok(msix_result) => {
-                if let Err(_e) = install_msix_caps(cptr(cspace_slot), cptr(slots::ROOT_CNODE), &msix_result) {
-                    log::warn!("MSI-X cap install failed for {}", config.manifest.binary_name);
+                if let Err(_e) =
+                    install_msix_caps(cptr(cspace_slot), cptr(slots::ROOT_CNODE), &msix_result)
+                {
+                    log::warn!(
+                        "MSI-X cap install failed for {}",
+                        config.manifest.binary_name
+                    );
                 }
             }
             Err(_) => {
@@ -851,7 +886,12 @@ fn create_extended_mmio_frames(
             slot,
             offset_in_untyped,
         ) {
-            log::warn!("Failed to create extended MMIO frame {} at offset {:#x}: {}", i, offset_in_untyped, e.name());
+            log::warn!(
+                "Failed to create extended MMIO frame {} at offset {:#x}: {}",
+                i,
+                offset_in_untyped,
+                e.name()
+            );
             // Continue trying remaining frames
             continue;
         }
@@ -900,7 +940,12 @@ fn create_additional_frames(
         let is_large = num_pages > 1;
 
         // Debug: show what we're looking for
-        log::debug!("Looking for {} at phys {:#x} ({} pages)", frame.name, frame.phys_addr, num_pages);
+        log::debug!(
+            "Looking for {} at phys {:#x} ({} pages)",
+            frame.name,
+            frame.phys_addr,
+            num_pages
+        );
 
         // Check if we already have this frame cached from a previous driver
         if let Some(cached_slot) = registry.find_additional_frame(frame.phys_addr) {
@@ -924,20 +969,28 @@ fn create_additional_frames(
         }
 
         // Find device untyped covering this physical address
-        let (device_untyped_slot, _untyped_size, untyped_base) = match boot_info
-            .find_device_untyped(frame.phys_addr)
-        {
-            Some(v) => {
-                log::debug!("Found device untyped at {:#x} size {:#x} for {}", v.2, v.1, frame.name);
-                v
-            }
-            None => {
-                // GRF/CRU regions might not have device untypeds on non-RK3588 platforms
-                // This is not an error - just skip this frame
-                log::warn!("No device untyped for {} at {:#x}", frame.name, frame.phys_addr);
-                continue;
-            }
-        };
+        let (device_untyped_slot, _untyped_size, untyped_base) =
+            match boot_info.find_device_untyped(frame.phys_addr) {
+                Some(v) => {
+                    log::debug!(
+                        "Found device untyped at {:#x} size {:#x} for {}",
+                        v.2,
+                        v.1,
+                        frame.name
+                    );
+                    v
+                }
+                None => {
+                    // GRF/CRU regions might not have device untypeds on non-RK3588 platforms
+                    // This is not an error - just skip this frame
+                    log::warn!(
+                        "No device untyped for {} at {:#x}",
+                        frame.name,
+                        frame.phys_addr
+                    );
+                    continue;
+                }
+            };
 
         // Create the first page (goes in regular additional frame slot)
         let slot = registry.alloc_slot();
@@ -959,7 +1012,11 @@ fn create_additional_frames(
             slot,
             offset,
         ) {
-            log::warn!("Failed to create DeviceFrame for {}: {}", frame.name, e.name());
+            log::warn!(
+                "Failed to create DeviceFrame for {}: {}",
+                frame.name,
+                e.name()
+            );
             continue;
         }
 
@@ -1677,7 +1734,9 @@ pub fn setup_msix(
 
     log::info!(
         "MSI-X: allocated {} vectors, base SPI={}, target={:#x}",
-        msi_result.vector_count, msi_result.base_spi, msi_result.target_addr
+        msi_result.vector_count,
+        msi_result.base_spi,
+        msi_result.target_addr
     );
 
     let mut result = MsixSetupResult {
@@ -1852,7 +1911,12 @@ fn programme_msix_table(
     // won't generate stale TLPs)
     if enable_msix_in_config(pcie_bdf, msix.cap_offset, bar_phys_base, registry, cptr).is_err() {
         let (bus, dev, func) = pcie_bdf;
-        log::error!("MSI-X: config space enable FAILED for {:#x}:{:#x}.{:#x} — vectors masked via BAR only", bus, dev, func);
+        log::error!(
+            "MSI-X: config space enable FAILED for {:#x}:{:#x}.{:#x} — vectors masked via BAR only",
+            bus,
+            dev,
+            func
+        );
         return Ok(());
     }
 
@@ -1908,13 +1972,20 @@ fn enable_msix_in_config(
     let Some(host) = found_host else {
         log::error!(
             "MSI-X: no PCIe host found for config access (BAR0={:#x}) BDF={}:{}:{}",
-            bar_phys_base, bus, dev, func
+            bar_phys_base,
+            bus,
+            dev,
+            func
         );
         for (i, h) in hosts.iter().enumerate() {
             if let Some(h) = h {
                 log::debug!(
                     "MSI-X: parsed host [{}]=mem32@{:#x}+{:#x},bus={}-{}",
-                    i, h.mem32_cpu, h.mem32_size, h.bus_range.0, h.bus_range.1
+                    i,
+                    h.mem32_cpu,
+                    h.mem32_size,
+                    h.bus_range.0,
+                    h.bus_range.1
                 );
             }
         }
@@ -1933,7 +2004,15 @@ fn enable_msix_in_config(
 
     // For DWC hosts, we need ATU to access downstream device config space
     if host.host_type == pcie::PcieHostType::DesignWareDwc {
-        return enable_msix_dwc(host, pcie_bdf, cap_offset, CONFIG_VADDR, registry, boot_info, cptr);
+        return enable_msix_dwc(
+            host,
+            pcie_bdf,
+            cap_offset,
+            CONFIG_VADDR,
+            registry,
+            boot_info,
+            cptr,
+        );
     }
 
     // ECAM path: direct config space access
@@ -2011,7 +2090,10 @@ fn enable_msix_dwc(
     let _iatu_slot = match map_device_page(iatu_phys, iatu_vaddr, registry, boot_info, cptr) {
         Ok(slot) => slot,
         Err(e) => {
-            log::error!("MSI-X DWC: iATU map failed at {:#x} (likely consumed during PCIe scan)", iatu_phys);
+            log::error!(
+                "MSI-X DWC: iATU map failed at {:#x} (likely consumed during PCIe scan)",
+                iatu_phys
+            );
             return Err(e);
         }
     };
@@ -2032,14 +2114,15 @@ fn enable_msix_dwc(
 
     // Map the secondary bus config page
     let sec_config_vaddr = base_vaddr;
-    let _sec_config_slot = match map_device_page(sec_cpu_addr, sec_config_vaddr, registry, boot_info, cptr) {
-        Ok(slot) => slot,
-        Err(e) => {
-            log::error!("MSI-X DWC: config page map failed at {:#x}", sec_cpu_addr);
-            let _ = unmap_frame(cptr(slots::ROOT_VSPACE), iatu_vaddr);
-            return Err(e);
-        }
-    };
+    let _sec_config_slot =
+        match map_device_page(sec_cpu_addr, sec_config_vaddr, registry, boot_info, cptr) {
+            Ok(slot) => slot,
+            Err(e) => {
+                log::error!("MSI-X DWC: config page map failed at {:#x}", sec_cpu_addr);
+                let _ = unmap_frame(cptr(slots::ROOT_VSPACE), iatu_vaddr);
+                return Err(e);
+            }
+        };
 
     // The cap_offset is within the 4KB config page (device 0, function 0)
     let config_page_offset = cap_offset as usize;
@@ -2303,8 +2386,14 @@ pub fn spawn_class_driver(
     // Ensure page tables exist for heap region
     const HEAP_BASE: u64 = 0x4000_0000;
     const HEAP_SIZE: u64 = 128 * 1024 * 1024;
-    ensure_page_tables(vspace_slot, HEAP_BASE, HEAP_BASE + HEAP_SIZE, registry, &cptr)
-        .map_err(|_| "Heap page table failed")?;
+    ensure_page_tables(
+        vspace_slot,
+        HEAP_BASE,
+        HEAP_BASE + HEAP_SIZE,
+        registry,
+        &cptr,
+    )
+    .map_err(|_| "Heap page table failed")?;
 
     // Install capabilities into class driver's CSpace
     install_class_driver_caps(
@@ -2591,58 +2680,126 @@ pub fn spawn_fat32_service(
     // Ensure page tables for data/path frame region (0x80020000-0x80040000)
     const DATA_VADDR: u64 = 0x8002_0000;
     const PATH_VADDR: u64 = 0x8003_0000;
-    ensure_page_tables(vspace_slot, DATA_VADDR, PATH_VADDR + PAGE_SIZE as u64, registry, &cptr)
-        .map_err(|_| "Data/path page table failed")?;
+    ensure_page_tables(
+        vspace_slot,
+        DATA_VADDR,
+        PATH_VADDR + PAGE_SIZE as u64,
+        registry,
+        &cptr,
+    )
+    .map_err(|_| "Data/path page table failed")?;
 
     // Ensure page tables for heap region
     const HEAP_BASE: u64 = 0x4000_0000;
     const HEAP_SIZE: u64 = 128 * 1024 * 1024;
-    ensure_page_tables(vspace_slot, HEAP_BASE, HEAP_BASE + HEAP_SIZE, registry, &cptr)
-        .map_err(|_| "Heap page table failed")?;
+    ensure_page_tables(
+        vspace_slot,
+        HEAP_BASE,
+        HEAP_BASE + HEAP_SIZE,
+        registry,
+        &cptr,
+    )
+    .map_err(|_| "Heap page table failed")?;
 
     // Install capabilities into FAT32 service's CSpace
     let child_cspace_cptr = cptr(cspace_slot);
     let src_cnode_cptr = cptr(slots::ROOT_CNODE);
 
     // Slot 0: CSpace self-reference
-    cap_copy(child_cspace_cptr, slots::driver::ROOT_CNODE, 0, src_cnode_cptr, cspace_slot, 0)
-        .map_err(SpawnError::CapCopyFailed)
-        .map_err(|_| "Cap install failed")?;
+    cap_copy(
+        child_cspace_cptr,
+        slots::driver::ROOT_CNODE,
+        0,
+        src_cnode_cptr,
+        cspace_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)
+    .map_err(|_| "Cap install failed")?;
 
     // Slot 1: TCB
-    cap_copy(child_cspace_cptr, slots::driver::ROOT_TCB, 0, src_cnode_cptr, tcb_slot, 0)
-        .map_err(SpawnError::CapCopyFailed)
-        .map_err(|_| "Cap install failed")?;
+    cap_copy(
+        child_cspace_cptr,
+        slots::driver::ROOT_TCB,
+        0,
+        src_cnode_cptr,
+        tcb_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)
+    .map_err(|_| "Cap install failed")?;
 
     // Slot 2: VSpace
-    cap_copy(child_cspace_cptr, slots::driver::ROOT_VSPACE, 0, src_cnode_cptr, vspace_slot, 0)
-        .map_err(SpawnError::CapCopyFailed)
-        .map_err(|_| "Cap install failed")?;
+    cap_copy(
+        child_cspace_cptr,
+        slots::driver::ROOT_VSPACE,
+        0,
+        src_cnode_cptr,
+        vspace_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)
+    .map_err(|_| "Cap install failed")?;
 
     // Slot 12: Service endpoint
-    cap_copy(child_cspace_cptr, fat32_driver::SERVICE_EP, 0, src_cnode_cptr, service_ep_slot, 0)
-        .map_err(SpawnError::CapCopyFailed)
-        .map_err(|_| "Cap install failed")?;
+    cap_copy(
+        child_cspace_cptr,
+        fat32_driver::SERVICE_EP,
+        0,
+        src_cnode_cptr,
+        service_ep_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)
+    .map_err(|_| "Cap install failed")?;
 
     // Slot 30: NVMe driver endpoint
-    cap_copy(child_cspace_cptr, fat32_driver::BLK_EP, 0, src_cnode_cptr, nvme_ep_slot, 0)
-        .map_err(SpawnError::CapCopyFailed)
-        .map_err(|_| "Cap install failed")?;
+    cap_copy(
+        child_cspace_cptr,
+        fat32_driver::BLK_EP,
+        0,
+        src_cnode_cptr,
+        nvme_ep_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)
+    .map_err(|_| "Cap install failed")?;
 
     // Slot 31: Data frame for block I/O
-    cap_copy(child_cspace_cptr, fat32_driver::DATA_FRAME, 0, src_cnode_cptr, data_frame_slot, 0)
-        .map_err(SpawnError::CapCopyFailed)
-        .map_err(|_| "Cap install failed")?;
+    cap_copy(
+        child_cspace_cptr,
+        fat32_driver::DATA_FRAME,
+        0,
+        src_cnode_cptr,
+        data_frame_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)
+    .map_err(|_| "Cap install failed")?;
 
     // Slot 32: Path/data buffer frame
-    cap_copy(child_cspace_cptr, fat32_driver::PATH_FRAME, 0, src_cnode_cptr, path_frame_slot, 0)
-        .map_err(SpawnError::CapCopyFailed)
-        .map_err(|_| "Cap install failed")?;
+    cap_copy(
+        child_cspace_cptr,
+        fat32_driver::PATH_FRAME,
+        0,
+        src_cnode_cptr,
+        path_frame_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)
+    .map_err(|_| "Cap install failed")?;
 
     // Slot 17: RAM untyped for heap
-    cap_copy(child_cspace_cptr, slots::driver::RAM_UNTYPED, 0, src_cnode_cptr, slots::RAM_UNTYPED, 0)
-        .map_err(SpawnError::CapCopyFailed)
-        .map_err(|_| "Cap install failed")?;
+    cap_copy(
+        child_cspace_cptr,
+        slots::driver::RAM_UNTYPED,
+        0,
+        src_cnode_cptr,
+        slots::RAM_UNTYPED,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)
+    .map_err(|_| "Cap install failed")?;
 
     // Configure TCB
     tcb_configure(

@@ -374,7 +374,7 @@ fn map_direct_physmap(
     allocator: &mut BootPageAllocator,
 ) -> Option<()> {
     const GB: u64 = 0x4000_0000; // 1GB
-    const MB2: u64 = 0x20_0000;  // 2MB
+    const MB2: u64 = 0x20_0000; // 2MB
 
     let max_phys_addr = ram_regions.max_addr();
     // Round up max_phys_addr to next 1GB boundary
@@ -417,7 +417,10 @@ fn map_direct_physmap(
                 if block == 0 || block == blocks_per_gb - 1 {
                     log::debug!(
                         "  Block {}: PA {:#x} -> VA {:#x} ({})",
-                        block, block_phys, block_virt, type_str
+                        block,
+                        block_phys,
+                        block_virt,
+                        type_str
                     );
                 }
 
@@ -433,7 +436,8 @@ fn map_direct_physmap(
                 ) {
                     log::error!(
                         "Failed to map Direct PhysMap block at {:#x}: {:?}",
-                        block_phys, e
+                        block_phys,
+                        e
                     );
                     return None;
                 }
@@ -490,7 +494,7 @@ fn setup_ttbr0_identity(
     allocator: &mut BootPageAllocator,
 ) -> Option<TPA<L0Table>> {
     const GB: u64 = 0x4000_0000; // 1GB
-    const MB2: u64 = 0x20_0000;  // 2MB
+    const MB2: u64 = 0x20_0000; // 2MB
 
     let ttbr0_pa: TPA<L0Table> = allocator.allocate_table()?;
     let mut ttbr0_l0 = unsafe { L0Table::from_pa(ttbr0_pa) };
@@ -635,7 +639,9 @@ impl RamRegions {
         } else {
             log::warn!(
                 "RamRegions full ({} regions), dropping region {:#x}-{:#x}",
-                MAX_RAM_REGIONS, start, end
+                MAX_RAM_REGIONS,
+                start,
+                end
             );
         }
     }

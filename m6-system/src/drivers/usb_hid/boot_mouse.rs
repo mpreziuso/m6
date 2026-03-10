@@ -3,7 +3,7 @@
 //! Parses 3-4 byte boot protocol mouse reports and generates
 //! InputEvent sequences for button and movement events.
 
-use crate::input_event::{InputEvent, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, REL_WHEEL, REL_X, REL_Y};
+use crate::input_event::{BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, InputEvent, REL_WHEEL, REL_X, REL_Y};
 
 /// Boot protocol mouse report (3-4 bytes).
 ///
@@ -30,11 +30,7 @@ impl BootMouseReport {
             buttons: bytes[0],
             x: bytes[1] as i8,
             y: bytes[2] as i8,
-            wheel: if bytes.len() >= 4 {
-                bytes[3] as i8
-            } else {
-                0
-            },
+            wheel: if bytes.len() >= 4 { bytes[3] as i8 } else { 0 },
         })
     }
 

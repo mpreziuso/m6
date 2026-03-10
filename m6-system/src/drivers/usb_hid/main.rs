@@ -139,22 +139,17 @@ impl HidDriver {
             return 0;
         }
 
-        let device_count = match m6_syscall::invoke::call(
-            USB_HOST_EP,
-            usb_ipc::request::LIST_DEVICES,
-            0,
-            0,
-            0,
-        ) {
-            Ok(result) => {
-                if (result.label & 0xFFFF) == usb_ipc::response::OK {
-                    ((result.label >> 16) & 0xFFFF) as usize
-                } else {
-                    0
+        let device_count =
+            match m6_syscall::invoke::call(USB_HOST_EP, usb_ipc::request::LIST_DEVICES, 0, 0, 0) {
+                Ok(result) => {
+                    if (result.label & 0xFFFF) == usb_ipc::response::OK {
+                        ((result.label >> 16) & 0xFFFF) as usize
+                    } else {
+                        0
+                    }
                 }
-            }
-            Err(_) => 0,
-        };
+                Err(_) => 0,
+            };
 
         if device_count == 0 {
             return 0;
@@ -208,7 +203,6 @@ impl HidDriver {
         let subclass = ((first_iface_packed >> 8) & 0xFF) as u8;
         let protocol = ((first_iface_packed >> 16) & 0xFF) as u8;
         let endpoint = ((first_iface_packed >> 24) & 0xFF) as u8;
-
 
         // Check for HID class (0x03) with boot interface subclass (0x01)
         if class != usb_ipc::class::HID {
@@ -269,9 +263,7 @@ impl HidDriver {
         // First, set boot protocol (protocol=0) for HID boot devices
         // This is required for keyboards/mice with boot protocol support
         // Pack: device_addr | interface<<8 | protocol<<16
-        let set_protocol_arg = (device_addr as u64)
-            | ((interface as u64) << 8)
-            | (0u64 << 16); // protocol=0 for boot protocol
+        let set_protocol_arg = (device_addr as u64) | ((interface as u64) << 8) | (0u64 << 16); // protocol=0 for boot protocol
 
         let _ = m6_syscall::invoke::call(
             USB_HOST_EP,
@@ -288,13 +280,8 @@ impl HidDriver {
             | (0u64 << 16)  // duration=0 (only report on change)
             | (0u64 << 24); // report_id=0 (all reports)
 
-        let _ = m6_syscall::invoke::call(
-            USB_HOST_EP,
-            usb_ipc::request::SET_IDLE,
-            set_idle_arg,
-            0,
-            0,
-        );
+        let _ =
+            m6_syscall::invoke::call(USB_HOST_EP, usb_ipc::request::SET_IDLE, set_idle_arg, 0, 0);
 
         // Now start interrupt transfers
         // Pack: x1 = device_addr | endpoint<<8 | interval<<16
@@ -304,7 +291,9 @@ impl HidDriver {
 
         // Transfer INTERRUPT_NOTIF capability to USB host via IPC cap transfer
         // SAFETY: IPC buffer is mapped and accessible; single-threaded driver
-        unsafe { m6_syscall::invoke::ipc_set_send_caps(&[INTERRUPT_NOTIF]); }
+        unsafe {
+            m6_syscall::invoke::ipc_set_send_caps(&[INTERRUPT_NOTIF]);
+        }
 
         let result = m6_syscall::invoke::call(
             USB_HOST_EP,
@@ -316,7 +305,9 @@ impl HidDriver {
 
         // Clear extra caps after send
         // SAFETY: IPC buffer is mapped and accessible; single-threaded driver
-        unsafe { m6_syscall::IpcBuffer::get_mut().extra_caps = 0; }
+        unsafe {
+            m6_syscall::IpcBuffer::get_mut().extra_caps = 0;
+        }
 
         match result {
             Ok(r) => {
@@ -372,7 +363,9 @@ impl HidDriver {
                     let log_count = unsafe { DATA_LOG_COUNT };
                     if log_count < 3 {
                         log::warn!("GET_INT_DATA err={}", response_code);
-                        unsafe { DATA_LOG_COUNT += 1; }
+                        unsafe {
+                            DATA_LOG_COUNT += 1;
+                        }
                     }
                 }
 
@@ -381,7 +374,12 @@ impl HidDriver {
                     let report = packed_data.to_le_bytes();
                     let actual_len = byte_count.min(8);
 
-                    self.devices.process_report(device_addr, endpoint, &report[..actual_len], timestamp_ns);
+                    self.devices.process_report(
+                        device_addr,
+                        endpoint,
+                        &report[..actual_len],
+                        timestamp_ns,
+                    );
                     got_data = true;
                 }
             }
@@ -425,7 +423,10 @@ impl HidDriver {
     /// Get pending events for a subscription
     fn get_events(&mut self, sub_id: u16, max_events: usize) -> Option<Vec<InputEvent>> {
         // Find the subscription
-        let sub = self.subscriptions.iter().find(|s| s.active && s.id == sub_id)?;
+        let sub = self
+            .subscriptions
+            .iter()
+            .find(|s| s.active && s.id == sub_id)?;
         let device_mask = sub.device_mask;
 
         let mut events = Vec::new();
@@ -458,7 +459,10 @@ impl HidDriver {
 
     /// Poll for event count
     fn poll_events(&self, sub_id: u16) -> Option<usize> {
-        let sub = self.subscriptions.iter().find(|s| s.active && s.id == sub_id)?;
+        let sub = self
+            .subscriptions
+            .iter()
+            .find(|s| s.active && s.id == sub_id)?;
         let device_mask = sub.device_mask;
 
         let mut count = 0;
@@ -549,8 +553,7 @@ fn service_loop(driver: &mut HidDriver) -> ! {
                     }
                     first_message = true;
                 } else {
-                    last_response =
-                        handle_request(driver, ipc_result.label, &ipc_result.msg);
+                    last_response = handle_request(driver, ipc_result.label, &ipc_result.msg);
                 }
             }
             Err(_) => {
@@ -577,7 +580,9 @@ fn handle_request(driver: &mut HidDriver, label: u64, msg: &[u64; 4]) -> IpcResp
         ipc::request::GET_EVENTS => handle_get_events(driver, msg[0] as u16, msg[1] as usize),
         ipc::request::POLL_EVENTS => IpcResponse::simple(handle_poll_events(driver, msg[0] as u16)),
         ipc::request::LIST_DEVICES => IpcResponse::simple(handle_list_devices(driver)),
-        ipc::request::GET_DEVICE_INFO => IpcResponse::simple(handle_get_device_info(driver, msg[0] as usize)),
+        ipc::request::GET_DEVICE_INFO => {
+            IpcResponse::simple(handle_get_device_info(driver, msg[0] as usize))
+        }
         _ => IpcResponse::simple(ipc::response::ERR_UNSUPPORTED),
     }
 }
@@ -697,4 +702,3 @@ fn handle_get_device_info(driver: &HidDriver, index: usize) -> u64 {
         None => ipc::response::ERR_INVALID_DEVICE,
     }
 }
-

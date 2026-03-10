@@ -293,7 +293,7 @@ impl SlotFlags {
     #[inline]
     #[must_use]
     pub const fn from_bits(bits: u16) -> Self {
-        Self(bits)
+        Self(bits & 0x0003)
     }
 }
 
@@ -520,10 +520,19 @@ mod tests {
 
     #[test_case]
     fn test_object_type_is_ipc() {
-        for ty in [ObjectType::Endpoint, ObjectType::Notification, ObjectType::Reply] {
+        for ty in [
+            ObjectType::Endpoint,
+            ObjectType::Notification,
+            ObjectType::Reply,
+        ] {
             assert!(ty.is_ipc(), "{ty:?} should be an IPC type");
         }
-        for ty in [ObjectType::Frame, ObjectType::TCB, ObjectType::CNode, ObjectType::Empty] {
+        for ty in [
+            ObjectType::Frame,
+            ObjectType::TCB,
+            ObjectType::CNode,
+            ObjectType::Empty,
+        ] {
             assert!(!ty.is_ipc(), "{ty:?} should not be an IPC type");
         }
     }
@@ -537,7 +546,9 @@ mod tests {
         let without_cdt = with_cdt.without(SlotFlags::IN_CDT);
         assert!(!without_cdt.contains(SlotFlags::IN_CDT));
         // Combining both flags then removing one.
-        let both = SlotFlags::NONE.with(SlotFlags::IN_CDT).with(SlotFlags::IS_ORIGINAL);
+        let both = SlotFlags::NONE
+            .with(SlotFlags::IN_CDT)
+            .with(SlotFlags::IS_ORIGINAL);
         assert!(both.contains(SlotFlags::IN_CDT));
         assert!(both.contains(SlotFlags::IS_ORIGINAL));
         let only_orig = both.without(SlotFlags::IN_CDT);

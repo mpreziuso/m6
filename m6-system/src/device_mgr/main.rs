@@ -75,7 +75,10 @@ pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
     log::info!("Starting");
 
     // Store boot info pointer
-    BOOT_INFO.store(boot_info_addr as *mut DevMgrBootInfo, core::sync::atomic::Ordering::Relaxed);
+    BOOT_INFO.store(
+        boot_info_addr as *mut DevMgrBootInfo,
+        core::sync::atomic::Ordering::Relaxed,
+    );
 
     // Validate boot info
     // SAFETY: The pointer was just stored from init's valid boot_info_addr.
@@ -297,8 +300,12 @@ fn enumerate_pcie_devices(registry: &mut Registry, dtb_data: &[u8]) {
         log::debug!(
             "PCIe host: config={:#x} mem32=[{:#x}->{:#x} sz={:#x}] mem64=[{:#x}->{:#x} sz={:#x}] iommu={:#x} sid_base={:#x}",
             host.config_base,
-            host.mem32_pci, host.mem32_cpu, host.mem32_size,
-            host.mem64_pci, host.mem64_cpu, host.mem64_size,
+            host.mem32_pci,
+            host.mem32_cpu,
+            host.mem32_size,
+            host.mem64_pci,
+            host.mem64_cpu,
+            host.mem64_size,
             host.iommu_phandle as u64,
             host.iommu_stream_base as u64,
         );
@@ -464,15 +471,19 @@ fn check_rk3588_link_status(
 
     // Read the raw LTSSM status register for diagnostics
     let ltssm_vaddr = APBDBG_VADDR + offset_within_page as u64 + 0x300;
-    let raw_status =
-        unsafe { core::ptr::read_volatile(ltssm_vaddr as *const u32) };
+    let raw_status = unsafe { core::ptr::read_volatile(ltssm_vaddr as *const u32) };
 
     let link_str = match link_result {
         Some(true) => "LINK_UP",
         Some(false) => "LINK_DOWN",
         None => "UNKNOWN(clk?)",
     };
-    log::debug!("APBDBG {:#x} LTSSM={:#x} {}", apbdbg_base, raw_status as u64, link_str);
+    log::debug!(
+        "APBDBG {:#x} LTSSM={:#x} {}",
+        apbdbg_base,
+        raw_status as u64,
+        link_str
+    );
 
     // Unmap
     if let Err(e) = unmap_frame(cptr(slots::ROOT_VSPACE), APBDBG_VADDR) {
@@ -635,8 +646,7 @@ fn map_pcie_page(
     use m6_cap::ObjectType;
     use m6_syscall::invoke::{map_frame, retype};
 
-    let (device_untyped_slot, _size, untyped_base) =
-        boot_info.find_device_untyped(phys_addr)?;
+    let (device_untyped_slot, _size, untyped_base) = boot_info.find_device_untyped(phys_addr)?;
     let frame_slot = registry.alloc_slot();
     let offset = phys_addr.saturating_sub(untyped_base);
     retype(
@@ -733,7 +743,12 @@ fn scan_dwc_secondary_bus(
         unsafe {
             pcie::cfg_write32(dbi_config_vaddr as usize, 0, 0, 0, 0x18, bus_reg);
         }
-        log::debug!("PCIe: assigned bus numbers pri={} sec={} sub={}", pri, sec, sub);
+        log::debug!(
+            "PCIe: assigned bus numbers pri={} sec={} sub={}",
+            pri,
+            sec,
+            sub
+        );
         sec
     } else {
         bridge.secondary_bus
@@ -830,7 +845,9 @@ fn scan_dwc_secondary_bus(
                 if readback & (1 << 15) == 0 {
                     log::warn!(
                         "PCIe: MSI-X enable failed for BDF {:02x}:{:02x}.{:x}",
-                        device.bdf.0, device.bdf.1, device.bdf.2,
+                        device.bdf.0,
+                        device.bdf.1,
+                        device.bdf.2,
                     );
                 }
             }
@@ -849,11 +866,7 @@ fn scan_dwc_secondary_bus(
 
         // SAFETY: DBI config page is still mapped at dbi_config_vaddr
         unsafe {
-            pcie::set_bridge_memory_window(
-                dbi_config_vaddr as usize,
-                mem_base_pci,
-                mem_limit_pci,
-            );
+            pcie::set_bridge_memory_window(dbi_config_vaddr as usize, mem_base_pci, mem_limit_pci);
         }
 
         // SAFETY: iATU registers are still mapped at iatu_vaddr
@@ -1344,7 +1357,10 @@ fn handle_usb_hid_ensure(registry: &mut Registry) -> u64 {
                 ipc_set_send_caps(&[endpoint_cptr]);
             }
 
-            log::debug!("USB HID ENSURE: success, endpoint at slot {}", endpoint_slot);
+            log::debug!(
+                "USB HID ENSURE: success, endpoint at slot {}",
+                endpoint_slot
+            );
             ipc::response::OK
         }
         Err(e) => {

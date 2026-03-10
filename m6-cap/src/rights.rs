@@ -69,6 +69,9 @@ impl CapRights {
     /// Read, Write, Grant, and GrantReply rights.
     pub const RWGG: Self = Self(Self::ALL.0);
 
+    /// Write and GrantReply rights (for IPC Call).
+    pub const WRITE_GRANT_REPLY: Self = Self(Self::WRITE.0 | Self::GRANT_REPLY.0);
+
     /// Create rights from individual flags.
     #[inline]
     #[must_use]
@@ -216,15 +219,6 @@ impl core::ops::BitAnd for CapRights {
     #[inline]
     fn bitand(self, rhs: Self) -> Self::Output {
         self.intersect(rhs)
-    }
-}
-
-impl core::ops::BitOr for CapRights {
-    type Output = Self;
-
-    #[inline]
-    fn bitor(self, rhs: Self) -> Self::Output {
-        self.union(rhs)
     }
 }
 

@@ -107,7 +107,7 @@ pub unsafe fn init(boot_info_ptr: usize) -> Result<(), &'static str> {
 
 #[cfg(feature = "entry-point")]
 mod entry {
-    use super::{init, STARTUP_X0};
+    use super::{STARTUP_X0, init};
     use crate::process::exit;
 
     unsafe extern "Rust" {

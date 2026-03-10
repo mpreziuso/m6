@@ -413,9 +413,8 @@ pub fn handle_tcb_bind_notification(args: &SyscallArgs) -> SyscallResult {
 
     if notification_cptr == 0 {
         // Unbind: clear reverse link on old notification, then clear TCB
-        let old_notif = object_table::with_tcb(tcb_cap.obj_ref, |tcb_full| {
-            tcb_full.tcb.bound_notification
-        });
+        let old_notif =
+            object_table::with_tcb(tcb_cap.obj_ref, |tcb_full| tcb_full.tcb.bound_notification);
         if old_notif.is_valid() {
             object_table::with_notification_mut(old_notif, |notif| {
                 notif.bound_tcb = m6_cap::ObjectRef::NULL;

@@ -258,10 +258,7 @@ impl IpcResponse {
     /// Create a simple response with only a label (no data registers).
     #[inline]
     const fn simple(label: u64) -> Self {
-        Self {
-            label,
-            msg: [0; 3],
-        }
+        Self { label, msg: [0; 3] }
     }
 }
 
@@ -301,8 +298,8 @@ fn map_dma_buffers() -> Result<DmaBuffers, &'static str> {
         let vaddr = DMA_BUFFER_VADDR + (i as u64) * PAGE_SIZE;
 
         // Allocate IOVA for this page
-        let iova = dma_pool_alloc(DMA_POOL, PAGE_SIZE, PAGE_SIZE)
-            .map_err(|_| "IOVA allocation failed")?;
+        let iova =
+            dma_pool_alloc(DMA_POOL, PAGE_SIZE, PAGE_SIZE).map_err(|_| "IOVA allocation failed")?;
 
         // Map frame to IOSpace for device DMA access (RW)
         if iospace_map_frame(IOSPACE, frame_cap, iova, 0b11).is_err() {
@@ -393,9 +390,7 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     //      after all prior posted writes (CC.EN=1, AQA, ASQ, ACQ) from
     //      init() have been delivered to the device.
     // SAFETY: Extended MMIO page (BAR0 offset 0x1000) was mapped above.
-    let _db_fence = unsafe {
-        core::ptr::read_volatile((ctrl.base() + 0x1000) as *const u32)
-    };
+    let _db_fence = unsafe { core::ptr::read_volatile((ctrl.base() + 0x1000) as *const u32) };
 
     log::info!("controller ready");
 
@@ -422,7 +417,12 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
         }
     };
 
-    log::info!("Model: {}, Serial: {}, FW: {}", identify_ctrl.model_number(), identify_ctrl.serial_number(), identify_ctrl.firmware_revision());
+    log::info!(
+        "Model: {}, Serial: {}, FW: {}",
+        identify_ctrl.model_number(),
+        identify_ctrl.serial_number(),
+        identify_ctrl.firmware_revision()
+    );
 
     // Identify first namespace (NSID=1)
     let nsid = 1u32;
@@ -438,7 +438,12 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     let capacity_blocks = identify_ns.size_blocks();
     let capacity_mb = (capacity_blocks * block_size as u64) / (1024 * 1024);
 
-    log::info!("Namespace 1: {} blocks ({} MiB), block size {} bytes", capacity_blocks, capacity_mb, block_size);
+    log::info!(
+        "Namespace 1: {} blocks ({} MiB), block size {} bytes",
+        capacity_blocks,
+        capacity_mb,
+        block_size
+    );
 
     // Build device info
     let info = DeviceInfo {
@@ -460,13 +465,14 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     let irq_config = setup_irq();
 
     // Create I/O queues via admin commands
-    let (io_sq, io_cq) = match create_io_queues(&ctrl, &mut admin_sq, &mut admin_cq, &dma, &irq_config) {
-        Some(queues) => queues,
-        None => {
-            log::error!("failed to create I/O queues");
-            halt();
-        }
-    };
+    let (io_sq, io_cq) =
+        match create_io_queues(&ctrl, &mut admin_sq, &mut admin_cq, &dma, &irq_config) {
+            Some(queues) => queues,
+            None => {
+                log::error!("failed to create I/O queues");
+                halt();
+            }
+        };
 
     // Create device state
     let mut device = NvmeDevice {
@@ -525,7 +531,11 @@ fn submit_admin_cmd(
                 if completion.is_success() {
                     return Some(completion);
                 } else {
-                    log::warn!("admin command failed: SCT={} SC={}", completion.status_code_type(), completion.status_code());
+                    log::warn!(
+                        "admin command failed: SCT={} SC={}",
+                        completion.status_code_type(),
+                        completion.status_code()
+                    );
                     return None;
                 }
             }
@@ -541,7 +551,11 @@ fn submit_admin_cmd(
         }
     }
 
-    log::warn!("admin command timeout (CID={}) CSTS={:#x}", cid, ctrl.status());
+    log::warn!(
+        "admin command timeout (CID={}) CSTS={:#x}",
+        cid,
+        ctrl.status()
+    );
 
     // Check for DMA fault notification
     if let Ok(badge) = m6_syscall::invoke::poll(msix_notif(0)) {
@@ -611,18 +625,18 @@ fn identify_namespace(
 ///
 /// Required by the NVMe spec before creating any I/O queues. Requests 1 I/O SQ
 /// and 1 I/O CQ. Logs the controller's allocation in response DW0.
-fn set_num_queues(
-    ctrl: &NvmeController,
-    admin_sq: &mut NvmeSq,
-    admin_cq: &mut NvmeCq,
-) -> bool {
+fn set_num_queues(ctrl: &NvmeController, admin_sq: &mut NvmeSq, admin_cq: &mut NvmeCq) -> bool {
     // Request 1 SQ and 1 CQ (0-based → value 0)
     let cmd = NvmeCommand::set_features_num_queues(0, 0, 0);
     match submit_admin_cmd(ctrl, admin_sq, admin_cq, cmd) {
         Some(cqe) => {
             let nsqa = (cqe.result & 0xFFFF) as u16;
             let ncqa = (cqe.result >> 16) as u16;
-            log::info!("Set Features OK: NSQA={} NCQA={}", nsqa as u64 + 1, ncqa as u64 + 1);
+            log::info!(
+                "Set Features OK: NSQA={} NCQA={}",
+                nsqa as u64 + 1,
+                ncqa as u64 + 1
+            );
             true
         }
         None => {
@@ -638,11 +652,7 @@ fn set_num_queues(
 /// This isolates CQE reachability from data buffer DMA issues.
 ///
 /// Returns `true` if any CQE arrived (DMA path works), `false` on timeout.
-fn probe_admin_cq(
-    ctrl: &NvmeController,
-    admin_sq: &mut NvmeSq,
-    admin_cq: &mut NvmeCq,
-) -> bool {
+fn probe_admin_cq(ctrl: &NvmeController, admin_sq: &mut NvmeSq, admin_cq: &mut NvmeCq) -> bool {
     // Write a sentinel to CQ entry 0 so we can distinguish "no DMA" (sentinel
     // intact) from "DMA wrote zeros" (sentinel overwritten with 0).
     let cq_entry0_vaddr = admin_cq.entry_vaddr(0);
@@ -819,7 +829,13 @@ fn service_loop(device: &mut NvmeDevice) -> ! {
                     &ipc_result.msg,
                 );
 
-                result = reply_recv(SERVICE_EP, resp.label, resp.msg[0], resp.msg[1], resp.msg[2]);
+                result = reply_recv(
+                    SERVICE_EP,
+                    resp.label,
+                    resp.msg[0],
+                    resp.msg[1],
+                    resp.msg[2],
+                );
             }
             Err(_) => {
                 sched_yield();
@@ -886,7 +902,11 @@ fn submit_io_cmd(device: &mut NvmeDevice, cmd: NvmeCommand) -> Option<NvmeComple
                 if completion.is_success() {
                     return Some(completion);
                 } else {
-                    log::warn!("I/O command failed: SCT={} SC={}", completion.status_code_type(), completion.status_code());
+                    log::warn!(
+                        "I/O command failed: SCT={} SC={}",
+                        completion.status_code_type(),
+                        completion.status_code()
+                    );
                     return None;
                 }
             }

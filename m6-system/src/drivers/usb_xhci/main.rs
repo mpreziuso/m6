@@ -268,20 +268,19 @@ fn poll_interrupt_transfers(device: &mut XhciDevice) {
         }
 
         // Poll for data from hardware
-        if let Some((data, len)) = device.xhci_ctrl.poll_interrupt_data(
-            transfer.slot_id,
-            transfer.ep_idx as usize,
-        ) {
+        if let Some((data, len)) = device
+            .xhci_ctrl
+            .poll_interrupt_data(transfer.slot_id, transfer.ep_idx as usize)
+        {
             let copy_len = len.min(8);
             transfer.buffer[..copy_len].copy_from_slice(&data[..copy_len]);
             transfer.buffer_len = copy_len as u8;
             transfer.has_pending_data = true;
 
             // Re-queue the transfer
-            let _ = device.xhci_ctrl.queue_interrupt_transfer(
-                transfer.slot_id,
-                transfer.ep_idx as usize,
-            );
+            let _ = device
+                .xhci_ctrl
+                .queue_interrupt_transfer(transfer.slot_id, transfer.ep_idx as usize);
         }
     }
 }
@@ -291,36 +290,57 @@ fn handle_request(device: &mut XhciDevice, label: u64, msg: &[u64; 4]) -> IpcRes
     match label & 0xFFFF {
         request::GET_INFO => IpcResponse::simple(response::OK),
         request::GET_STATUS => IpcResponse::simple(
-            status::READY | status::USB2_SUPPORTED | status::USB3_SUPPORTED | status::PORTS_POWERED
+            status::READY | status::USB2_SUPPORTED | status::USB3_SUPPORTED | status::PORTS_POWERED,
         ),
         request::GET_PORT_COUNT => {
             let count = device.xhci_ctrl.max_ports() as u64;
             IpcResponse::simple(response::OK | (count << 16))
         }
-        request::GET_PORT_STATUS => IpcResponse::simple(handle_get_port_status(device, msg[0] as u8)),
+        request::GET_PORT_STATUS => {
+            IpcResponse::simple(handle_get_port_status(device, msg[0] as u8))
+        }
         request::LIST_DEVICES => IpcResponse::simple(handle_list_devices(device)),
         request::GET_INTERFACES => IpcResponse::simple(handle_get_interfaces(device, msg[0] as u8)),
         request::SET_PROTOCOL => {
             let device_addr = (msg[0] & 0xFF) as u8;
             let interface = ((msg[0] >> 8) & 0xFF) as u8;
             let protocol = ((msg[0] >> 16) & 0xFF) as u8;
-            IpcResponse::simple(handle_set_protocol(device, device_addr, interface, protocol))
+            IpcResponse::simple(handle_set_protocol(
+                device,
+                device_addr,
+                interface,
+                protocol,
+            ))
         }
         request::SET_IDLE => {
             let device_addr = (msg[0] & 0xFF) as u8;
             let interface = ((msg[0] >> 8) & 0xFF) as u8;
             let duration = ((msg[0] >> 16) & 0xFF) as u8;
             let report_id = ((msg[0] >> 24) & 0xFF) as u8;
-            IpcResponse::simple(handle_set_idle(device, device_addr, interface, duration, report_id))
+            IpcResponse::simple(handle_set_idle(
+                device,
+                device_addr,
+                interface,
+                duration,
+                report_id,
+            ))
         }
         request::START_INTERRUPT => {
             let packed = msg[0];
             let device_addr = (packed & 0xFF) as u8;
             let endpoint = ((packed >> 8) & 0xFF) as u8;
             let interval = ((packed >> 16) & 0xFFFF) as u16;
-            IpcResponse::simple(handle_start_interrupt(device, device_addr, endpoint, msg[1], interval))
+            IpcResponse::simple(handle_start_interrupt(
+                device,
+                device_addr,
+                endpoint,
+                msg[1],
+                interval,
+            ))
         }
-        request::STOP_INTERRUPT => IpcResponse::simple(handle_stop_interrupt(device, msg[0] as u8, msg[1] as u8)),
+        request::STOP_INTERRUPT => {
+            IpcResponse::simple(handle_stop_interrupt(device, msg[0] as u8, msg[1] as u8))
+        }
         request::GET_INTERRUPT_DATA => {
             handle_get_interrupt_data(device, msg[0] as u8, msg[1] as u8)
         }
@@ -329,7 +349,12 @@ fn handle_request(device: &mut XhciDevice, label: u64, msg: &[u64; 4]) -> IpcRes
 }
 
 /// Handle SET_PROTOCOL request (HID boot/report protocol)
-fn handle_set_protocol(device: &mut XhciDevice, device_addr: u8, interface: u8, protocol: u8) -> u64 {
+fn handle_set_protocol(
+    device: &mut XhciDevice,
+    device_addr: u8,
+    interface: u8,
+    protocol: u8,
+) -> u64 {
     ensure_enumerated(device);
 
     let idx = (device_addr as usize).saturating_sub(1);
@@ -357,7 +382,13 @@ fn handle_set_protocol(device: &mut XhciDevice, device_addr: u8, interface: u8, 
 }
 
 /// Handle SET_IDLE request (HID idle rate)
-fn handle_set_idle(device: &mut XhciDevice, device_addr: u8, interface: u8, duration: u8, report_id: u8) -> u64 {
+fn handle_set_idle(
+    device: &mut XhciDevice,
+    device_addr: u8,
+    interface: u8,
+    duration: u8,
+    report_id: u8,
+) -> u64 {
     ensure_enumerated(device);
 
     let idx = (device_addr as usize).saturating_sub(1);
@@ -489,7 +520,11 @@ fn ensure_enumerated(device: &mut XhciDevice) {
         };
 
         // Address the device
-        if let Err(_) = device.xhci_ctrl.address_device(slot_id, port_status.port, port_status.speed) {
+        if let Err(_) =
+            device
+                .xhci_ctrl
+                .address_device(slot_id, port_status.port, port_status.speed)
+        {
             continue;
         }
 
@@ -501,10 +536,14 @@ fn ensure_enumerated(device: &mut XhciDevice) {
 
         // Get configuration descriptor and parse interfaces
         let mut config_buf = [0u8; 256];
-        let interfaces = match device.xhci_ctrl.get_configuration_descriptor(slot_id, 0, &mut config_buf) {
-            Ok(len) => parse_interfaces(&config_buf[..len]),
-            Err(_) => alloc::vec::Vec::new(),
-        };
+        let interfaces =
+            match device
+                .xhci_ctrl
+                .get_configuration_descriptor(slot_id, 0, &mut config_buf)
+            {
+                Ok(len) => parse_interfaces(&config_buf[..len]),
+                Err(_) => alloc::vec::Vec::new(),
+            };
 
         let dev = UsbDeviceInfo {
             slot_id,
@@ -780,7 +819,11 @@ impl IpcResponse {
     }
 }
 
-fn handle_get_interrupt_data(device: &mut XhciDevice, device_addr: u8, endpoint: u8) -> IpcResponse {
+fn handle_get_interrupt_data(
+    device: &mut XhciDevice,
+    device_addr: u8,
+    endpoint: u8,
+) -> IpcResponse {
     // SAFETY: Single-threaded driver
     let transfers = unsafe { &mut *(&raw mut INTERRUPT_TRANSFERS) };
 
@@ -788,10 +831,10 @@ fn handle_get_interrupt_data(device: &mut XhciDevice, device_addr: u8, endpoint:
         if transfer.active && transfer.device_addr == device_addr && transfer.endpoint == endpoint {
             // Poll hardware for new data if configured
             if transfer.hw_configured && device.xhci_initialized {
-                if let Some((data, len)) = device.xhci_ctrl.poll_interrupt_data(
-                    transfer.slot_id,
-                    transfer.ep_idx as usize,
-                ) {
+                if let Some((data, len)) = device
+                    .xhci_ctrl
+                    .poll_interrupt_data(transfer.slot_id, transfer.ep_idx as usize)
+                {
                     // Store in transfer buffer
                     let copy_len = len.min(8);
                     transfer.buffer[..copy_len].copy_from_slice(&data[..copy_len]);
@@ -799,10 +842,9 @@ fn handle_get_interrupt_data(device: &mut XhciDevice, device_addr: u8, endpoint:
                     transfer.has_pending_data = true;
 
                     // Re-queue the transfer for continuous polling
-                    let _ = device.xhci_ctrl.queue_interrupt_transfer(
-                        transfer.slot_id,
-                        transfer.ep_idx as usize,
-                    );
+                    let _ = device
+                        .xhci_ctrl
+                        .queue_interrupt_transfer(transfer.slot_id, transfer.ep_idx as usize);
                 }
             }
 

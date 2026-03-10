@@ -80,7 +80,7 @@ pub fn handle_timer_control_get(args: &SyscallArgs) -> SyscallResult {
             ObjectType::Timer,
             CapRights::ALL,
             Badge::NONE,
-            SlotFlags::IS_ORIGINAL,
+            SlotFlags::IS_ORIGINAL.with(SlotFlags::IN_CDT),
         );
         Ok(())
     });
@@ -91,6 +91,23 @@ pub fn handle_timer_control_get(args: &SyscallArgs) -> SyscallResult {
         unsafe { object_table::free(timer_ref) };
         return Err(e);
     }
+
+    // Register CDT node for the new capability
+    crate::cap::cdt_storage::with_cdt(|cdt| {
+        use m6_cap::CdtOps;
+        if let Some(node_id) = cdt.alloc_node() {
+            if let Some(node) = cdt.get_node_mut(node_id) {
+                node.object_ref = timer_ref;
+                node.slot_cnode = dest_loc.cnode_ref;
+                node.slot_index = dest_index as u32;
+            }
+            crate::cap::cdt_storage::register_cdt_node(
+                dest_loc.cnode_ref,
+                dest_index as u32,
+                node_id,
+            );
+        }
+    });
 
     // Increment reference count
     object_table::with_table(|table| table.inc_ref(timer_ref));

@@ -253,9 +253,18 @@ mod tests {
 
     #[test_case]
     fn test_phys_page_align_down() {
-        assert_eq!(PhysAddr::new(0x1000).page_align_down(), PhysAddr::new(0x1000));
-        assert_eq!(PhysAddr::new(0x1001).page_align_down(), PhysAddr::new(0x1000));
-        assert_eq!(PhysAddr::new(0x1FFF).page_align_down(), PhysAddr::new(0x1000));
+        assert_eq!(
+            PhysAddr::new(0x1000).page_align_down(),
+            PhysAddr::new(0x1000)
+        );
+        assert_eq!(
+            PhysAddr::new(0x1001).page_align_down(),
+            PhysAddr::new(0x1000)
+        );
+        assert_eq!(
+            PhysAddr::new(0x1FFF).page_align_down(),
+            PhysAddr::new(0x1000)
+        );
         assert_eq!(PhysAddr::new(0).page_align_down(), PhysAddr::new(0));
     }
 
@@ -319,7 +328,10 @@ mod tests {
 
     #[test_case]
     fn test_virt_page_align_down() {
-        assert_eq!(VirtAddr::new(0x1FFF).page_align_down(), VirtAddr::new(0x1000));
+        assert_eq!(
+            VirtAddr::new(0x1FFF).page_align_down(),
+            VirtAddr::new(0x1000)
+        );
         assert_eq!(VirtAddr::new(0).page_align_down(), VirtAddr::new(0));
     }
 

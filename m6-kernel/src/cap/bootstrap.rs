@@ -21,7 +21,7 @@ extern crate alloc;
 use core::mem::ManuallyDrop;
 
 use m6_cap::{
-    Badge, CNodeGuard, CNodeOps, CapRights, CapSlot, ObjectRef, ObjectType, SlotFlags,
+    Badge, CNodeGuard, CNodeOps, CapRights, CapSlot, CdtOps, ObjectRef, ObjectType, SlotFlags,
     objects::{
         Asid, AsidPoolObject, IrqControlObject, TimerControlObject, UntypedObject, VSpaceObject,
     },
@@ -116,6 +116,7 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
             cnode_ref,
             ObjectType::CNode,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -126,6 +127,7 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
             tcb_ref,
             ObjectType::TCB,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -136,6 +138,7 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
             vspace_ref,
             ObjectType::VSpace,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -146,6 +149,7 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
             irq_control_ref,
             ObjectType::IRQControl,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -155,6 +159,7 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
             asid_control_ref,
             ObjectType::ASIDControl,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -164,6 +169,7 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
             sched_control_ref,
             ObjectType::SchedControl,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -173,6 +179,7 @@ pub fn bootstrap_root_task() -> BootstrapResult<RootTask> {
             timer_control_ref,
             ObjectType::TimerControl,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -365,13 +372,14 @@ fn create_smmu_controls() -> BootstrapResult<alloc::vec::Vec<ObjectRef>> {
     Ok(smmu_refs)
 }
 
-/// Install a capability in a CNode slot.
+/// Install a capability in a CNode slot with CDT registration.
 fn install_cap(
     cnode: &mut CNodeStorage,
     slot: usize,
     obj_ref: ObjectRef,
     obj_type: ObjectType,
     rights: CapRights,
+    cnode_ref: ObjectRef,
 ) {
     if let Some(cap_slot) = cnode.get_slot_mut(slot) {
         *cap_slot = CapSlot::new(
@@ -379,9 +387,21 @@ fn install_cap(
             obj_type,
             rights,
             Badge::NONE,
-            SlotFlags::IS_ORIGINAL,
+            SlotFlags::IS_ORIGINAL.with(SlotFlags::IN_CDT),
         );
         cnode.meta_mut().increment_used();
+
+        // Register CDT node for this capability
+        super::cdt_storage::with_cdt(|cdt| {
+            if let Some(node_id) = cdt.alloc_node() {
+                if let Some(node) = cdt.get_node_mut(node_id) {
+                    node.object_ref = obj_ref;
+                    node.slot_cnode = cnode_ref;
+                    node.slot_index = slot as u32;
+                }
+                super::cdt_storage::register_cdt_node(cnode_ref, slot as u32, node_id);
+            }
+        });
     }
 }
 
@@ -399,6 +419,7 @@ fn create_untyped_cap_with_table(
     phys_base: PhysAddr,
     size_bits: u8,
     is_device: bool,
+    cnode_ref: ObjectRef,
 ) -> BootstrapResult<ObjectRef> {
     // Allocate object table entry using the passed-in table
     let obj_ref = table
@@ -411,7 +432,14 @@ fn create_untyped_cap_with_table(
     }
 
     // Install capability
-    install_cap(cnode, slot, obj_ref, ObjectType::Untyped, CapRights::ALL);
+    install_cap(
+        cnode,
+        slot,
+        obj_ref,
+        ObjectType::Untyped,
+        CapRights::ALL,
+        cnode_ref,
+    );
 
     Ok(obj_ref)
 }
@@ -536,6 +564,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
             cnode_ref,
             ObjectType::CNode,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -545,6 +574,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
             tcb_ref,
             ObjectType::TCB,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -554,6 +584,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
             vspace_ref,
             ObjectType::VSpace,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -563,6 +594,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
             irq_control_ref,
             ObjectType::IRQControl,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -572,6 +604,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
             asid_control_ref,
             ObjectType::ASIDControl,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -581,6 +614,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
             sched_control_ref,
             ObjectType::SchedControl,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -590,6 +624,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
             asid_pool_ref,
             ObjectType::ASIDPool,
             CapRights::ALL,
+            cnode_ref,
         );
         cap_count += 1;
 
@@ -601,18 +636,19 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
                 *smmu_ref,
                 ObjectType::SmmuControl,
                 CapRights::ALL,
+                cnode_ref,
             );
             cap_count += 1;
-            log::debug!("Installed SMMU #{} control capability at slot {}", index, BootSlot::smmu_control(index));
+            log::debug!(
+                "Installed SMMU #{} control capability at slot {}",
+                index,
+                BootSlot::smmu_control(index)
+            );
         }
 
         log::debug!("Installed {} control capabilities", cap_count);
 
         // Create untyped capability (using table-aware version to avoid deadlock)
-        // log::debug!(
-        //     "Creating untyped capability at slot {}...",
-        //     BootSlot::FirstUntyped as usize
-        // );
         let untyped_ref = create_untyped_cap_with_table(
             table,
             cnode,
@@ -620,6 +656,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
             PhysAddr::new(untyped_phys),
             UNTYPED_SIZE_BITS,
             false, // not device memory
+            cnode_ref,
         )?;
         cap_count += 1;
         untyped_count = 1;
@@ -646,6 +683,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
                 region.phys_base,
                 region.size_bits,
                 true, // device memory
+                cnode_ref,
             )?;
             cap_count += 1;
             untyped_count += 1;

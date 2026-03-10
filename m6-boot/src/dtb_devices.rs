@@ -371,7 +371,9 @@ pub fn parse_device_regions(
             .iter()
             .any(|r| r.phys_base.as_u64() == USBDPPHY0_BASE);
 
-        if !has_usbdpphy0 && !ram_regions.overlaps_ram(USBDPPHY0_BASE, USBDPPHY0_BASE + USBDPPHY_SIZE) {
+        if !has_usbdpphy0
+            && !ram_regions.overlaps_ram(USBDPPHY0_BASE, USBDPPHY0_BASE + USBDPPHY_SIZE)
+        {
             let region = DeviceRegion {
                 phys_base: PhysAddr::new(USBDPPHY0_BASE),
                 size: USBDPPHY_SIZE,
@@ -379,7 +381,10 @@ pub fn parse_device_regions(
                 device_type: DeviceType::Phy,
                 _reserved: [0; 6],
             };
-            log::info!("Adding RK3588 USBDPPHY0 at {:#x} (not in DTB)", USBDPPHY0_BASE);
+            log::info!(
+                "Adding RK3588 USBDPPHY0 at {:#x} (not in DTB)",
+                USBDPPHY0_BASE
+            );
             result.add(region);
         }
 
@@ -389,7 +394,9 @@ pub fn parse_device_regions(
             .iter()
             .any(|r| r.phys_base.as_u64() == USBDPPHY1_BASE);
 
-        if !has_usbdpphy1 && !ram_regions.overlaps_ram(USBDPPHY1_BASE, USBDPPHY1_BASE + USBDPPHY_SIZE) {
+        if !has_usbdpphy1
+            && !ram_regions.overlaps_ram(USBDPPHY1_BASE, USBDPPHY1_BASE + USBDPPHY_SIZE)
+        {
             let region = DeviceRegion {
                 phys_base: PhysAddr::new(USBDPPHY1_BASE),
                 size: USBDPPHY_SIZE,
@@ -397,7 +404,10 @@ pub fn parse_device_regions(
                 device_type: DeviceType::Phy,
                 _reserved: [0; 6],
             };
-            log::info!("Adding RK3588 USBDPPHY1 at {:#x} (not in DTB)", USBDPPHY1_BASE);
+            log::info!(
+                "Adding RK3588 USBDPPHY1 at {:#x} (not in DTB)",
+                USBDPPHY1_BASE
+            );
             result.add(region);
         }
     }

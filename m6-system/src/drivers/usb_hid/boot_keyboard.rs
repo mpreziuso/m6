@@ -3,9 +3,7 @@
 //! Parses 8-byte boot protocol keyboard reports and generates
 //! InputEvent sequences for key press/release events.
 
-use crate::input_event::{
-    hid_to_keycode, modifier, modifier_to_keycode, InputEvent, KEY_RESERVED,
-};
+use crate::input_event::{InputEvent, KEY_RESERVED, hid_to_keycode, modifier, modifier_to_keycode};
 
 /// Maximum number of simultaneous keys in boot protocol
 const MAX_KEYS: usize = 6;
@@ -49,10 +47,7 @@ impl BootKeyboardReport {
 
     /// Iterate over pressed key codes (non-zero, excluding rollover)
     pub fn pressed_keys(&self) -> impl Iterator<Item = u8> + '_ {
-        self.keys
-            .iter()
-            .copied()
-            .filter(|&k| k != 0 && k != 0x01)
+        self.keys.iter().copied().filter(|&k| k != 0 && k != 0x01)
     }
 }
 

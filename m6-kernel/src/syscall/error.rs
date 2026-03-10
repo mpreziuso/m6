@@ -36,6 +36,7 @@ pub fn cap_error_to_syscall(e: CapError) -> SyscallError {
         CapError::ObjectNotFound => SyscallError::Revoked,
         CapError::InvalidOperation => SyscallError::NotSupported,
         CapError::InvalidState => SyscallError::InvalidState,
+        CapError::InvalidArgument => SyscallError::InvalidArg,
     }
 }
 

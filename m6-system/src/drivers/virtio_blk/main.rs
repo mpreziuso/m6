@@ -168,7 +168,11 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
         }
     }
 
-    log::info!("Found VirtIO block device (vendor={:#x}, version={})", dev_mmio.vendor_id(), dev_mmio.version());
+    log::info!(
+        "Found VirtIO block device (vendor={:#x}, version={})",
+        dev_mmio.vendor_id(),
+        dev_mmio.version()
+    );
 
     // Initialise device with DMA buffers
     // Use first 4KB for virtqueue structures, rest for data
@@ -187,7 +191,11 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
 
     // Report device info
     let config = device.config();
-    log::info!("Capacity: {} sectors ({} MiB)", config.capacity, config.capacity_bytes() / (1024 * 1024));
+    log::info!(
+        "Capacity: {} sectors ({} MiB)",
+        config.capacity,
+        config.capacity_bytes() / (1024 * 1024)
+    );
 
     if device.is_read_only() {
         log::info!("Device is read-only");

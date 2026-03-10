@@ -67,7 +67,11 @@ impl XhciCapRegs {
     /// Get context size (0 = 32 bytes, 1 = 64 bytes)
     #[inline]
     pub fn context_size(&self) -> usize {
-        if (self.hccparams1 & 0x04) != 0 { 64 } else { 32 }
+        if (self.hccparams1 & 0x04) != 0 {
+            64
+        } else {
+            32
+        }
     }
 
     /// Get page size (power of 2)
@@ -277,10 +281,10 @@ impl PortSpeed {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum LinkState {
-    U0 = 0,      // On (USB3) / Enabled (USB2)
-    U1 = 1,      // Standby (USB3 only)
-    U2 = 2,      // Sleep (USB3 only)
-    U3 = 3,      // Suspend
+    U0 = 0, // On (USB3) / Enabled (USB2)
+    U1 = 1, // Standby (USB3 only)
+    U2 = 2, // Sleep (USB3 only)
+    U3 = 3, // Suspend
     Disabled = 4,
     RxDetect = 5,
     Inactive = 6,
@@ -756,7 +760,9 @@ impl XhciController {
                     if bios_sem != 0 || os_sem == 0 {
                         // Claim OS ownership: set bit 24, preserve other bits
                         let claim = usblegsup | (1 << 24);
-                        unsafe { write_volatile(ecp_ptr as *mut u32, claim); }
+                        unsafe {
+                            write_volatile(ecp_ptr as *mut u32, claim);
+                        }
 
                         // Wait for BIOS to release (bit 16 to clear)
                         let mut released = false;
@@ -772,13 +778,18 @@ impl XhciController {
                         if !released {
                             // Force-clear BIOS ownership (no SMI handler on ARM)
                             let forced = (unsafe { read_volatile(ecp_ptr as *const u32) })
-                                & !(1u32 << 16) | (1u32 << 24);
-                            unsafe { write_volatile(ecp_ptr as *mut u32, forced); }
+                                & !(1u32 << 16)
+                                | (1u32 << 24);
+                            unsafe {
+                                write_volatile(ecp_ptr as *mut u32, forced);
+                            }
                         }
                     }
                 }
 
-                if next == 0 { break; }
+                if next == 0 {
+                    break;
+                }
                 ecp_ptr += next * 4;
             }
         }
@@ -1103,7 +1114,10 @@ impl XhciController {
     ///
     /// Returns the completion TRB on success.
     pub fn submit_command(&mut self, trb: &Trb) -> Result<CommandCompletionTrb, &'static str> {
-        let ring = self.command_ring.as_mut().ok_or("Command ring not initialized")?;
+        let ring = self
+            .command_ring
+            .as_mut()
+            .ok_or("Command ring not initialized")?;
 
         // Write TRB to command ring
         let trb_addr = ring.vaddr + (ring.enqueue_idx * 16) as u64;
@@ -1139,7 +1153,9 @@ impl XhciController {
                 if event.trb_type() == trb_type::COMMAND_COMPLETION {
                     // SAFETY: We've verified the TRB type
                     let completion = unsafe {
-                        core::ptr::read_unaligned(&event as *const Trb as *const CommandCompletionTrb)
+                        core::ptr::read_unaligned(
+                            &event as *const Trb as *const CommandCompletionTrb,
+                        )
                     };
                     return Ok(completion);
                 }
@@ -1328,7 +1344,7 @@ impl XhciController {
                 status: 0,
                 control: (trb_type::LINK as u32) << 10
                     | (1 << 1) // Toggle Cycle (TC)
-                    | 1,       // Cycle bit = 1 (matches initial DCS)
+                    | 1, // Cycle bit = 1 (matches initial DCS)
             };
             write_volatile(link_trb_addr as *mut Trb, link_trb);
         }
@@ -1349,7 +1365,7 @@ impl XhciController {
         // Determine max packet size based on speed
         let max_packet_size: u16 = match speed {
             PortSpeed::Low => 8,
-            PortSpeed::Full => 8,   // Start with 8, update after GET_DESCRIPTOR
+            PortSpeed::Full => 8, // Start with 8, update after GET_DESCRIPTOR
             PortSpeed::High => 64,
             PortSpeed::Super | PortSpeed::SuperPlus => 512,
             PortSpeed::Unknown => 8,
@@ -1386,9 +1402,9 @@ impl XhciController {
         // info2 (Dword 1): CErr[2:1]=3, EP Type[5:3]=4 (Control Bidir), Max Packet Size[31:16]
         // TR Dequeue Pointer with DCS=1 (Dequeue Cycle State)
         let ep0_ctx = EndpointContext {
-            info1: 0, // EP State will be set by HC
+            info1: 0,                                                      // EP State will be set by HC
             info2: (3 << 1) | (4 << 3) | ((max_packet_size as u32) << 16), // CErr=3, EP Type=4, MaxPacketSize
-            tr_dequeue_lo: (ep0_ring_iova | 1) as u32, // DCS=1
+            tr_dequeue_lo: (ep0_ring_iova | 1) as u32,                     // DCS=1
             tr_dequeue_hi: (ep0_ring_iova >> 32) as u32,
             info3: 8, // Average TRB length = 8 bytes for control
             _reserved: [0; 3],
@@ -1623,11 +1639,14 @@ impl XhciController {
                         // This is our control transfer completion
                         // SAFETY: We've verified the TRB type
                         let transfer_event = unsafe {
-                            core::ptr::read_unaligned(&event as *const Trb as *const TransferEventTrb)
+                            core::ptr::read_unaligned(
+                                &event as *const Trb as *const TransferEventTrb,
+                            )
                         };
 
                         let code = transfer_event.completion_code();
-                        if code != completion_code::SUCCESS && code != completion_code::SHORT_PACKET {
+                        if code != completion_code::SUCCESS && code != completion_code::SHORT_PACKET
+                        {
                             if code == completion_code::STALL_ERROR {
                                 let _ = self.reset_endpoint(slot_id, 1);
                                 return Err("Stall error (recovered)");
@@ -1637,7 +1656,8 @@ impl XhciController {
 
                         let bytes_transferred = if is_in {
                             let _ = cache_invalidate(data_buffer_vaddr, length as usize);
-                            let actual_len = (length as usize) - (transfer_event.residual_length() as usize);
+                            let actual_len =
+                                (length as usize) - (transfer_event.residual_length() as usize);
                             let copy_len = actual_len.min(data.len());
                             // SAFETY: Scratch buffer and data are valid
                             unsafe {
@@ -1723,7 +1743,7 @@ impl XhciController {
                     status: 0,
                     control: (trb_type::LINK as u32) << 10
                         | (1 << 1) // Toggle Cycle (TC)
-                        | 1,       // Cycle bit = 1 (matches initial DCS)
+                        | 1, // Cycle bit = 1 (matches initial DCS)
                 };
                 write_volatile(link_trb_addr as *mut Trb, link_trb);
             }
@@ -1755,10 +1775,7 @@ impl XhciController {
     /// Get device descriptor from a device.
     ///
     /// Returns the device descriptor on success.
-    pub fn get_device_descriptor(
-        &mut self,
-        slot_id: u8,
-    ) -> Result<DeviceDescriptor, &'static str> {
+    pub fn get_device_descriptor(&mut self, slot_id: u8) -> Result<DeviceDescriptor, &'static str> {
         let mut buf = [0u8; 18];
         let len = self.control_transfer(
             slot_id,
@@ -1906,8 +1923,7 @@ impl XhciController {
             let link_trb = Trb {
                 param: ring_iova,
                 status: 0,
-                control: (trb_type::LINK as u32) << 10
-                    | (1 << 1), // Toggle Cycle; C=0 (initial cycle is 1, link has 0 to stop pre-fetch)
+                control: (trb_type::LINK as u32) << 10 | (1 << 1), // Toggle Cycle; C=0 (initial cycle is 1, link has 0 to stop pre-fetch)
             };
             write_volatile(link_addr as *mut Trb, link_trb);
         }
@@ -1950,12 +1966,8 @@ impl XhciController {
             let ep_ctx_offset = self.context_size as u64 * (ep_dci as u64 + 1);
             let ep_ctx_addr = input_ctx_vaddr + ep_ctx_offset;
 
-            let ep_ctx = EndpointContext::for_interrupt_in(
-                max_packet_size,
-                ring_iova,
-                interval,
-                speed,
-            );
+            let ep_ctx =
+                EndpointContext::for_interrupt_in(max_packet_size, ring_iova, interval, speed);
             write_volatile(ep_ctx_addr as *mut EndpointContext, ep_ctx);
         }
 
@@ -2198,11 +2210,7 @@ impl XhciController {
     /// * `ep_idx` - Endpoint index
     ///
     /// Returns Some((data, length)) if data is available, None otherwise.
-    pub fn poll_interrupt_data(
-        &mut self,
-        slot_id: u8,
-        ep_idx: usize,
-    ) -> Option<([u8; 8], usize)> {
+    pub fn poll_interrupt_data(&mut self, slot_id: u8, ep_idx: usize) -> Option<([u8; 8], usize)> {
         if slot_id == 0 || slot_id as usize > MAX_DEVICE_SLOTS {
             return None;
         }
@@ -2322,27 +2330,16 @@ impl XhciController {
                 // SAFETY: MMIO is mapped
                 unsafe {
                     // Write ERDP Hi first, then Lo with EHB=1 (RW1C) to clear
-                    write_volatile(
-                        (intr0_base + 0x1C) as *mut u32,
-                        (erdp >> 32) as u32,
-                    );
-                    write_volatile(
-                        (intr0_base + 0x18) as *mut u32,
-                        (erdp as u32 & !0xF) | 0x8,
-                    );
+                    write_volatile((intr0_base + 0x1C) as *mut u32, (erdp >> 32) as u32);
+                    write_volatile((intr0_base + 0x18) as *mut u32, (erdp as u32 & !0xF) | 0x8);
                     // Clear IMAN.IP (bit 0, RW1C) and ensure IE (bit 1) stays set
                     write_volatile(intr0_base as *mut u32, 0x3);
 
                     // Drain DWC3 event buffer to prevent overflow.
                     // Write back GEVNTCOUNT to acknowledge consumed events.
-                    let gevntcount = read_volatile(
-                        (self.mmio_base + 0xC40C) as *const u32
-                    );
+                    let gevntcount = read_volatile((self.mmio_base + 0xC40C) as *const u32);
                     if gevntcount != 0 {
-                        write_volatile(
-                            (self.mmio_base + 0xC40C) as *mut u32,
-                            gevntcount,
-                        );
+                        write_volatile((self.mmio_base + 0xC40C) as *mut u32, gevntcount);
                     }
                 }
             }
@@ -2444,7 +2441,6 @@ impl XhciController {
                 write_volatile((op_base + 0x04) as *mut u32, 1 << 3);
             }
         }
-
     }
 
     /// Find endpoint index by endpoint address.
@@ -2535,7 +2531,11 @@ impl XhciController {
     }
 
     /// Debug dump of interrupt endpoint state.
-    pub fn debug_interrupt_ep(&self, slot_id: u8, ep_idx: usize) -> Option<(u8, u8, bool, usize, bool)> {
+    pub fn debug_interrupt_ep(
+        &self,
+        slot_id: u8,
+        ep_idx: usize,
+    ) -> Option<(u8, u8, bool, usize, bool)> {
         if slot_id == 0 || slot_id as usize > MAX_DEVICE_SLOTS {
             return None;
         }
@@ -2548,7 +2548,13 @@ impl XhciController {
         }
 
         let ep = &slot.interrupt_eps[ep_idx];
-        Some((ep.endpoint_addr, ep.endpoint_id, ep.active, ep.enqueue_idx, ep.has_pending))
+        Some((
+            ep.endpoint_addr,
+            ep.endpoint_id,
+            ep.active,
+            ep.enqueue_idx,
+            ep.has_pending,
+        ))
     }
 
     /// Get DCBAA virtual address
@@ -2958,14 +2964,8 @@ impl XhciController {
             // SAFETY: MMIO is mapped
             unsafe {
                 // Write Hi first, then Lo with EHB=1 (RW1C) to clear
-                write_volatile(
-                    (intr0_base + 0x1C) as *mut u32,
-                    (erdp >> 32) as u32,
-                );
-                write_volatile(
-                    (intr0_base + 0x18) as *mut u32,
-                    (erdp as u32 & !0xF) | 0x8,
-                );
+                write_volatile((intr0_base + 0x1C) as *mut u32, (erdp >> 32) as u32);
+                write_volatile((intr0_base + 0x18) as *mut u32, (erdp as u32 & !0xF) | 0x8);
                 // Clear IP, ensure IE stays set
                 write_volatile(intr0_base as *mut u32, 0x3);
             }
@@ -3053,7 +3053,11 @@ pub struct Trb {
 impl Trb {
     /// Create an empty TRB
     pub const fn new() -> Self {
-        Self { param: 0, status: 0, control: 0 }
+        Self {
+            param: 0,
+            status: 0,
+            control: 0,
+        }
     }
 
     /// Get TRB type from control field

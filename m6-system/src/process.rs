@@ -746,17 +746,45 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
     next_slot = vspace_builder.next_free_slot;
 
     // Grant initial capabilities to child's CSpace (slots 0=CSpace, 1=TCB, 2=VSpace)
-    cap_copy(cptr(cspace_slot), 0, 0, cptr(config.root_cnode), cspace_slot, 0)
-        .map_err(SpawnError::CapCopyFailed)?;
-    cap_copy(cptr(cspace_slot), 1, 0, cptr(config.root_cnode), tcb_slot, 0)
-        .map_err(SpawnError::CapCopyFailed)?;
-    cap_copy(cptr(cspace_slot), 2, 0, cptr(config.root_cnode), vspace_slot, 0)
-        .map_err(SpawnError::CapCopyFailed)?;
+    cap_copy(
+        cptr(cspace_slot),
+        0,
+        0,
+        cptr(config.root_cnode),
+        cspace_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)?;
+    cap_copy(
+        cptr(cspace_slot),
+        1,
+        0,
+        cptr(config.root_cnode),
+        tcb_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)?;
+    cap_copy(
+        cptr(cspace_slot),
+        2,
+        0,
+        cptr(config.root_cnode),
+        vspace_slot,
+        0,
+    )
+    .map_err(SpawnError::CapCopyFailed)?;
 
     // Copy user-specified initial capabilities
     for cap in config.initial_caps {
-        cap_copy(cptr(cspace_slot), cap.dst_slot, 0, cptr(config.root_cnode), cap.src_slot, 0)
-            .map_err(SpawnError::CapCopyFailed)?;
+        cap_copy(
+            cptr(cspace_slot),
+            cap.dst_slot,
+            0,
+            cptr(config.root_cnode),
+            cap.src_slot,
+            0,
+        )
+        .map_err(SpawnError::CapCopyFailed)?;
     }
 
     // Configure TCB

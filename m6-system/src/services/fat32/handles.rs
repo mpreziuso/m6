@@ -221,7 +221,10 @@ impl HandleTable {
     /// Get mutable reference to a cached directory's DirCache (validates badge and type)
     pub fn get_dir_cache_mut(&mut self, handle: u32, badge: u64) -> Option<&mut DirCache> {
         let entry = self.entries.get_mut(handle as usize)?;
-        if !entry.is_used() || entry.badge != badge || entry.handle_type != HandleType::CachedDirectory {
+        if !entry.is_used()
+            || entry.badge != badge
+            || entry.handle_type != HandleType::CachedDirectory
+        {
             return None;
         }
         entry.dir_cache.as_deref_mut()

@@ -43,9 +43,7 @@ pub fn do_send(
         WouldBlock,
     }
 
-    let action = match object_table::ipc_dequeue_recv(ep_ref)
-        .ok_or(SyscallError::InvalidCap)?
-    {
+    let action = match object_table::ipc_dequeue_recv(ep_ref).ok_or(SyscallError::InvalidCap)? {
         object_table::IpcDequeueResult::Dequeued(receiver_ref) => Action::DeliverTo(receiver_ref),
         object_table::IpcDequeueResult::NoneQueued { old_tail } => {
             if !blocking {
@@ -111,7 +109,9 @@ pub fn do_send(
 
                 // Transfer capabilities if Grant right present.
                 if let Err(e) = super::cap_transfer::transfer_capabilities(
-                    sender_ref, info.receiver_ref, has_grant,
+                    sender_ref,
+                    info.receiver_ref,
+                    has_grant,
                 ) {
                     log::debug!("Capability transfer failed during send recovery: {:?}", e);
                 }
@@ -172,9 +172,7 @@ pub fn do_recv(
         WouldBlock,
     }
 
-    let action = match object_table::ipc_dequeue_send(ep_ref)
-        .ok_or(SyscallError::InvalidCap)?
-    {
+    let action = match object_table::ipc_dequeue_send(ep_ref).ok_or(SyscallError::InvalidCap)? {
         object_table::IpcDequeueResult::Dequeued(sender_ref) => Action::ReceiveFrom(sender_ref),
         object_table::IpcDequeueResult::NoneQueued { old_tail } => {
             if !blocking {
@@ -272,7 +270,9 @@ pub fn do_recv(
 
                     // Transfer capabilities if Grant right present.
                     if let Err(e) = super::cap_transfer::transfer_capabilities(
-                        info.sender_ref, receiver_ref, has_grant,
+                        info.sender_ref,
+                        receiver_ref,
+                        has_grant,
                     ) {
                         log::debug!("Capability transfer failed during recv recovery: {:?}", e);
                     }
@@ -342,9 +342,7 @@ pub fn do_call(
         BlockInSendQueue { old_tail: ObjectRef },
     }
 
-    let action = match object_table::ipc_dequeue_recv(ep_ref)
-        .ok_or(SyscallError::InvalidCap)?
-    {
+    let action = match object_table::ipc_dequeue_recv(ep_ref).ok_or(SyscallError::InvalidCap)? {
         object_table::IpcDequeueResult::Dequeued(receiver_ref) => Action::DeliverTo(receiver_ref),
         object_table::IpcDequeueResult::NoneQueued { old_tail } => {
             Action::BlockInSendQueue { old_tail }
@@ -405,7 +403,9 @@ pub fn do_call(
 
                 // Transfer capabilities if Grant right present.
                 if let Err(e) = super::cap_transfer::transfer_capabilities(
-                    caller_ref, info.receiver_ref, has_grant,
+                    caller_ref,
+                    info.receiver_ref,
+                    has_grant,
                 ) {
                     log::debug!("Capability transfer failed during call recovery: {:?}", e);
                 }

@@ -228,9 +228,7 @@ fn dispatch_irq_handler(label: u64, args: &SyscallArgs) -> SyscallResult {
     match label {
         method::irq_handler::ACK => irq_ops::handle_irq_ack(&shift_args(args)),
         method::irq_handler::SET_HANDLER => irq_ops::handle_irq_set_handler(&shift_args(args)),
-        method::irq_handler::CLEAR_HANDLER => {
-            irq_ops::handle_irq_clear_handler(&shift_args(args))
-        }
+        method::irq_handler::CLEAR_HANDLER => irq_ops::handle_irq_clear_handler(&shift_args(args)),
         _ => Err(SyscallError::InvalidArg),
     }
 }
@@ -242,9 +240,7 @@ fn dispatch_irq_control(
 ) -> SyscallResult {
     match label {
         method::irq_control::GET => irq_ops::handle_irq_control_get(&shift_args(args)),
-        method::irq_control::MSI_ALLOCATE => {
-            irq_ops::handle_msi_allocate(&shift_args(args), ctx)
-        }
+        method::irq_control::MSI_ALLOCATE => irq_ops::handle_msi_allocate(&shift_args(args), ctx),
         _ => Err(SyscallError::InvalidArg),
     }
 }
@@ -268,9 +264,7 @@ fn dispatch_timer(label: u64, args: &SyscallArgs) -> SyscallResult {
 
 fn dispatch_smmu_control(label: u64, args: &SyscallArgs) -> SyscallResult {
     match label {
-        method::smmu_control::CREATE_IOSPACE => {
-            iommu_ops::handle_iospace_create(&shift_args(args))
-        }
+        method::smmu_control::CREATE_IOSPACE => iommu_ops::handle_iospace_create(&shift_args(args)),
         _ => Err(SyscallError::InvalidArg),
     }
 }
@@ -280,9 +274,7 @@ fn dispatch_iospace(label: u64, args: &SyscallArgs) -> SyscallResult {
         method::iospace::CREATE_DMA_POOL => iommu_ops::handle_dma_pool_create(&shift_args(args)),
         method::iospace::MAP_FRAME => iommu_ops::handle_iospace_map_frame(&shift_args(args)),
         method::iospace::UNMAP_FRAME => iommu_ops::handle_iospace_unmap_frame(&shift_args(args)),
-        method::iospace::BIND_STREAM => {
-            iommu_ops::handle_iospace_bind_stream(&shift_args(args))
-        }
+        method::iospace::BIND_STREAM => iommu_ops::handle_iospace_bind_stream(&shift_args(args)),
         method::iospace::UNBIND_STREAM => {
             iommu_ops::handle_iospace_unbind_stream(&shift_args(args))
         }

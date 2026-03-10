@@ -368,7 +368,9 @@ impl ObjectTable {
                 match ep.state {
                     EndpointState::RecvQueue => ep.queue_head,
                     EndpointState::Idle | EndpointState::SendQueue => {
-                        return Some(IpcDequeueResult::NoneQueued { old_tail: ep.queue_tail });
+                        return Some(IpcDequeueResult::NoneQueued {
+                            old_tail: ep.queue_tail,
+                        });
                     }
                 }
             }
@@ -434,7 +436,9 @@ impl ObjectTable {
                 };
                 if !next_tcb_ptr.is_null() {
                     // SAFETY: TcbFull is heap-allocated and valid; we hold the table lock.
-                    unsafe { (*next_tcb_ptr).ipc_prev = ObjectRef::NULL; }
+                    unsafe {
+                        (*next_tcb_ptr).ipc_prev = ObjectRef::NULL;
+                    }
                 }
             }
         }
@@ -468,7 +472,9 @@ impl ObjectTable {
                 match ep.state {
                     EndpointState::SendQueue => ep.queue_head,
                     EndpointState::Idle | EndpointState::RecvQueue => {
-                        return Some(IpcDequeueResult::NoneQueued { old_tail: ep.queue_tail });
+                        return Some(IpcDequeueResult::NoneQueued {
+                            old_tail: ep.queue_tail,
+                        });
                     }
                 }
             }
@@ -533,7 +539,9 @@ impl ObjectTable {
                 };
                 if !next_tcb_ptr.is_null() {
                     // SAFETY: TcbFull is heap-allocated and valid; we hold the table lock.
-                    unsafe { (*next_tcb_ptr).ipc_prev = ObjectRef::NULL; }
+                    unsafe {
+                        (*next_tcb_ptr).ipc_prev = ObjectRef::NULL;
+                    }
                 }
             }
         }
@@ -613,7 +621,9 @@ impl ObjectTable {
             let next_ptr = self.tcb_ptr(next);
             if !next_ptr.is_null() {
                 // SAFETY: valid TCB, we hold the table lock.
-                unsafe { (*next_ptr).ipc_prev = ObjectRef::NULL; }
+                unsafe {
+                    (*next_ptr).ipc_prev = ObjectRef::NULL;
+                }
             }
         }
 
@@ -651,7 +661,9 @@ impl ObjectTable {
                     let ptr = self.tcb_ptr(old_tail);
                     if !ptr.is_null() {
                         // SAFETY: valid TCB, we hold the table lock.
-                        unsafe { (*ptr).ipc_next = ObjectRef::NULL; }
+                        unsafe {
+                            (*ptr).ipc_next = ObjectRef::NULL;
+                        }
                     }
                 }
 
@@ -713,7 +725,9 @@ impl ObjectTable {
                     let ptr = self.tcb_ptr(old_tail);
                     if !ptr.is_null() {
                         // SAFETY: valid TCB, we hold the table lock.
-                        unsafe { (*ptr).ipc_next = ObjectRef::NULL; }
+                        unsafe {
+                            (*ptr).ipc_next = ObjectRef::NULL;
+                        }
                     }
                 }
 
@@ -1231,7 +1245,9 @@ pub fn ipc_recv_commit(
     receiver_ref: ObjectRef,
     old_tail: ObjectRef,
 ) -> Option<IpcRecvCommitResult> {
-    get_table().lock().ipc_recv_commit(ep_ref, receiver_ref, old_tail)
+    get_table()
+        .lock()
+        .ipc_recv_commit(ep_ref, receiver_ref, old_tail)
 }
 
 /// Commit phase for do_send / do_call: enqueue sender or recover from RecvQueue.
@@ -1243,7 +1259,9 @@ pub fn ipc_send_commit(
     sender_ref: ObjectRef,
     old_tail: ObjectRef,
 ) -> Option<IpcSendCommitResult> {
-    get_table().lock().ipc_send_commit(ep_ref, sender_ref, old_tail)
+    get_table()
+        .lock()
+        .ipc_send_commit(ep_ref, sender_ref, old_tail)
 }
 
 /// Access a PageTable with a closure (read-only).

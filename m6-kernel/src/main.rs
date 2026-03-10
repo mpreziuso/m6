@@ -132,7 +132,11 @@ pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
         // SAFETY: Called during init with valid platform-provided SMMU address
         match unsafe { m6_kernel::smmu::init(smmu_config.base_addr, smmu_virt, index as u8) } {
             Ok(()) => {
-                log::info!("SMMU #{} at {:#x} initialised", index, smmu_config.base_addr);
+                log::info!(
+                    "SMMU #{} at {:#x} initialised",
+                    index,
+                    smmu_config.base_addr
+                );
 
                 // Register event queue IRQ (skip if IRQ is 0 = not parsed)
                 let event_irq = smmu_config.event_irq;
@@ -142,7 +146,10 @@ pub unsafe extern "C" fn _start(boot_info_phys: *const BootInfo) -> ! {
                     gic::enable_irq(event_irq);
                     log::info!("SMMU #{}: event IRQ {} registered", index, event_irq);
                 } else {
-                    log::warn!("SMMU #{}: event_irq=0, SMMU faults will be invisible!", index);
+                    log::warn!(
+                        "SMMU #{}: event_irq=0, SMMU faults will be invisible!",
+                        index
+                    );
                 }
 
                 // Register global error IRQ (often a separate SPI)

@@ -179,7 +179,12 @@ pub fn format_volume(blk: &IpcBlockDevice) -> Result<(), BlockError> {
     let spc = sectors_per_cluster(block_count);
     let fat_size = compute_fat_size(block_count, spc);
 
-    log::debug!("Formatting FAT32: {} MiB, spc={}, fat_sectors={}", block_count / 2048, spc, fat_size);
+    log::debug!(
+        "Formatting FAT32: {} MiB, spc={}, fat_sectors={}",
+        block_count / 2048,
+        spc,
+        fat_size
+    );
 
     let boot = build_boot_sector(block_count, spc, fat_size);
     let fsinfo = build_fsinfo();

@@ -465,10 +465,27 @@ pub fn handle_iospace_create(args: &SyscallArgs) -> SyscallResult {
             ObjectType::IOSpace,
             CapRights::ALL,
             Badge::NONE,
-            SlotFlags::IS_ORIGINAL,
+            SlotFlags::IS_ORIGINAL.with(SlotFlags::IN_CDT),
         );
         Ok(())
     })?;
+
+    // Register CDT node for the new capability
+    crate::cap::cdt_storage::with_cdt(|cdt| {
+        use m6_cap::CdtOps;
+        if let Some(node_id) = cdt.alloc_node() {
+            if let Some(node) = cdt.get_node_mut(node_id) {
+                node.object_ref = iospace_ref;
+                node.slot_cnode = dest_loc.cnode_ref;
+                node.slot_index = dest_index as u32;
+            }
+            crate::cap::cdt_storage::register_cdt_node(
+                dest_loc.cnode_ref,
+                dest_index as u32,
+                node_id,
+            );
+        }
+    });
 
     // Increment SmmuControl IOSpace count
     object_table::with_smmu_control_mut(smmu_ref, |smmu_ctrl| {
@@ -750,7 +767,10 @@ pub fn handle_iospace_bind_stream(args: &SyscallArgs) -> SyscallResult {
         }
 
         // Flush CD to DRAM — SMMU is non-coherent and reads CD from memory
-        cache_clean_range(cd_table_virt as u64, core::mem::size_of::<ContextDescriptor>());
+        cache_clean_range(
+            cd_table_virt as u64,
+            core::mem::size_of::<ContextDescriptor>(),
+        );
 
         // Memory barrier to ensure CD is written before STE
         core::sync::atomic::fence(Ordering::Release);
@@ -948,9 +968,8 @@ pub fn handle_iospace_set_fault_handler(args: &SyscallArgs) -> SyscallResult {
     })?;
 
     // Get SMMU index (separate lock acquisition to avoid deadlock)
-    let smmu_index =
-        object_table::with_iospace_mut(iospace_ref, |iospace| iospace.smmu_index)
-            .ok_or(SyscallError::Revoked)?;
+    let smmu_index = object_table::with_iospace_mut(iospace_ref, |iospace| iospace.smmu_index)
+        .ok_or(SyscallError::Revoked)?;
 
     // Verify notification capability
     let notification_loc = cspace::resolve_cptr(notification_cptr, 0)?;
@@ -1082,10 +1101,27 @@ pub fn handle_dma_pool_create(args: &SyscallArgs) -> SyscallResult {
             ObjectType::DmaPool,
             CapRights::ALL,
             Badge::NONE,
-            SlotFlags::IS_ORIGINAL,
+            SlotFlags::IS_ORIGINAL.with(SlotFlags::IN_CDT),
         );
         Ok(())
     })?;
+
+    // Register CDT node for the new capability
+    crate::cap::cdt_storage::with_cdt(|cdt| {
+        use m6_cap::CdtOps;
+        if let Some(node_id) = cdt.alloc_node() {
+            if let Some(node) = cdt.get_node_mut(node_id) {
+                node.object_ref = pool_ref;
+                node.slot_cnode = dest_loc.cnode_ref;
+                node.slot_index = dest_index as u32;
+            }
+            crate::cap::cdt_storage::register_cdt_node(
+                dest_loc.cnode_ref,
+                dest_index as u32,
+                node_id,
+            );
+        }
+    });
 
     log::debug!(
         "Created DmaPool: ref={:?} iospace={:?} base={:#x} size={:#x}",
@@ -1218,4 +1254,3 @@ pub fn handle_dma_pool_free(args: &SyscallArgs) -> SyscallResult {
     log::trace!("DmaPoolFree: bump allocator does not support individual frees");
     Ok(0)
 }
-

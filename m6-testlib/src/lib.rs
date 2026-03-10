@@ -74,11 +74,7 @@ pub fn exit(success: bool) -> ! {
     // Parameter block: [reason, subcode].
     // ADP_Stopped_ApplicationExit (0x20026), subcode 0  → QEMU exit 0.
     // ADP_Stopped_RunTimeErrorUnknown (0x20024), subcode 1 → QEMU exit 1.
-    let block: [u64; 2] = if success {
-        [0x20026, 0]
-    } else {
-        [0x20024, 1]
-    };
+    let block: [u64; 2] = if success { [0x20026, 0] } else { [0x20024, 1] };
 
     // SAFETY: semihosting HLT #0xf000 is only valid in QEMU with
     // -semihosting-config enable=on. x0=0x18 (SYS_EXIT), x1=block ptr.

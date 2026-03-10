@@ -37,7 +37,7 @@ pub struct UntypedObject {
     pub is_device: bool,
     /// Watermark - offset of first free byte.
     /// All bytes before watermark have been retyped.
-    pub watermark: u32,
+    pub watermark: u64,
 }
 
 impl UntypedObject {
@@ -96,7 +96,7 @@ impl UntypedObject {
     #[inline]
     #[must_use]
     pub const fn next_alloc_addr(&self) -> PhysAddr {
-        self.phys_base.offset(self.watermark as u64)
+        self.phys_base.offset(self.watermark)
     }
 
     /// Try to allocate space for an object.
@@ -125,7 +125,7 @@ impl UntypedObject {
 
         // Allocate
         let alloc_addr = self.phys_base.offset(aligned_watermark as u64);
-        self.watermark = end_offset as u32;
+        self.watermark = end_offset as u64;
 
         Ok(alloc_addr)
     }

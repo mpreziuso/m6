@@ -226,7 +226,10 @@ mod tests {
     #[test_case]
     fn test_name_non_empty_for_all() {
         for &(_, variant) in ALL_VARIANTS {
-            assert!(!variant.name().is_empty(), "{variant:?} name must be non-empty");
+            assert!(
+                !variant.name().is_empty(),
+                "{variant:?} name must be non-empty"
+            );
         }
     }
 

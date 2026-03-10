@@ -174,7 +174,7 @@ impl ContextDescriptor {
             | (1u64 << 31)                         // V (Valid) [31]
             | ((ips as u64 & 0x7) << 32)           // IPS [34:32]
             | (1u64 << 41)                         // AA64 (AArch64 page tables) [41]
-            | ((asid as u64) << 48);               // ASID [63:48]
+            | ((asid as u64) << 48); // ASID [63:48]
 
         // DWORD 1: TTB0 [51:4]
         cd.dwords[1] = ttb0 & 0x000F_FFFF_FFFF_FFF0;
@@ -222,9 +222,7 @@ impl CommandEntry {
     pub fn cfgi_cd(stream_id: u32, ssid: u32, leaf: bool) -> Self {
         Self {
             dwords: [
-                0x05
-                    | (((ssid & 0xF_FFFF) as u64) << 12)
-                    | ((stream_id as u64) << 32),
+                0x05 | (((ssid & 0xF_FFFF) as u64) << 12) | ((stream_id as u64) << 32),
                 leaf as u64, // Leaf at DW1[0]
             ],
         }

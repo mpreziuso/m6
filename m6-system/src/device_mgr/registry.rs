@@ -284,7 +284,8 @@ impl Registry {
             max_slots: 1u64 << cnode_radix,
             console_ep_slot: None,
             virtio_probe_frames: [const { VirtioProbeFrame::empty() }; MAX_VIRTIO_PROBE_FRAMES],
-            additional_frame_cache: [const { AdditionalFrameEntry::empty() }; MAX_ADDITIONAL_FRAME_CACHE],
+            additional_frame_cache: [const { AdditionalFrameEntry::empty() };
+                MAX_ADDITIONAL_FRAME_CACHE],
             hid_driver_endpoint: None,
             fat32_ep_slot: None,
         }

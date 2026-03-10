@@ -254,9 +254,16 @@ pub fn move_cdt_mapping(
 ) {
     let mut map = get_slot_map().lock();
     let old_key = (old_cnode.index(), old_index);
-    if let Some(node) = map.map.remove(&old_key) {
+    if let Some(node_id) = map.map.remove(&old_key) {
         let new_key = (new_cnode.index(), new_index);
-        map.map.insert(new_key, node);
+        map.map.insert(new_key, node_id);
+
+        // Update CDT node back-references
+        let mut pool = get_pool().lock();
+        if let Some(node) = pool.get_node_mut(node_id) {
+            node.slot_cnode = new_cnode;
+            node.slot_index = new_index;
+        }
     }
 }
 
@@ -286,6 +293,24 @@ pub fn rotate_cdt_mappings(cnode: ObjectRef, slot1: u32, slot2: u32, slot3: u32)
     }
     if let Some(n) = node3 {
         map.map.insert(key1, n);
+    }
+
+    // Update CDT node back-references for rotated slots
+    let mut pool = get_pool().lock();
+    if let Some(id) = node1 {
+        if let Some(n) = pool.get_node_mut(id) {
+            n.slot_index = slot2;
+        }
+    }
+    if let Some(id) = node2 {
+        if let Some(n) = pool.get_node_mut(id) {
+            n.slot_index = slot3;
+        }
+    }
+    if let Some(id) = node3 {
+        if let Some(n) = pool.get_node_mut(id) {
+            n.slot_index = slot1;
+        }
     }
 }
 

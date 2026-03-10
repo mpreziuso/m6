@@ -19,9 +19,10 @@ pub type StreamId = u32;
 pub const MAX_STREAM_ID: StreamId = 0xFFFF;
 
 /// Number of inline bitmap words for stream tracking.
-const STREAM_BITMAP_WORDS: usize = 16;
+/// 128 words * 64 bits = 8192 streams, enough for RK3588 PCIe (stream IDs up to ~0x2000).
+const STREAM_BITMAP_WORDS: usize = 128;
 
-/// Maximum streams tracked inline (16 * 64 = 1024).
+/// Maximum streams tracked inline (128 * 64 = 8192).
 pub const MAX_INLINE_STREAMS: usize = STREAM_BITMAP_WORDS * 64;
 
 /// SMMU control object metadata.
@@ -87,9 +88,8 @@ impl SmmuControlObject {
             return false;
         }
         if (stream_id as usize) >= MAX_INLINE_STREAMS {
-            // Stream IDs beyond inline bitmap are always available
-            // (would need extended tracking for production use)
-            return true;
+            // Stream IDs beyond inline bitmap cannot be tracked
+            return false;
         }
         let word_idx = (stream_id / 64) as usize;
         let bit_idx = (stream_id % 64) as usize;

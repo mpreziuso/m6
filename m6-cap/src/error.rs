@@ -141,6 +141,9 @@ pub enum CapError {
     /// The object is not in the correct state for the requested
     /// operation.
     InvalidState,
+
+    /// Invalid argument provided.
+    InvalidArgument,
 }
 
 impl CapError {
@@ -171,6 +174,7 @@ impl CapError {
             Self::CircularDependency => "circular dependency detected",
             Self::ObjectInUse => "object is currently in use",
             Self::InvalidState => "invalid state for operation",
+            Self::InvalidArgument => "invalid argument",
         }
     }
 }

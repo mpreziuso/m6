@@ -417,7 +417,9 @@ where
         #[cfg(feature = "stats")]
         {
             let mut stats = self.stats.lock();
-            stats.live_bytes = stats.live_bytes.saturating_sub(SIZE_CLASSES[class_idx].size);
+            stats.live_bytes = stats
+                .live_bytes
+                .saturating_sub(SIZE_CLASSES[class_idx].size);
             stats.total_frees += 1;
         }
 
@@ -613,7 +615,10 @@ mod tests {
     impl PagePool for MockPool {
         type Error = ();
         fn alloc_pages(&self, count: usize) -> Result<AllocatedPages, ()> {
-            Ok(AllocatedPages { frame_cptr: 1, count })
+            Ok(AllocatedPages {
+                frame_cptr: 1,
+                count,
+            })
         }
         fn free_pages(&self, _pages: AllocatedPages) -> Result<(), ()> {
             Ok(())
@@ -633,7 +638,10 @@ mod tests {
             MockVm,
             MockPool,
             MockSecret,
-            AllocatorConfig { heap_base: heap.as_ptr() as usize, heap_size: heap.len() },
+            AllocatorConfig {
+                heap_base: heap.as_ptr() as usize,
+                heap_size: heap.len(),
+            },
         );
         let layout = Layout::from_size_align(64, 8).unwrap();
         let ptr = alloc.alloc(layout);
@@ -651,7 +659,10 @@ mod tests {
             MockVm,
             MockPool,
             MockSecret,
-            AllocatorConfig { heap_base: heap.as_ptr() as usize, heap_size: heap.len() },
+            AllocatorConfig {
+                heap_base: heap.as_ptr() as usize,
+                heap_size: heap.len(),
+            },
         );
         let layout = Layout::from_size_align(64, 8).unwrap();
         let p1 = alloc.alloc(layout);
@@ -676,7 +687,10 @@ mod tests {
             MockVm,
             MockPool,
             MockSecret,
-            AllocatorConfig { heap_base: heap.as_ptr() as usize, heap_size: heap.len() },
+            AllocatorConfig {
+                heap_base: heap.as_ptr() as usize,
+                heap_size: heap.len(),
+            },
         );
         let layout = Layout::from_size_align(1024, 8).unwrap();
         let mut ptrs = [core::ptr::null_mut::<u8>(); 9];
@@ -699,7 +713,10 @@ mod tests {
             MockVm,
             MockPool,
             MockSecret,
-            AllocatorConfig { heap_base: heap.as_ptr() as usize, heap_size: heap.len() },
+            AllocatorConfig {
+                heap_base: heap.as_ptr() as usize,
+                heap_size: heap.len(),
+            },
         );
         let small_layout = Layout::from_size_align(2048, 8).unwrap();
         let large_layout = Layout::from_size_align(2049, 8).unwrap();

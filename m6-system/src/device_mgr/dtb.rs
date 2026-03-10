@@ -175,8 +175,7 @@ fn parse_device_node(node: &fdt::node::FdtNode, compat: &str) -> Option<DeviceEn
         } else {
             // Use hardcoded fallback for RK3588 USB
             entry.stream_id = fallback_id;
-            entry.smmu_phandle = if entry.phys_base >= 0xFC00_0000
-                && entry.phys_base < 0xFCE0_0000
+            entry.smmu_phandle = if entry.phys_base >= 0xFC00_0000 && entry.phys_base < 0xFCE0_0000
             {
                 fallback_phandle
             } else {

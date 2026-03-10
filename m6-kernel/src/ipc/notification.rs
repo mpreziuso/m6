@@ -11,7 +11,6 @@ use m6_cap::objects::{EndpointState, ThreadState};
 use crate::cap::object_table;
 use crate::syscall::error::SyscallError;
 
-
 /// Signal a notification object.
 ///
 /// The badge is OR'd into the notification's signal word. If a thread is
@@ -65,24 +64,21 @@ pub fn do_signal(notif_ref: ObjectRef, badge: u64) -> Result<(), SyscallError> {
 
         Action::MaybeWakeBound(tcb_ref) => {
             // Check TCB state (separate lock acquisition from notification)
-            let (tcb_state, ep_ref) = object_table::with_tcb(tcb_ref, |tcb| {
-                (tcb.tcb.state, tcb.ipc_blocked_on)
-            });
+            let (tcb_state, ep_ref) =
+                object_table::with_tcb(tcb_ref, |tcb| (tcb.tcb.state, tcb.ipc_blocked_on));
 
             if tcb_state == ThreadState::BlockedOnRecv {
                 // Consume accumulated signals (re-acquire notification lock)
-                let signal_word = object_table::with_notification_mut(notif_ref, |notif| {
-                    notif.poll()
-                })
-                .unwrap_or(0);
+                let signal_word =
+                    object_table::with_notification_mut(notif_ref, |notif| notif.poll())
+                        .unwrap_or(0);
 
                 // Dequeue from endpoint's recv queue.
                 // Inline ipc_remove: each step is a separate lock acquisition
                 // to avoid nesting TCB locks inside endpoint lock.
                 if ep_ref.is_valid() {
-                    let (prev, next) = object_table::with_tcb(tcb_ref, |tcb| {
-                        (tcb.ipc_prev, tcb.ipc_next)
-                    });
+                    let (prev, next) =
+                        object_table::with_tcb(tcb_ref, |tcb| (tcb.ipc_prev, tcb.ipc_next));
 
                     if prev.is_valid() {
                         let _: () = object_table::with_tcb_mut(prev, |p| {
@@ -250,11 +246,11 @@ fn deliver_signal(tcb_ref: ObjectRef, signal_word: u64) {
 /// pending signals on the bound notification (the synchronous path).
 fn deliver_notification_to_recv(tcb_ref: ObjectRef, signal_word: u64) {
     let _: () = object_table::with_tcb_mut(tcb_ref, |tcb| {
-        tcb.context.gpr[0] = 0;           // label = 0 (notification)
-        tcb.context.gpr[1] = 0;           // msg[0] = empty
-        tcb.context.gpr[2] = 0;           // msg[1] = empty
-        tcb.context.gpr[3] = 0;           // msg[2] = empty
-        tcb.context.gpr[4] = 0;           // msg[3] = empty
+        tcb.context.gpr[0] = 0; // label = 0 (notification)
+        tcb.context.gpr[1] = 0; // msg[0] = empty
+        tcb.context.gpr[2] = 0; // msg[1] = empty
+        tcb.context.gpr[3] = 0; // msg[2] = empty
+        tcb.context.gpr[4] = 0; // msg[3] = empty
         tcb.context.gpr[6] = signal_word; // badge = signal word
     });
 }

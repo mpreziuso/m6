@@ -323,7 +323,14 @@ unsafe fn cfg_read32(config_vaddr: usize, bus: u8, dev: u8, func: u8, reg: u16) 
 ///
 /// # Safety
 /// The config space must be mapped at `config_vaddr`.
-pub(super) unsafe fn cfg_write32(config_vaddr: usize, bus: u8, dev: u8, func: u8, reg: u16, val: u32) {
+pub(super) unsafe fn cfg_write32(
+    config_vaddr: usize,
+    bus: u8,
+    dev: u8,
+    func: u8,
+    reg: u16,
+    val: u32,
+) {
     let addr = ecam_addr(config_vaddr as u64, bus, dev, func, reg);
     // SAFETY: Caller guarantees config space is mapped.
     unsafe { core::ptr::write_volatile(addr as *mut u32, val) }
@@ -564,10 +571,8 @@ pub fn parse_pcie_hosts(fdt_data: &[u8]) -> [Option<PcieHostBridge>; MAX_PCIE_HO
         if let Some(iommu_map_prop) = node.property("iommu-map") {
             let val = iommu_map_prop.value;
             if val.len() >= 16 {
-                host.iommu_phandle =
-                    u32::from_be_bytes([val[4], val[5], val[6], val[7]]);
-                host.iommu_stream_base =
-                    u32::from_be_bytes([val[8], val[9], val[10], val[11]]);
+                host.iommu_phandle = u32::from_be_bytes([val[4], val[5], val[6], val[7]]);
+                host.iommu_stream_base = u32::from_be_bytes([val[8], val[9], val[10], val[11]]);
             }
         }
 
@@ -718,7 +723,12 @@ pub unsafe fn enumerate_devices(
 
     let scan_bus_end = bus_start.saturating_add(max_buses - 1).min(bus_end);
 
-    log::info!("PCIe: scanning bus {}-{} (mapped {}KB)...", bus_start, scan_bus_end, mapped_size / 1024);
+    log::info!(
+        "PCIe: scanning bus {}-{} (mapped {}KB)...",
+        bus_start,
+        scan_bus_end,
+        mapped_size / 1024
+    );
 
     // Scan buses in range
     for bus in bus_start..=scan_bus_end {
@@ -975,7 +985,11 @@ unsafe fn probe_bar0(
         0
     };
 
-    log::debug!("PCIe: BAR1 raw={:#x} ({})", bar1_orig, if is_64bit { "64-bit" } else { "32-bit" });
+    log::debug!(
+        "PCIe: BAR1 raw={:#x} ({})",
+        bar1_orig,
+        if is_64bit { "64-bit" } else { "32-bit" }
+    );
 
     let pci_addr = if is_64bit {
         ((bar1_orig as u64) << 32) | ((bar0 & !0xF) as u64)
@@ -1039,7 +1053,11 @@ unsafe fn probe_bar0(
         // Align to BAR size within mem32 window
         let aligned = (host.mem32_pci + size - 1) & !(size - 1);
         if aligned + size <= host.mem32_pci + host.mem32_size {
-            log::info!("PCIe: BAR0 at {:#x} outside memory windows, reassigning to {:#x}", pci_addr, aligned);
+            log::info!(
+                "PCIe: BAR0 at {:#x} outside memory windows, reassigning to {:#x}",
+                pci_addr,
+                aligned
+            );
 
             // Write new BAR0 value (preserve type bits from original)
             let bar0_new = (aligned as u32 & !0xF) | (bar0 & 0xF);
@@ -1076,14 +1094,22 @@ unsafe fn probe_bar0(
     }
     // Read back and log Command register to verify BME is actually set
     let cmd_rb = unsafe { cfg_read16(config_vaddr, bus, dev, func, CFG_COMMAND) };
-    log::debug!("PCIe: CMD={:#x}{}{}", cmd_rb,
+    log::debug!(
+        "PCIe: CMD={:#x}{}{}",
+        cmd_rb,
         if cmd_rb & 0x04 != 0 { " BME" } else { " !BME" },
-        if cmd_rb & 0x02 != 0 { " MEM" } else { " !MEM" });
+        if cmd_rb & 0x02 != 0 { " MEM" } else { " !MEM" }
+    );
 
     // Translate PCI address to CPU address using memory windows
     let cpu_addr = host.pci_to_cpu(pci_addr);
 
-    log::debug!("PCIe: BAR0 pci_addr={:#x} cpu_addr={:#x} size={:#x}", pci_addr, cpu_addr, size);
+    log::debug!(
+        "PCIe: BAR0 pci_addr={:#x} cpu_addr={:#x} size={:#x}",
+        pci_addr,
+        cpu_addr,
+        size
+    );
 
     (cpu_addr, size)
 }
@@ -1098,17 +1124,32 @@ fn print_device_info(device: &PcieDevice) {
     let class = (device.class_code >> 16) & 0xFF;
     let subclass = (device.class_code >> 8) & 0xFF;
 
-    log::info!("PCIe: found {:02x}:{:02x}.{} vendor={:#06x} device={:#06x} class={} ({})",
-        bus, dev, func, device.vendor_id, device.device_id, class_str,
-        class_name(class as u8, subclass as u8));
+    log::info!(
+        "PCIe: found {:02x}:{:02x}.{} vendor={:#06x} device={:#06x} class={} ({})",
+        bus,
+        dev,
+        func,
+        device.vendor_id,
+        device.device_id,
+        class_str,
+        class_name(class as u8, subclass as u8)
+    );
 
     if device.bar0_cpu_addr != 0 {
-        log::info!("PCIe:   BAR0 at {:#x} ({}KB)", device.bar0_cpu_addr, device.bar0_size / 1024);
+        log::info!(
+            "PCIe:   BAR0 at {:#x} ({}KB)",
+            device.bar0_cpu_addr,
+            device.bar0_size / 1024
+        );
     }
 
     if device.msix.present {
-        log::info!("PCIe:   MSI-X: {} vectors, table in BAR{}+{:#x}",
-            device.msix.table_size, device.msix.table_bir, device.msix.table_offset);
+        log::info!(
+            "PCIe:   MSI-X: {} vectors, table in BAR{}+{:#x}",
+            device.msix.table_size,
+            device.msix.table_bir,
+            device.msix.table_offset
+        );
     }
 }
 
@@ -1401,10 +1442,7 @@ pub unsafe fn programme_iatu_for_mem(
 
         // Type 0 = MEM read/write, enable without CFG_SHIFT_MODE
         core::ptr::write_volatile((region_base + IATU_REGION_CTRL1) as *mut u32, 0x0);
-        core::ptr::write_volatile(
-            (region_base + IATU_REGION_CTRL2) as *mut u32,
-            IATU_ENABLE,
-        );
+        core::ptr::write_volatile((region_base + IATU_REGION_CTRL2) as *mut u32, IATU_ENABLE);
     }
 
     // Poll for enable
@@ -1481,7 +1519,11 @@ pub unsafe fn enumerate_devices_at(
     // How many devices can we scan? Each device occupies 32KB in ECAM space.
     let max_devs = (mapped_size / (1 << 15)).clamp(1, 32) as u8;
 
-    log::info!("PCIe: scanning secondary bus {} (mapped {}KB)...", abs_bus, mapped_size / 1024);
+    log::info!(
+        "PCIe: scanning secondary bus {} (mapped {}KB)...",
+        abs_bus,
+        mapped_size / 1024
+    );
 
     for dev in 0..max_devs {
         if dev_count >= MAX_PCIE_DEVICES {

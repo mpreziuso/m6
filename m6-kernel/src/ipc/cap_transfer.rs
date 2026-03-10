@@ -176,10 +176,8 @@ pub fn transfer_capabilities(
                 .unwrap_or(m6_cap::CdtNodeId::NULL);
 
         // Copy capability with CDT tracking using with_two_cnodes
-        let new_cdt_node = cspace::with_two_cnodes(
-            src_loc.cnode_ref,
-            receiver_cspace,
-            |access| match access {
+        let new_cdt_node =
+            cspace::with_two_cnodes(src_loc.cnode_ref, receiver_cspace, |access| match access {
                 cspace::CNodeAccess::Distinct(src_cnode, dst_cnode) => {
                     cdt_storage::with_cdt(|cdt| {
                         m6_cap::ops::cap_copy_with_cdt(
@@ -205,8 +203,7 @@ pub fn transfer_capabilities(
                     )
                     .map_err(|_| SyscallError::InvalidCap)
                 }),
-            },
-        )?;
+            })?;
 
         // Register the new CDT node in the slot map
         cdt_storage::register_cdt_node(receiver_cspace, dest_slot_index as u32, new_cdt_node);
@@ -286,25 +283,16 @@ pub fn unwrap_capability(
         .unwrap_or(m6_cap::CdtNodeId::NULL);
 
     // Move capability (no new CDT node created, just transfer ownership)
-    cspace::with_two_cnodes(
-        src_loc.cnode_ref,
-        receiver_cspace,
-        |access| match access {
-            cspace::CNodeAccess::Distinct(src_cnode, dst_cnode) => {
-                m6_cap::ops::cap_move(
-                    src_cnode,
-                    src_loc.slot_index,
-                    dst_cnode,
-                    dest_slot_index,
-                )
+    cspace::with_two_cnodes(src_loc.cnode_ref, receiver_cspace, |access| match access {
+        cspace::CNodeAccess::Distinct(src_cnode, dst_cnode) => {
+            m6_cap::ops::cap_move(src_cnode, src_loc.slot_index, dst_cnode, dest_slot_index)
                 .map_err(|_| SyscallError::InvalidCap)
-            }
-            cspace::CNodeAccess::Same(cnode) => {
-                m6_cap::ops::cap_move_local(cnode, src_loc.slot_index, dest_slot_index)
-                    .map_err(|_| SyscallError::InvalidCap)
-            }
-        },
-    )?;
+        }
+        cspace::CNodeAccess::Same(cnode) => {
+            m6_cap::ops::cap_move_local(cnode, src_loc.slot_index, dest_slot_index)
+                .map_err(|_| SyscallError::InvalidCap)
+        }
+    })?;
 
     // Update CDT slot map: unregister from sender, register with receiver
     if src_cdt_node != m6_cap::CdtNodeId::NULL {

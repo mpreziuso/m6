@@ -9,9 +9,9 @@
 extern crate std;
 
 use core::time::Duration;
-use std::ipc::{ipc_set_recv_slots, ipc_set_send_caps, Endpoint, IpcBuffer, Notification};
+use std::ipc::{Endpoint, IpcBuffer, Notification, ipc_set_recv_slots, ipc_set_send_caps};
 use std::time::Instant;
-use std::{print, println, thread, String, Vec};
+use std::{String, Vec, print, println, thread};
 
 /// Yield-based delay using hardware counter (CNTPCT_EL0).
 /// Does not depend on kernel timer interrupts (tcb_sleep is broken).
@@ -409,7 +409,10 @@ fn cmd_ls(cnode_radix: u8) {
 /// Subscribe to keyboard events from HID driver
 fn subscribe_keyboard(hid_ep: &Endpoint) -> Option<u64> {
     let result = hid_ep
-        .call(hid_ipc::SUBSCRIBE, [hid_ipc::device_type::KEYBOARD, 0, 0, 0])
+        .call(
+            hid_ipc::SUBSCRIBE,
+            [hid_ipc::device_type::KEYBOARD, 0, 0, 0],
+        )
         .ok()?;
 
     // Response format: label = OK | (sub_id << 16)
@@ -518,7 +521,9 @@ fn main() -> i32 {
     if hid_ep.is_none() {
         println!("No HID driver available - running in display-only mode\n");
         print!("\x1b[32mm6>\x1b[0m ");
-        loop { yield_delay(Duration::from_millis(500)); }
+        loop {
+            yield_delay(Duration::from_millis(500));
+        }
     }
 
     let hid_ep = hid_ep.unwrap();
@@ -528,26 +533,36 @@ fn main() -> i32 {
         Ok(n) => n,
         Err(_) => {
             println!("Failed to create input notification");
-            loop { yield_delay(Duration::from_millis(500)); }
+            loop {
+                yield_delay(Duration::from_millis(500));
+            }
         }
     };
 
     // Transfer notification to HID driver during subscribe
     // SAFETY: IPC buffer is mapped and accessible
-    unsafe { ipc_set_send_caps(&[input_notif.cptr()]); }
+    unsafe {
+        ipc_set_send_caps(&[input_notif.cptr()]);
+    }
 
     let sub_id = match subscribe_keyboard(&hid_ep) {
         Some(id) => {
             // SAFETY: IPC buffer is mapped and accessible
-            unsafe { IpcBuffer::get_mut().extra_caps = 0; }
+            unsafe {
+                IpcBuffer::get_mut().extra_caps = 0;
+            }
             id
         }
         None => {
             // SAFETY: IPC buffer is mapped and accessible
-            unsafe { IpcBuffer::get_mut().extra_caps = 0; }
+            unsafe {
+                IpcBuffer::get_mut().extra_caps = 0;
+            }
             println!("Failed to subscribe to keyboard events\n");
             print!("\x1b[32mm6>\x1b[0m ");
-            loop { yield_delay(Duration::from_millis(500)); }
+            loop {
+                yield_delay(Duration::from_millis(500));
+            }
         }
     };
 

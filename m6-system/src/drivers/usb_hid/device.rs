@@ -126,7 +126,8 @@ impl HidDevice {
 
         // Add sync event if any events were generated
         if count > 0 && self.pending_events.len() < MAX_PENDING_EVENTS {
-            self.pending_events.push_back(InputEvent::sync(timestamp_ns));
+            self.pending_events
+                .push_back(InputEvent::sync(timestamp_ns));
         }
 
         count
