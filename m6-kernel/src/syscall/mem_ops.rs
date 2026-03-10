@@ -526,13 +526,11 @@ fn object_type_to_kernel_type(obj_type: ObjectType) -> Result<KernelObjectType, 
         ObjectType::ASIDPool => Ok(KernelObjectType::AsidPool),
         ObjectType::Endpoint => Ok(KernelObjectType::Endpoint),
         ObjectType::Notification => Ok(KernelObjectType::Notification),
-        ObjectType::Reply => Ok(KernelObjectType::Reply),
         ObjectType::CNode => Ok(KernelObjectType::CNode),
         ObjectType::TCB => Ok(KernelObjectType::Tcb),
-        ObjectType::IRQHandler => Ok(KernelObjectType::IrqHandler),
         ObjectType::SchedContext => Ok(KernelObjectType::SchedContext),
-        ObjectType::IOSpace => Ok(KernelObjectType::IOSpace),
-        ObjectType::DmaPool => Ok(KernelObjectType::DmaPool),
+        // Privileged types (Reply, IRQHandler, IOSpace, DmaPool) are only
+        // created through dedicated authority paths, never via retype.
         _ => Err(SyscallError::InvalidArg),
     }
 }
