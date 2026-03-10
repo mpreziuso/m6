@@ -593,7 +593,7 @@ pub fn handle_iospace_map_frame(args: &SyscallArgs) -> SyscallResult {
         iospace.mapped_frames = iospace.mapped_frames.saturating_add(1);
     });
 
-    log::trace!(
+    log::debug!(
         "IOSpace map: iova={:#x} -> frame={:#x} writable={}",
         iova,
         frame_phys,

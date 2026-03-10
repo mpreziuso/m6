@@ -91,10 +91,7 @@ pub fn context_switch(sched: &mut PerCpuSched, ctx: &mut ExceptionContext) {
             tcb.ipc_message = [0; 5];
             tcb.ipc_badge = 0;
 
-            log::trace!(
-                "context_switch: applied pending IPC msg for {:?}",
-                next
-            );
+            log::trace!("context_switch: applied pending IPC msg for {:?}", next);
         }
     });
 }
@@ -116,7 +113,11 @@ pub fn switch_vspace(vspace_ref: Option<ObjectRef>) {
         if obj.obj_type == KernelObjectType::VSpace {
             // SAFETY: We verified the type.
             let vspace = unsafe { &*core::ptr::addr_of!(obj.data.vspace) };
-            Some((vspace.root_table.as_u64(), vspace.asid.value(), vspace.asid_generation))
+            Some((
+                vspace.root_table.as_u64(),
+                vspace.asid.value(),
+                vspace.asid_generation,
+            ))
         } else {
             None
         }
@@ -139,10 +140,7 @@ pub fn switch_vspace(vspace_ref: Option<ObjectRef>) {
             if obj.obj_type == KernelObjectType::VSpace {
                 // SAFETY: We verified the type.
                 let vspace = unsafe { &mut *core::ptr::addr_of_mut!(obj.data.vspace) };
-                vspace.assign_asid_with_generation(
-                    Asid::new(validated.asid),
-                    validated.generation,
-                );
+                vspace.assign_asid_with_generation(Asid::new(validated.asid), validated.generation);
             }
         });
 

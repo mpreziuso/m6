@@ -20,6 +20,11 @@
 //! - Slot 11: IRQHandler for interrupt handling
 //! - Slot 12: Service endpoint for client requests
 //! - Slot 14: Notification for IRQ delivery
+//! - Slot 17: RAM untyped for dynamic frame allocation
+//! - Slots 21-36: Pre-allocated DMA buffer frames
+//!
+//! Note: No IOSpace/DmaPool — the PHP SMMU (mmu600_php) is disabled on RK3588,
+//! so USB DMA bypasses the SMMU and uses physical addresses directly.
 
 #![no_std]
 #![no_main]
@@ -40,8 +45,8 @@ mod logger;
 mod xhci;
 
 use m6_syscall::invoke::{
-    frame_get_phys, irq_ack, irq_set_handler, map_frame, recv, reply_recv, sched_yield, signal,
-    tcb_bind_notification,
+    cache_flush, frame_get_phys, irq_ack, irq_set_handler, map_frame, recv, reply_recv,
+    sched_yield, signal, tcb_bind_notification,
 };
 
 use ipc::{request, response, status};
@@ -83,15 +88,14 @@ const PAGE_SIZE: u64 = 4096;
 /// IRQ badge
 const IRQ_BADGE: u64 = 1;
 
-/// DMA buffer allocation state
-/// Note: DMA buffers are pre-mapped by device-mgr.
-/// TODO: When IOSpace is properly configured, use IOVA 0x1000_0000 instead of physical address.
-/// Currently the SMMU appears to be in bypass mode, so we use physical addresses.
+/// DMA buffer state with physical addresses.
+///
+/// USB DMA on RK3588 bypasses the SMMU (PHP SMMU is disabled at the SoC level),
+/// so we use physical addresses directly for hardware DMA access.
 struct DmaBuffers {
-    /// Base virtual address of DMA buffer region
+    /// Base virtual address of DMA buffer region (CPU access)
     base_vaddr: u64,
-    /// Base physical address for DMA operations
-    /// Used when SMMU is in bypass mode (identity mapping)
+    /// Base physical address for DMA operations (device access, SMMU bypassed)
     base_paddr: u64,
     /// Number of pages available
     count: usize,
@@ -103,7 +107,7 @@ impl DmaBuffers {
         self.base_vaddr
     }
 
-    /// Get the base physical/DMA address
+    /// Get the base DMA address (physical, since SMMU is bypassed)
     fn base_dma_addr(&self) -> u64 {
         self.base_paddr
     }
@@ -114,44 +118,42 @@ impl DmaBuffers {
     }
 }
 
-/// Check for DMA buffers pre-mapped by device-mgr.
+/// Check DMA buffer frames have contiguous physical addresses and return their state.
 ///
-/// Device-mgr maps DMA buffers into the driver's VSpace at per-controller addresses.
-/// We use frame_get_phys to get the physical address for DMA operations.
-///
-/// TODO: When IOSpace/SMMU is properly configured, use IOVA instead of physical address.
+/// Device-mgr pre-maps DMA buffer frames into the driver's VSpace for CPU access.
+/// Since the PHP SMMU is disabled on RK3588, USB DMA uses physical addresses directly.
 fn check_dma_buffers(controller_idx: usize) -> Option<DmaBuffers> {
-    // Calculate DMA buffer virtual address (same convention as device-mgr)
     let base_vaddr = 0x0000_8000_0000 + (controller_idx as u64) * 0x0010_0000 + 0x0001_0000;
+    let mut base_paddr = 0u64;
 
-    // Get physical address of first DMA buffer frame using frame_get_phys syscall
-    let first_frame_cap = dma_buffer_frame(0);
-    let base_paddr = match frame_get_phys(first_frame_cap) {
-        Ok(paddr) => paddr as u64,
-        Err(_) => return None,
-    };
-
-    // Verify physical contiguity of all DMA buffer frames.
-    // The xHCI driver assumes base_paddr + offset for all DMA addresses.
-    // If frames aren't physically contiguous, interrupt endpoint rings at
-    // offset 0x8000+ would point to wrong physical memory.
-    for i in 1..DMA_BUFFER_COUNT {
-        let frame_cap = dma_buffer_frame(i);
-        if let Ok(paddr) = frame_get_phys(frame_cap) {
-            let expected = base_paddr + (i as u64) * PAGE_SIZE;
-            if paddr as u64 != expected {
-                return None;
-            }
-        }
-    }
-
-    // Zero all DMA buffer pages
     for i in 0..DMA_BUFFER_COUNT {
+        let frame_cap = dma_buffer_frame(i);
+
+        let phys = frame_get_phys(frame_cap).unwrap_or(0) as u64;
+        if phys == 0 {
+            return None;
+        }
+
+        if i == 0 {
+            base_paddr = phys;
+        } else if phys != base_paddr + (i as u64) * PAGE_SIZE {
+            // Physical pages are not contiguous — can't use as a single DMA region
+            log::warn!(
+                "DMA page {} not contiguous: expected {:#x}, got {:#x}",
+                i,
+                base_paddr + (i as u64) * PAGE_SIZE,
+                phys
+            );
+            return None;
+        }
+
+        // Zero the page and flush to DRAM (non-coherent DMA reads from DRAM)
         let page_addr = base_vaddr + (i as u64) * PAGE_SIZE;
         // SAFETY: Memory is mapped by device-mgr
         unsafe {
             core::ptr::write_bytes(page_addr as *mut u8, 0, PAGE_SIZE as usize);
         }
+        let _ = cache_flush(page_addr, PAGE_SIZE as usize);
     }
 
     Some(DmaBuffers {
@@ -483,14 +485,19 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
     let port_status_cache = xhci_ctrl.scan_ports();
     let connected_count = port_status_cache.iter().filter(|p| p.connected).count();
 
-    // Check for DMA buffers pre-mapped by device-mgr
+    // Check DMA buffer frames have contiguous physical addresses
     let dma = check_dma_buffers(controller_idx);
 
-    log::info!(
-        "ports={} dma={}",
-        connected_count,
-        if dma.is_some() { "yes" } else { "no" }
-    );
+    if let Some(ref d) = dma {
+        log::info!(
+            "ports={} dma=yes paddr={:#x}..{:#x}",
+            connected_count,
+            d.base_dma_addr(),
+            d.base_dma_addr() + d.total_size() as u64 - 1
+        );
+    } else {
+        log::info!("ports={} dma=no", connected_count);
+    }
 
     let mut device = Dwc3Device {
         xhci_ctrl,
@@ -522,7 +529,7 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
 /// port connection state. We must wait for the PHY to re-detect connected
 /// devices after reset (~100-200ms for USB2).
 ///
-/// Uses physical addresses for DMA since IOMMU is not available.
+/// DMA addresses use physical addresses (PHP SMMU bypassed on RK3588).
 fn try_initialize_xhci(device: &mut Dwc3Device) -> Result<(), &'static str> {
     let dma = device.dma.as_ref().ok_or("No DMA buffers")?;
 
@@ -634,7 +641,7 @@ fn try_initialize_xhci(device: &mut Dwc3Device) -> Result<(), &'static str> {
     {
         const EVT_BUF_OFFSET: u64 = 0xB000;
         let evt_vaddr = dma.base_vaddr() + EVT_BUF_OFFSET;
-        let evt_iova = dma.base_dma_addr() + EVT_BUF_OFFSET;
+        let evt_paddr = dma.base_dma_addr() + EVT_BUF_OFFSET;
         const EVT_BUF_SIZE: u32 = 0x1000;
 
         unsafe {
@@ -643,8 +650,8 @@ fn try_initialize_xhci(device: &mut Dwc3Device) -> Result<(), &'static str> {
         let _ = m6_syscall::invoke::cache_clean(evt_vaddr, EVT_BUF_SIZE as usize);
 
         unsafe {
-            core::ptr::write_volatile((ctrl_addr + 0xC400) as *mut u32, evt_iova as u32);
-            core::ptr::write_volatile((ctrl_addr + 0xC404) as *mut u32, (evt_iova >> 32) as u32);
+            core::ptr::write_volatile((ctrl_addr + 0xC400) as *mut u32, evt_paddr as u32);
+            core::ptr::write_volatile((ctrl_addr + 0xC404) as *mut u32, (evt_paddr >> 32) as u32);
             // Mask DWC3 internal events (bit 31) while keeping the buffer.
             // Without the mask, DWC3 events trigger IRQs continuously,
             // creating a flood that monopolises the CPU and starves other
@@ -688,9 +695,26 @@ fn try_initialize_xhci(device: &mut Dwc3Device) -> Result<(), &'static str> {
         size: dma.total_size(),
     };
 
+    // No IOMMU context — PHP SMMU is disabled on RK3588, so scratchpad
+    // pages use the heap fallback with physical addresses.
     // SAFETY: DMA region is valid and mapped
     unsafe {
-        device.xhci_ctrl.initialize(&dma_region)?;
+        device.xhci_ctrl.initialize(&dma_region, None)?;
+    }
+
+    // Verify the controller hasn't set HSE (Host System Error) from a DMA fault.
+    for _ in 0..50_000 {
+        core::hint::spin_loop();
+    }
+
+    let (usbcmd, usbsts, _, _) = device.xhci_ctrl.get_diagnostics();
+    if (usbsts & 0x4) != 0 {
+        dump_hse_diagnostics(device);
+        return Err("HSE: DMA fault after controller start");
+    }
+    if (usbsts & 0x1) != 0 && (usbcmd & 0x1) != 0 {
+        dump_hse_diagnostics(device);
+        return Err("Controller halted after start");
     }
 
     device.xhci_initialized = true;
@@ -699,6 +723,61 @@ fn try_initialize_xhci(device: &mut Dwc3Device) -> Result<(), &'static str> {
     device.xhci_ctrl.clear_all_status();
 
     Ok(())
+}
+
+/// Read DWC3 GBUSERRADDR — the address captured by the DWC3 core on a bus error.
+///
+/// When HSE fires, this register holds the exact DMA address that faulted.
+/// If the SMMU rejected an access, this is the IOVA that was denied.
+/// If the DMA bypassed the SMMU, this is the physical address that caused
+/// a bus error on the interconnect.
+fn read_gbuserraddr(mmio_base: u64) -> u64 {
+    // SAFETY: MMIO is mapped, registers are within the DWC3 global region
+    unsafe {
+        let lo = core::ptr::read_volatile((mmio_base + 0xC130) as *const u32);
+        let hi = core::ptr::read_volatile((mmio_base + 0xC134) as *const u32);
+        (hi as u64) << 32 | lo as u64
+    }
+}
+
+/// Read DWC3 GSTS (Global Status) register.
+fn read_gsts(mmio_base: u64) -> u32 {
+    // SAFETY: MMIO is mapped
+    unsafe { core::ptr::read_volatile((mmio_base + 0xC118) as *const u32) }
+}
+
+/// Dump DWC3+xHCI diagnostics after a fatal HSE.
+fn dump_hse_diagnostics(device: &Dwc3Device) {
+    let buserr = read_gbuserraddr(device.xhci_ctrl.mmio_base);
+    let gsts = read_gsts(device.xhci_ctrl.mmio_base);
+    let (usbcmd, usbsts, crcr, dcbaap) = device.xhci_ctrl.get_diagnostics();
+    let erdp = device.xhci_ctrl.get_erdp();
+
+    log::error!(
+        "HSE diag: GBUSERRADDR={:#x} GSTS={:#x} USBCMD={:#x} USBSTS={:#x}",
+        buserr,
+        gsts,
+        usbcmd,
+        usbsts
+    );
+    log::error!(
+        "HSE diag: DCBAAP={:#x} CRCR={:#x} ERDP={:#x}",
+        dcbaap,
+        crcr,
+        erdp
+    );
+
+    if let Some(ref dma) = device.dma {
+        log::error!(
+            "HSE diag: expected DMA paddr range {:#x}..{:#x}",
+            dma.base_dma_addr(),
+            dma.base_dma_addr() + dma.total_size() as u64 - 1
+        );
+
+        // Read DCBAA[0] (scratchpad array pointer) from DMA memory
+        let dcbaa0 = unsafe { core::ptr::read_volatile(dma.base_vaddr() as *const u64) };
+        log::error!("HSE diag: DCBAA[0]={:#x} (scratchpad array)", dcbaa0);
+    }
 }
 
 /// Halt the driver on fatal error.
@@ -961,6 +1040,7 @@ fn ensure_enumerated(device: &mut Dwc3Device) {
                 }
                 Err(e) => {
                     log::error!("enumerate FAIL: {}", e);
+                    dump_hse_diagnostics(device);
                     // Add placeholder for unenumerated device
                     device.devices.push(UsbDeviceInfo {
                         slot_id: 0,
