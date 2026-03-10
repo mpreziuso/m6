@@ -82,6 +82,41 @@ pub fn cap_copy<C: CNodeOps>(
     Ok(())
 }
 
+/// Copy a capability between slots within the same CNode.
+///
+/// Unlike [`cap_copy`], this operates on a single `&mut C`, avoiding the
+/// undefined behaviour of creating two `&mut` references to the same
+/// allocation.
+pub fn cap_copy_local<C: CNodeOps>(
+    cnode: &mut C,
+    src_index: usize,
+    dst_index: usize,
+) -> CapResult<()> {
+    let src_slot = cnode.get_slot(src_index).ok_or(CapError::InvalidIndex)?;
+    if src_slot.is_empty() {
+        return Err(CapError::EmptySlot);
+    }
+
+    let dst_slot = cnode.get_slot(dst_index).ok_or(CapError::InvalidIndex)?;
+    if !dst_slot.is_empty() {
+        return Err(CapError::SlotOccupied);
+    }
+
+    let new_slot = CapSlot::new(
+        src_slot.object_ref(),
+        src_slot.cap_type(),
+        src_slot.rights(),
+        src_slot.badge(),
+        src_slot.flags().without(SlotFlags::IS_ORIGINAL),
+    );
+
+    let dst_slot = cnode.get_slot_mut(dst_index).ok_or(CapError::InvalidIndex)?;
+    *dst_slot = new_slot;
+    cnode.meta_mut().increment_used();
+
+    Ok(())
+}
+
 /// Copy a capability with CDT tracking.
 ///
 /// Like [`cap_copy`], but also updates the CDT to track the derivation.
@@ -111,6 +146,36 @@ pub fn cap_copy_with_cdt<C: CNodeOps, D: CdtOps>(
     }
 
     // Insert as sibling of source (same parent)
+    if src_cdt_node.is_valid() {
+        cdt.insert_sibling(src_cdt_node, new_node_id);
+    }
+
+    Ok(new_node_id)
+}
+
+/// Copy within the same CNode with CDT tracking.
+///
+/// Like [`cap_copy_local`], but also updates the CDT to track the
+/// derivation.
+pub fn cap_copy_local_with_cdt<C: CNodeOps, D: CdtOps>(
+    cnode: &mut C,
+    src_index: usize,
+    dst_index: usize,
+    cdt: &mut D,
+    src_cdt_node: CdtNodeId,
+    dst_cnode_ref: crate::slot::ObjectRef,
+) -> CapResult<CdtNodeId> {
+    cap_copy_local(cnode, src_index, dst_index)?;
+
+    let new_node_id = cdt.alloc_node().ok_or(CapError::OutOfMemory)?;
+    let src_slot = cnode.get_slot(src_index).ok_or(CapError::InvalidIndex)?;
+
+    if let Some(new_node) = cdt.get_node_mut(new_node_id) {
+        new_node.object_ref = src_slot.object_ref();
+        new_node.slot_cnode = dst_cnode_ref;
+        new_node.slot_index = dst_index as u32;
+    }
+
     if src_cdt_node.is_valid() {
         cdt.insert_sibling(src_cdt_node, new_node_id);
     }
@@ -177,6 +242,49 @@ pub fn cap_move<C: CNodeOps>(
     let dst_slot = dst.get_slot_mut(dst_index).ok_or(CapError::InvalidIndex)?;
     *dst_slot = cap_data;
     dst.meta_mut().increment_used();
+
+    Ok(())
+}
+
+/// Move a capability between slots within the same CNode.
+///
+/// Unlike [`cap_move`], this operates on a single `&mut C`, avoiding the
+/// undefined behaviour of creating two `&mut` references to the same
+/// allocation.
+pub fn cap_move_local<C: CNodeOps>(
+    cnode: &mut C,
+    src_index: usize,
+    dst_index: usize,
+) -> CapResult<()> {
+    if src_index == dst_index {
+        return Ok(());
+    }
+
+    let src_slot = cnode.get_slot(src_index).ok_or(CapError::InvalidIndex)?;
+    if src_slot.is_empty() {
+        return Err(CapError::EmptySlot);
+    }
+
+    let dst_slot = cnode.get_slot(dst_index).ok_or(CapError::InvalidIndex)?;
+    if !dst_slot.is_empty() {
+        return Err(CapError::SlotOccupied);
+    }
+
+    let cap_data = CapSlot::new(
+        src_slot.object_ref(),
+        src_slot.cap_type(),
+        src_slot.rights(),
+        src_slot.badge(),
+        src_slot.flags(),
+    );
+
+    let src_slot = cnode.get_slot_mut(src_index).ok_or(CapError::InvalidIndex)?;
+    src_slot.clear();
+    cnode.meta_mut().decrement_used();
+
+    let dst_slot = cnode.get_slot_mut(dst_index).ok_or(CapError::InvalidIndex)?;
+    *dst_slot = cap_data;
+    cnode.meta_mut().increment_used();
 
     Ok(())
 }
@@ -264,6 +372,62 @@ pub fn cap_mint<C: CNodeOps>(
     Ok(())
 }
 
+/// Mint a derived capability within the same CNode.
+///
+/// Unlike [`cap_mint`], this operates on a single `&mut C`, avoiding the
+/// undefined behaviour of creating two `&mut` references to the same
+/// allocation.
+pub fn cap_mint_local<C: CNodeOps>(
+    cnode: &mut C,
+    src_index: usize,
+    dst_index: usize,
+    new_rights: CapRights,
+    badge: Badge,
+) -> CapResult<()> {
+    let src_slot = cnode.get_slot(src_index).ok_or(CapError::InvalidIndex)?;
+    if src_slot.is_empty() {
+        return Err(CapError::EmptySlot);
+    }
+
+    if !new_rights.is_subset_of(src_slot.rights()) {
+        return Err(CapError::RightsEscalation);
+    }
+
+    let cap_type = src_slot.cap_type();
+    if badge.is_some() && !cap_type.supports_badge() {
+        return Err(CapError::BadgeNotSupported);
+    }
+
+    if src_slot.badge().is_some() && badge.is_some() && badge != src_slot.badge() {
+        return Err(CapError::BadgeAlreadySet);
+    }
+
+    let dst_slot_ref = cnode.get_slot(dst_index).ok_or(CapError::InvalidIndex)?;
+    if !dst_slot_ref.is_empty() {
+        return Err(CapError::SlotOccupied);
+    }
+
+    let effective_badge = if badge.is_some() {
+        badge
+    } else {
+        src_slot.badge()
+    };
+
+    let new_slot = CapSlot::new(
+        src_slot.object_ref(),
+        cap_type,
+        new_rights,
+        effective_badge,
+        SlotFlags::IN_CDT,
+    );
+
+    let dst_slot = cnode.get_slot_mut(dst_index).ok_or(CapError::InvalidIndex)?;
+    *dst_slot = new_slot;
+    cnode.meta_mut().increment_used();
+
+    Ok(())
+}
+
 /// Mint with CDT tracking.
 ///
 /// Like [`cap_mint`], but also updates the CDT to track the derivation.
@@ -296,6 +460,39 @@ pub fn cap_mint_with_cdt<C: CNodeOps, D: CdtOps>(
     }
 
     // Insert as child of source
+    if src_cdt_node.is_valid() {
+        cdt.insert_child(src_cdt_node, new_node_id);
+    }
+
+    Ok(new_node_id)
+}
+
+/// Mint within the same CNode with CDT tracking.
+///
+/// Like [`cap_mint_local`], but also updates the CDT to track the
+/// derivation.
+#[allow(clippy::too_many_arguments)]
+pub fn cap_mint_local_with_cdt<C: CNodeOps, D: CdtOps>(
+    cnode: &mut C,
+    src_index: usize,
+    dst_index: usize,
+    new_rights: CapRights,
+    badge: Badge,
+    cdt: &mut D,
+    src_cdt_node: CdtNodeId,
+    dst_cnode_ref: crate::slot::ObjectRef,
+) -> CapResult<CdtNodeId> {
+    cap_mint_local(cnode, src_index, dst_index, new_rights, badge)?;
+
+    let new_node_id = cdt.alloc_node().ok_or(CapError::OutOfMemory)?;
+    let src_slot = cnode.get_slot(src_index).ok_or(CapError::InvalidIndex)?;
+
+    if let Some(new_node) = cdt.get_node_mut(new_node_id) {
+        new_node.object_ref = src_slot.object_ref();
+        new_node.slot_cnode = dst_cnode_ref;
+        new_node.slot_index = dst_index as u32;
+    }
+
     if src_cdt_node.is_valid() {
         cdt.insert_child(src_cdt_node, new_node_id);
     }
