@@ -349,6 +349,11 @@ fn cap_mint<C: CNodeOps>(
         return Err(CapError::BadgeNotSupported);
     }
 
+    // Setting a badge requires GRANT right on the source capability
+    if badge.is_some() && !src_slot.rights().has_grant() {
+        return Err(CapError::InsufficientRights);
+    }
+
     // If source has badge, new badge must match or be none
     // Badged capabilities are terminal — no further minting allowed
     if src_slot.badge().is_some() {
@@ -409,6 +414,11 @@ fn cap_mint_local<C: CNodeOps>(
     let cap_type = src_slot.cap_type();
     if badge.is_some() && !cap_type.supports_badge() {
         return Err(CapError::BadgeNotSupported);
+    }
+
+    // Setting a badge requires GRANT right on the source capability
+    if badge.is_some() && !src_slot.rights().has_grant() {
+        return Err(CapError::InsufficientRights);
     }
 
     // Badged capabilities are terminal — no further minting allowed
