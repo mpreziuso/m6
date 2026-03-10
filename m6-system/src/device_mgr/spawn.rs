@@ -601,6 +601,23 @@ pub fn spawn_driver(
         &cptr,
     )?;
 
+    // Ensure page tables exist for scratchpad buffer region (used by USB xHCI drivers)
+    // xHCI scratchpad pages are retyped and mapped at 0x9000_0000+ for IOMMU DMA
+    if config.manifest.binary_name == "drv-usb-dwc3"
+        || config.manifest.binary_name == "drv-usb-xhci"
+    {
+        const SCRATCHPAD_VADDR: u64 = 0x9000_0000;
+        // 64 scratchpad pages max (256KB) — RK3588 requires up to 32
+        const SCRATCHPAD_SIZE: u64 = 64 * PAGE_SIZE as u64;
+        ensure_page_tables(
+            vspace_slot,
+            SCRATCHPAD_VADDR,
+            SCRATCHPAD_VADDR + SCRATCHPAD_SIZE,
+            registry,
+            &cptr,
+        )?;
+    }
+
     // Ensure page tables exist for INSTANCE_INFO region (used by SMMU drivers)
     // SMMU drivers map instance info frame at 0x70000000 to read their instance index
     if config.manifest.binary_name == "drv-smmu" {

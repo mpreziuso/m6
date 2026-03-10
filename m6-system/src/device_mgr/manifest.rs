@@ -266,10 +266,10 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-usb-dwc3",
         needs_irq: true,
         needs_msix: false,
-        // FIXME: Disabled until SMMU command queue is fixed (cons returns garbage)
-        // When enabled, USB DMA gets blocked by SMMU causing HSE errors
+        // PHP SMMU (mmu600_php) is disabled on RK3588 — USB DMA bypasses the
+        // SMMU at the SoC interconnect, so physical addresses are used directly.
         needs_iommu: false,
-        needs_dma: true, // DMA buffers required even without IOMMU
+        needs_dma: true,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: DWC3_ADDITIONAL_FRAMES,

@@ -11,7 +11,10 @@
 //! - Slot 10: DeviceFrame for xHCI MMIO access
 //! - Slot 11: IRQHandler for interrupt handling
 //! - Slot 12: Service endpoint for client requests
+//! - Slot 13: IOSpace for DMA isolation (SMMU translation domain)
 //! - Slot 14: Notification for IRQ delivery
+//! - Slot 16: DmaPool for IOVA allocation
+//! - Slot 17: RAM untyped for dynamic frame allocation
 //! - Slots 21-36: DMA buffer frames (16 pages = 64KB)
 
 #![no_std]
@@ -27,8 +30,8 @@ mod ipc;
 mod xhci;
 
 use m6_syscall::invoke::{
-    frame_get_phys, irq_set_handler, map_frame, poll, recv, reply_recv, sched_yield, signal,
-    tcb_bind_notification,
+    cache_flush, dma_pool_alloc, iospace_map_frame, irq_set_handler, map_frame, poll, recv,
+    reply_recv, sched_yield, signal, tcb_bind_notification,
 };
 
 use ipc::{request, response, status};
@@ -43,11 +46,15 @@ const fn cptr(slot: u64) -> u64 {
     slot << (64 - CNODE_RADIX)
 }
 
+const ROOT_CNODE: u64 = cptr(0);
 const ROOT_VSPACE: u64 = cptr(2);
 const DEVICE_FRAME: u64 = cptr(10);
 const IRQ_HANDLER: u64 = cptr(11);
 const SERVICE_EP: u64 = cptr(12);
+const IOSPACE: u64 = cptr(13);
 const IRQ_NOTIF: u64 = cptr(14);
+const DMA_POOL: u64 = cptr(16);
+const RAM_UNTYPED: u64 = cptr(17);
 
 // MSI-X slots (provided by device-mgr for PCIe devices with MSI-X)
 const MSIX_NOTIF_START: u64 = 48;
@@ -62,6 +69,8 @@ const fn msix_notif(vector: usize) -> u64 {
 const XHCI_MMIO_VADDR: u64 = 0x0000_8000_0000;
 /// IRQ badge
 const IRQ_BADGE: u64 = 1;
+/// Base virtual address for scratchpad page mappings
+const SCRATCHPAD_VADDR_BASE: u64 = 0x9000_0000;
 
 // -- DMA Buffer slots (provided by device-mgr for DMA-capable drivers)
 
@@ -90,8 +99,6 @@ struct XhciDevice {
     devices_enumerated: bool,
     /// Whether xHCI has been initialised with DMA
     xhci_initialized: bool,
-    /// DMA region IOVA (physical address for device access)
-    dma_iova: u64,
 }
 
 /// Basic USB device info
@@ -112,6 +119,44 @@ struct UsbInterfaceInfo {
     protocol: u8,
     endpoint_address: u8,
     endpoint_interval: u8,
+}
+
+/// Map DMA buffer frames into IOSpace for SMMU-backed DMA isolation.
+///
+/// Returns (base_iova, XhciDmaRegion) on success, or None if DMA setup fails.
+fn map_dma_buffers() -> Option<(u64, XhciDmaRegion)> {
+    let mut base_iova = 0u64;
+
+    for i in 0..DMA_BUFFER_COUNT {
+        let frame_cap = dma_buffer_cptr(i);
+
+        // Allocate IOVA from DmaPool (contiguous by design)
+        let iova = dma_pool_alloc(DMA_POOL, 4096, 4096).ok()?;
+        if i == 0 {
+            base_iova = iova;
+        }
+
+        // Map frame into IOSpace for device DMA access (RW)
+        if iospace_map_frame(IOSPACE, frame_cap, iova, 0b11).is_err() {
+            return None;
+        }
+
+        // Zero the page and flush to DRAM (non-coherent SMMU reads from DRAM)
+        let page_addr = DMA_BUFFER_VADDR + (i as u64) * 4096;
+        // SAFETY: Memory is mapped by device-mgr
+        unsafe {
+            core::ptr::write_bytes(page_addr as *mut u8, 0, 4096);
+        }
+        let _ = cache_flush(page_addr, 4096);
+    }
+
+    let dma = XhciDmaRegion {
+        vaddr: DMA_BUFFER_VADDR,
+        iova: base_iova,
+        size: DMA_BUFFER_COUNT * 4096,
+    };
+
+    Some((base_iova, dma))
 }
 
 /// Set up IRQ handling
@@ -154,22 +199,20 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
     // SAFETY: device_addr is mapped
     let mut xhci_ctrl = unsafe { XhciController::new(device_addr) };
 
-    // Get physical address of first DMA buffer frame for IOVA
-    let dma_iova: u64 = match frame_get_phys(dma_buffer_cptr(0)) {
-        Ok(phys) => phys as u64,
-        Err(_) => 0,
-    };
-
-    // Initialise xHCI with DMA buffers (if available)
-    let xhci_initialized = if dma_iova != 0 {
-        let dma = XhciDmaRegion {
-            vaddr: DMA_BUFFER_VADDR,
-            iova: dma_iova,
-            size: DMA_BUFFER_COUNT * 4096, // 64KB
+    // Map DMA buffer frames into IOSpace for SMMU-backed DMA
+    let xhci_initialized = if let Some((_base_iova, dma)) = map_dma_buffers() {
+        let mut iommu_ctx = xhci::IommuContext {
+            iospace: IOSPACE,
+            dma_pool: DMA_POOL,
+            ram_untyped: RAM_UNTYPED,
+            root_cnode: ROOT_CNODE,
+            root_vspace: ROOT_VSPACE,
+            next_free_slot: 144, // slots::driver::FIRST_FREE_SLOT
+            scratchpad_vaddr_base: SCRATCHPAD_VADDR_BASE,
         };
 
         // SAFETY: DMA region is mapped by device-mgr
-        match unsafe { xhci_ctrl.initialize(&dma) } {
+        match unsafe { xhci_ctrl.initialize(&dma, Some(&mut iommu_ctx)) } {
             Ok(()) => true,
             Err(_) => false,
         }
@@ -186,7 +229,6 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
         devices: alloc::vec::Vec::new(),
         devices_enumerated: false,
         xhci_initialized,
-        dma_iova,
     };
 
     service_loop(&mut device);

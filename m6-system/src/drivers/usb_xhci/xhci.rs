@@ -10,7 +10,10 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use core::ptr::{read_volatile, write_volatile};
-use m6_syscall::invoke::{cache_clean, cache_flush, cache_invalidate};
+use m6_syscall::invoke::{
+    cache_clean, cache_flush, cache_invalidate, dma_pool_alloc, iospace_map_frame, map_frame,
+    retype,
+};
 
 // -- xHCI Register Structures
 
@@ -390,10 +393,31 @@ const MAX_DEVICE_SLOTS: usize = 32;
 pub struct XhciDmaRegion {
     /// Virtual address (CPU accessible)
     pub vaddr: u64,
-    /// IOVA/Physical address (device accessible)
+    /// IOVA (device accessible via SMMU)
     pub iova: u64,
     /// Size in bytes
     pub size: usize,
+}
+
+/// IOMMU context for mapping DMA pages through the SMMU.
+///
+/// When present, scratchpad buffer pages are retyped from RAM untyped memory,
+/// mapped to both VSpace (CPU access) and IOSpace (device DMA via SMMU).
+pub struct IommuContext {
+    /// IOSpace capability (SMMU translation domain)
+    pub iospace: u64,
+    /// DmaPool capability (IOVA allocator)
+    pub dma_pool: u64,
+    /// RAM untyped capability (source for retyping frames)
+    pub ram_untyped: u64,
+    /// Root CNode capability (destination for new frame caps)
+    pub root_cnode: u64,
+    /// Root VSpace capability (for mapping frames to CPU address space)
+    pub root_vspace: u64,
+    /// Next free CSpace slot for allocating frame capabilities
+    pub next_free_slot: u64,
+    /// Base virtual address for mapping scratchpad pages
+    pub scratchpad_vaddr_base: u64,
 }
 
 impl XhciDmaRegion {
@@ -712,11 +736,16 @@ impl XhciController {
     /// # Arguments
     ///
     /// * `dma` - DMA memory region (must be at least 16KB, 64-byte aligned)
+    /// * `iommu` - IOMMU context for scratchpad page allocation (None falls back to heap physical addresses)
     ///
     /// # Safety
     ///
     /// The DMA region must be valid and accessible by both CPU and device.
-    pub unsafe fn initialize(&mut self, dma: &XhciDmaRegion) -> Result<(), &'static str> {
+    pub unsafe fn initialize(
+        &mut self,
+        dma: &XhciDmaRegion,
+        iommu: Option<&mut IommuContext>,
+    ) -> Result<(), &'static str> {
         // Memory layout in DMA region:
         // 0x0000 - 0x0FFF: DCBAA (4KB, 64-byte aligned)
         // 0x1000 - 0x1FFF: Command Ring (4KB = 256 TRBs)
@@ -846,11 +875,15 @@ impl XhciController {
         }
 
         // Setup scratchpad buffers if required by the controller
-        self.setup_scratchpad_buffers(dma)?;
+        self.setup_scratchpad_buffers(dma, iommu)?;
 
         // Flush CPU caches to ensure DMA structures are visible to hardware.
         // ARM is not cache-coherent for device DMA by default.
         let _ = cache_flush(dma.vaddr, dma.size);
+
+        // DSB + ISB to ensure all cache maintenance and SMMU translation
+        // installs have completed before the controller starts DMA.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
 
         // Start the controller
         self.start()?;
@@ -906,9 +939,14 @@ impl XhciController {
     /// scheduler (interrupt/isochronous endpoints) may not function.
     ///
     /// The scratchpad buffer array lives in the DMA region at offset 0xA000.
-    /// Scratchpad pages themselves are allocated from the heap to avoid
-    /// being constrained by the DMA region size (RK3588 requires 32 pages).
-    fn setup_scratchpad_buffers(&mut self, dma: &XhciDmaRegion) -> Result<(), &'static str> {
+    /// Scratchpad pages are retyped from RAM untyped and mapped through the
+    /// IOMMU when an IommuContext is provided, or allocated from the heap
+    /// with physical address lookup as a fallback.
+    fn setup_scratchpad_buffers(
+        &mut self,
+        dma: &XhciDmaRegion,
+        iommu: Option<&mut IommuContext>,
+    ) -> Result<(), &'static str> {
         let cap_regs = self.read_cap_regs();
         let num_bufs = cap_regs.max_scratchpad_bufs() as usize;
 
@@ -931,31 +969,12 @@ impl XhciController {
             core::ptr::write_bytes(array_vaddr as *mut u8, 0, 0x1000);
         }
 
-        // Allocate scratchpad pages from the heap and register their physical
-        // addresses in the array. Using heap avoids DMA region size constraints.
-        let layout = core::alloc::Layout::from_size_align(0x1000, 0x1000)
-            .map_err(|_| "invalid scratchpad page layout")?;
-
-        for i in 0..num_bufs {
-            // SAFETY: Layout is valid (4KB size, 4KB aligned)
-            let page_ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
-            if page_ptr.is_null() {
-                return Err("failed to allocate scratchpad page");
-            }
-            let page_vaddr = page_ptr as u64;
-
-            // Flush zeroed page to physical memory so the controller sees it
-            let _ = cache_clean(page_vaddr, 0x1000);
-
-            // Get the physical address for this heap page
-            let page_phys = crate::rt::get_heap_phys_addr(page_vaddr)
-                .ok_or("scratchpad page has no physical address")?;
-
-            // Write page physical address to the Scratchpad Buffer Array
-            // SAFETY: array_vaddr is mapped DMA memory
-            unsafe {
-                write_volatile((array_vaddr + (i as u64) * 8) as *mut u64, page_phys);
-            }
+        if let Some(ctx) = iommu {
+            // IOMMU path: retype frames from RAM untyped, map to VSpace + IOSpace
+            self.setup_scratchpad_iommu(num_bufs, array_vaddr, ctx)?;
+        } else {
+            // Fallback: allocate from heap, use physical addresses
+            self.setup_scratchpad_heap(num_bufs, array_vaddr)?;
         }
 
         // Flush the scratchpad buffer array to physical memory
@@ -968,6 +987,102 @@ impl XhciController {
             write_volatile(dcbaa.vaddr as *mut u64, array_iova);
         }
         let _ = cache_clean(dcbaa.vaddr, 8);
+
+        Ok(())
+    }
+
+    /// Allocate scratchpad pages via IOMMU: retype frames, map to VSpace and IOSpace.
+    fn setup_scratchpad_iommu(
+        &self,
+        num_bufs: usize,
+        array_vaddr: u64,
+        ctx: &mut IommuContext,
+    ) -> Result<(), &'static str> {
+        // CNode radix for slot addressing (must match driver's CNode)
+        const CNODE_RADIX: u8 = 10;
+        #[inline]
+        const fn slot_to_cptr(slot: u64) -> u64 {
+            slot << (64 - CNODE_RADIX)
+        }
+
+        for i in 0..num_bufs {
+            let frame_slot = ctx.next_free_slot;
+            ctx.next_free_slot += 1;
+            let frame_cptr = slot_to_cptr(frame_slot);
+
+            // Retype a 4KB frame from RAM untyped
+            // ObjectType::Frame = 2
+            if retype(
+                ctx.ram_untyped,
+                2,  // ObjectType::Frame
+                12, // 2^12 = 4KB
+                ctx.root_cnode,
+                frame_slot,
+                1,
+            )
+            .is_err()
+            {
+                return Err("failed to retype scratchpad frame");
+            }
+
+            // Map frame to VSpace for CPU access
+            let page_vaddr = ctx.scratchpad_vaddr_base + (i as u64) * 0x1000;
+            if map_frame(ctx.root_vspace, frame_cptr, page_vaddr, 0b011, 0).is_err() {
+                return Err("failed to map scratchpad frame to VSpace");
+            }
+
+            // Zero the page and flush to DRAM
+            // SAFETY: Frame is mapped at page_vaddr
+            unsafe {
+                core::ptr::write_bytes(page_vaddr as *mut u8, 0, 0x1000);
+            }
+            let _ = cache_flush(page_vaddr, 0x1000);
+
+            // Allocate IOVA from DmaPool
+            let iova = dma_pool_alloc(ctx.dma_pool, 0x1000, 0x1000)
+                .map_err(|_| "failed to allocate scratchpad IOVA")?;
+
+            // Map frame to IOSpace for device DMA access (RW)
+            if iospace_map_frame(ctx.iospace, frame_cptr, iova, 0b11).is_err() {
+                return Err("failed to map scratchpad frame to IOSpace");
+            }
+
+            // Write IOVA to the Scratchpad Buffer Array
+            // SAFETY: array_vaddr is mapped DMA memory
+            unsafe {
+                write_volatile((array_vaddr + (i as u64) * 8) as *mut u64, iova);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Fallback: allocate scratchpad pages from the heap using physical addresses.
+    fn setup_scratchpad_heap(&self, num_bufs: usize, array_vaddr: u64) -> Result<(), &'static str> {
+        let layout = core::alloc::Layout::from_size_align(0x1000, 0x1000)
+            .map_err(|_| "invalid scratchpad page layout")?;
+
+        for i in 0..num_bufs {
+            // SAFETY: Layout is valid (4KB size, 4KB aligned)
+            let page_ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+            if page_ptr.is_null() {
+                return Err("failed to allocate scratchpad page");
+            }
+            let page_vaddr = page_ptr as u64;
+
+            // Flush zeroed page to DRAM so the controller sees it
+            let _ = cache_clean(page_vaddr, 0x1000);
+
+            // Get the physical address for this heap page
+            let page_phys = crate::rt::get_heap_phys_addr(page_vaddr)
+                .ok_or("scratchpad page has no physical address")?;
+
+            // Write page physical address to the Scratchpad Buffer Array
+            // SAFETY: array_vaddr is mapped DMA memory
+            unsafe {
+                write_volatile((array_vaddr + (i as u64) * 8) as *mut u64, page_phys);
+            }
+        }
 
         Ok(())
     }
@@ -1069,6 +1184,15 @@ impl XhciController {
             write_volatile(erst_entry.add(1), EVENT_RING_SIZE as u64);
         }
 
+        // Flush event ring and ERST to DRAM before writing hardware registers.
+        // The xHCI spec requires the controller to read the ERST when ERSTBA is
+        // written (Section 5.5.2.3.2). On ARM with non-coherent DMA (SMMU or
+        // direct), the CPU cache must be clean first or the controller reads
+        // stale data — typically zeros, leading to a bus error (HSE) when it
+        // later tries to write a completion event to address 0.
+        let _ = cache_clean(ring_vaddr, ring_size_bytes);
+        let _ = cache_clean(erst_vaddr, 16);
+
         // Write to interrupter 0 registers (at runtime base + 0x20 + interrupter*32)
         let intr0_base = self.runtime_base() + 0x20;
         // SAFETY: MMIO is mapped
@@ -1166,23 +1290,21 @@ impl XhciController {
                 }
             }
 
-            // Check for controller errors periodically
-            if iteration == 500 {
+            // Check for fatal controller errors at increasing intervals.
+            // HSE/HCE halt the controller permanently, so check early.
+            if iteration == 10 || iteration == 100 || iteration == 500 {
                 let (usbcmd, usbsts, _, _) = self.get_diagnostics();
                 if (usbsts & 0x1000) != 0 {
-                    // HCE - Host Controller Error
                     self.last_error_usbsts = usbsts;
                     self.last_error_usbcmd = usbcmd;
                     return Err("HCE: Host Controller Error");
                 }
                 if (usbsts & 0x4) != 0 {
-                    // HSE - Host System Error (DMA issue)
                     self.last_error_usbsts = usbsts;
                     self.last_error_usbcmd = usbcmd;
                     return Err("HSE: Host System Error (DMA)");
                 }
                 if (usbsts & 0x1) != 0 {
-                    // HCH - controller halted
                     self.last_error_usbsts = usbsts;
                     self.last_error_usbcmd = usbcmd;
                     return Err("HCH: Controller halted");

@@ -175,9 +175,11 @@ pub fn deliver_fault(
         BlockInSendQueue { old_tail: ObjectRef },
     }
 
-    let action = match object_table::ipc_dequeue_recv(fault_ep)
-        .unwrap_or(object_table::IpcDequeueResult::NoneQueued { old_tail: ObjectRef::NULL })
-    {
+    let action = match object_table::ipc_dequeue_recv(fault_ep).unwrap_or(
+        object_table::IpcDequeueResult::NoneQueued {
+            old_tail: ObjectRef::NULL,
+        },
+    ) {
         object_table::IpcDequeueResult::Dequeued(handler_ref) => Action::DeliverTo(handler_ref),
         object_table::IpcDequeueResult::NoneQueued { old_tail } => {
             Action::BlockInSendQueue { old_tail }
