@@ -10,7 +10,7 @@ use m6_paging::{
     arch::arm64::{mapping, tables::L0Table},
     permissions::{MemoryType, PtePermissions},
     region::{PhysMemoryRegion, VirtMemoryRegion},
-    traits::{MapAttributes, MapError, PageAllocator},
+    traits::{MapAttributes, MapError, NoOpInvalidator, PageAllocator},
 };
 
 use crate::initrd::elf_loader::{ElfLoadError, PagePerms};
@@ -116,7 +116,9 @@ fn map_user_page(
     let virt_region = VirtMemoryRegion::new(VA::new(virt), 0x1000);
     let attrs = MapAttributes::new(phys_region, virt_region, MemoryType::Normal, perms);
 
-    mapping::map_range(l0, attrs, allocator)?;
+    // NoOpInvalidator is correct here: the user VSpace page tables are not
+    // yet installed in any CPU's TTBR0, so no stale TLB entries can exist.
+    mapping::map_range(l0, attrs, allocator, &NoOpInvalidator)?;
     Ok(())
 }
 

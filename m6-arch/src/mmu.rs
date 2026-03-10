@@ -91,8 +91,10 @@ pub mod flags {
     pub const KERNEL_DATA: u64 = VALID | PAGE | AF | SH_INNER | ATTR_NORMAL | UXN | PXN;
     /// Kernel read-only data
     pub const KERNEL_RODATA: u64 = VALID | PAGE | AF | SH_INNER | ATTR_NORMAL | UXN | PXN | AP_RO;
-    /// User code (RX)
-    pub const USER_CODE: u64 = VALID | PAGE | AF | SH_INNER | ATTR_NORMAL | AP_EL0 | PXN | NG;
+    /// User code (RX, read-only + execute at EL0)
+    /// AP_RO enforces W^X: user code pages are not writable.
+    pub const USER_CODE: u64 =
+        VALID | PAGE | AF | SH_INNER | ATTR_NORMAL | AP_EL0 | AP_RO | PXN | NG;
     /// User data (RW, no execute)
     pub const USER_DATA: u64 = VALID | PAGE | AF | SH_INNER | ATTR_NORMAL | AP_EL0 | UXN | PXN | NG;
     /// User read-only data
@@ -241,12 +243,18 @@ impl Mmu {
         TTBR0_EL1.set(ttbr0);
         TTBR1_EL1.set(ttbr1);
 
-        // Ensure all writes complete
-        isb();
+        // Ensure all system register writes (MAIR, TCR, TTBR0, TTBR1)
+        // are committed before TLB invalidation and MMU enable.
+        // ARM ARM D8.10: DSB drains the store buffer, ISB flushes the pipeline.
         dsb_sy();
+        isb();
 
         // Invalidate TLB
         self.invalidate_tlb_all();
+
+        // Ensure TLB invalidation completes before enabling the MMU
+        dsb_sy();
+        isb();
 
         // Enable MMU
         let mut sctlr = SCTLR_EL1.get();

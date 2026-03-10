@@ -13,7 +13,7 @@ use super::descriptors::{
 use super::tables::{L0Table, L1Table, L2Table, L3Table, PgTable, zero_table};
 use crate::address::{PA, TPA, VA};
 use crate::region::{PhysMemoryRegion, VirtMemoryRegion};
-use crate::traits::{MapAttributes, MapError, PageAllocator};
+use crate::traits::{MapAttributes, MapError, PageAllocator, TLBInvalidator};
 
 /// Map a memory region using the greedy algorithm
 ///
@@ -34,10 +34,11 @@ use crate::traits::{MapAttributes, MapError, PageAllocator};
 /// 1. Try to map at L1 (1GB block) if aligned and large enough
 /// 2. Otherwise try L2 (2MB block)
 /// 3. Fall back to L3 (4KB page)
-pub fn map_range<A: PageAllocator>(
+pub fn map_range<A: PageAllocator, T: TLBInvalidator>(
     l0: &mut L0Table,
     attrs: MapAttributes,
     allocator: &mut A,
+    _tlb: &T,
 ) -> Result<(), MapError> {
     // Validate inputs
     if attrs.phys.size() != attrs.virt.size() {
@@ -201,12 +202,13 @@ fn get_or_create_l3<A: PageAllocator>(
 ///
 /// Convenience function for mapping a single page when the full
 /// greedy algorithm isn't needed.
-pub fn map_page<A: PageAllocator>(
+pub fn map_page<A: PageAllocator, T: TLBInvalidator>(
     l0: &mut L0Table,
     pa: PA,
     va: VA,
     attrs: &MapAttributes,
     allocator: &mut A,
+    _tlb: &T,
 ) -> Result<(), MapError> {
     if !pa.is_page_aligned() || !va.is_page_aligned() {
         return Err(MapError::NotAligned);
@@ -230,11 +232,12 @@ pub fn map_page<A: PageAllocator>(
 /// Map an identity region (VA = PA)
 ///
 /// Convenience function for creating identity mappings during boot.
-pub fn map_identity<A: PageAllocator>(
+pub fn map_identity<A: PageAllocator, T: TLBInvalidator>(
     l0: &mut L0Table,
     phys: PhysMemoryRegion,
     attrs: &MapAttributes,
     allocator: &mut A,
+    tlb: &T,
 ) -> Result<(), MapError> {
     let virt = VirtMemoryRegion::new(VA::new(phys.start().value()), phys.size());
 
@@ -247,16 +250,26 @@ pub fn map_identity<A: PageAllocator>(
             perms: attrs.perms,
         },
         allocator,
+        tlb,
     )
 }
 
-/// Unmap a virtual address (set entry to invalid)
+/// Unmap a virtual address using the Break-Before-Make sequence.
+///
+/// Performs the full ARM-required BBM sequence:
+/// 1. Write invalid descriptor
+/// 2. DSB ISHST (ensure store is visible)
+/// 3. TLBI (invalidate stale TLB entry)
+/// 4. DSB ISH (ensure TLBI completes on all cores)
 ///
 /// # Safety
-/// Caller must ensure:
-/// - The mapping exists and is not in use
-/// - TLB is invalidated after this call
-pub unsafe fn unmap_page(l0: &mut L0Table, va: VA) -> Result<(), MapError> {
+/// Caller must ensure the mapping exists and is not in active use
+/// by any other core at the moment of the call.
+pub unsafe fn unmap_page<T: TLBInvalidator>(
+    l0: &mut L0Table,
+    va: VA,
+    tlb: &T,
+) -> Result<(), MapError> {
     if !va.is_page_aligned() {
         return Err(MapError::NotAligned);
     }
@@ -300,14 +313,25 @@ pub unsafe fn unmap_page(l0: &mut L0Table, va: VA) -> Result<(), MapError> {
         return Err(MapError::InvalidAttributes);
     }
 
-    // Clear the L3 entry
-    // SAFETY: Caller guarantees the mapping is not in use
+    // Break-Before-Make: write invalid, barrier, TLBI, barrier
+    // SAFETY: Caller guarantees the mapping is not in active use
     unsafe { l3.set_desc(va, L3Descriptor::invalid()) };
 
-    // DSB to ensure the store is visible before the caller issues TLBI.
+    // DSB ISHST: ensure the invalid descriptor write is visible to all
+    // cores before we issue TLB invalidation.
     // SAFETY: DSB is always safe.
     unsafe {
         core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+    }
+
+    // Invalidate the stale TLB entry on all cores
+    tlb.invalidate(va);
+
+    // DSB ISH: ensure TLB invalidation is complete before returning,
+    // so no core can observe the old mapping.
+    // SAFETY: DSB is always safe.
+    unsafe {
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
     }
 
     Ok(())
