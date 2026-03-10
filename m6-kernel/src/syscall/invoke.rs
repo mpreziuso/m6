@@ -15,7 +15,7 @@
 //! The sentinel is `u64::MAX` because slot 0 (CPtr 0) is the root CNode.
 
 use m6_arch::exceptions::ExceptionContext;
-use m6_cap::ObjectType;
+use m6_cap::{CapRights, ObjectType};
 use m6_syscall::numbers::{self, method};
 
 use crate::ipc;
@@ -38,8 +38,12 @@ pub fn handle_invoke(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallR
         return dispatch_self(label, args);
     }
 
-    // Resolve the capability without type-checking
+    // Resolve the capability and check invocation rights
     let cap = ipc::lookup_cap_any(cap_cptr)?;
+    let required = minimum_invoke_rights(cap.obj_type, label);
+    if !cap.rights.contains(required) {
+        return Err(SyscallError::NoRights);
+    }
 
     match cap.obj_type {
         ObjectType::Untyped => dispatch_untyped(label, args),
@@ -56,6 +60,37 @@ pub fn handle_invoke(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallR
         ObjectType::IOSpace => dispatch_iospace(label, args),
         ObjectType::DmaPool => dispatch_dma_pool(label, args),
         _ => Err(SyscallError::TypeMismatch),
+    }
+}
+
+// -- Invocation rights policy
+//
+// Centralised rights check for all object invocations. Determines the
+// minimum CapRights required on the invoked capability for a given
+// (object_type, method_label) pair. Checked once in handle_invoke before
+// any handler runs — this prevents privilege escalation through
+// attenuated (e.g. READ-only) capabilities.
+
+fn minimum_invoke_rights(obj_type: ObjectType, label: u64) -> CapRights {
+    match obj_type {
+        // Frame: read-only query vs mutating write
+        ObjectType::Frame | ObjectType::DeviceFrame => match label {
+            method::frame::GET_PHYS => CapRights::READ,
+            _ => CapRights::WRITE,
+        },
+
+        // TCB: reading registers is non-mutating
+        ObjectType::TCB => match label {
+            method::tcb::READ_REGS => CapRights::READ,
+            _ => CapRights::WRITE,
+        },
+
+        // Singleton control caps require full authority
+        ObjectType::IRQControl => CapRights::ALL,
+        ObjectType::TimerControl => CapRights::ALL,
+
+        // All other types and methods: WRITE
+        _ => CapRights::WRITE,
     }
 }
 
