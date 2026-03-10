@@ -544,7 +544,13 @@ pub fn cap_move(
 /// - `badge_value` - Badge value (only used if set_badge != 0)
 #[inline]
 pub fn cap_mint(dest_cnode: u64, dest_index: u64, src_cnode: u64, src_index: u64) -> SyscallResult {
-    check_result(invoke5(dest_cnode, method::cnode::MINT, dest_index, src_cnode, src_index))
+    check_result(invoke5(
+        dest_cnode,
+        method::cnode::MINT,
+        dest_index,
+        src_cnode,
+        src_index,
+    ))
 }
 
 /// Delete a capability from a slot.
@@ -594,7 +600,13 @@ pub fn cap_revoke(cnode: u64, index: u64, depth: u64) -> SyscallResult {
 /// * `new_rights` - New rights (must be subset of current)
 #[inline]
 pub fn cap_mutate(cnode: u64, index: u64, depth: u64, new_rights: u64) -> SyscallResult {
-    check_result(invoke5(cnode, method::cnode::MUTATE, index, depth, new_rights))
+    check_result(invoke5(
+        cnode,
+        method::cnode::MUTATE,
+        index,
+        depth,
+        new_rights,
+    ))
 }
 
 /// Atomically rotate capabilities between three slots.
@@ -615,7 +627,15 @@ pub fn cap_mutate(cnode: u64, index: u64, depth: u64, new_rights: u64) -> Syscal
 /// * `depth` - Bits to consume resolving CNode (0 = auto)
 #[inline]
 pub fn cap_rotate(cnode: u64, slot1: u64, slot2: u64, slot3: u64, depth: u64) -> SyscallResult {
-    check_result(invoke(cnode, method::cnode::ROTATE, slot1, slot2, slot3, depth, 0))
+    check_result(invoke(
+        cnode,
+        method::cnode::ROTATE,
+        slot1,
+        slot2,
+        slot3,
+        depth,
+        0,
+    ))
 }
 
 // -- Memory Operations
@@ -712,7 +732,13 @@ pub fn unmap_frame(vspace: u64, vaddr: u64) -> SyscallResult {
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn map_page_table(vspace: u64, page_table: u64, vaddr: u64, level: u64) -> SyscallResult {
-    check_result(invoke5(vspace, method::vspace::MAP_PAGE_TABLE, page_table, vaddr, level))
+    check_result(invoke5(
+        vspace,
+        method::vspace::MAP_PAGE_TABLE,
+        page_table,
+        vaddr,
+        level,
+    ))
 }
 
 /// Assign an ASID from a pool to a VSpace.
@@ -748,7 +774,13 @@ pub fn asid_pool_assign(asid_pool: u64, vspace: u64) -> SyscallResult {
 /// Number of bytes written on success, negative error code on failure.
 #[inline]
 pub fn frame_write(frame: u64, offset: u64, src: *const u8, len: usize) -> SyscallResult {
-    check_result(invoke5(frame, method::frame::WRITE, offset, src as u64, len as u64))
+    check_result(invoke5(
+        frame,
+        method::frame::WRITE,
+        offset,
+        src as u64,
+        len as u64,
+    ))
 }
 
 /// Get the physical address of a frame.
@@ -986,7 +1018,12 @@ pub fn irq_control_get(
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn irq_set_handler(irq_handler: u64, notification: u64, badge: u64) -> SyscallResult {
-    check_result(invoke4(irq_handler, method::irq_handler::SET_HANDLER, notification, badge))
+    check_result(invoke4(
+        irq_handler,
+        method::irq_handler::SET_HANDLER,
+        notification,
+        badge,
+    ))
 }
 
 /// Acknowledge an IRQ, allowing it to fire again.
@@ -1138,7 +1175,13 @@ pub fn iospace_create(
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn iospace_map_frame(iospace: u64, frame: u64, iova: u64, rights: u64) -> SyscallResult {
-    check_result(invoke5(iospace, method::iospace::MAP_FRAME, frame, iova, rights))
+    check_result(invoke5(
+        iospace,
+        method::iospace::MAP_FRAME,
+        frame,
+        iova,
+        rights,
+    ))
 }
 
 /// Unmap a frame from an IOSpace.
@@ -1175,7 +1218,12 @@ pub fn iospace_unmap_frame(iospace: u64, iova: u64) -> SyscallResult {
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn iospace_bind_stream(iospace: u64, smmu_control: u64, stream_id: u32) -> SyscallResult {
-    check_result(invoke4(iospace, method::iospace::BIND_STREAM, smmu_control, stream_id as u64))
+    check_result(invoke4(
+        iospace,
+        method::iospace::BIND_STREAM,
+        smmu_control,
+        stream_id as u64,
+    ))
 }
 
 /// Unbind a PCIe stream ID from an IOSpace.
@@ -1193,7 +1241,12 @@ pub fn iospace_bind_stream(iospace: u64, smmu_control: u64, stream_id: u32) -> S
 /// 0 on success, negative error code on failure.
 #[inline]
 pub fn iospace_unbind_stream(iospace: u64, smmu_control: u64, stream_id: u32) -> SyscallResult {
-    check_result(invoke4(iospace, method::iospace::UNBIND_STREAM, smmu_control, stream_id as u64))
+    check_result(invoke4(
+        iospace,
+        method::iospace::UNBIND_STREAM,
+        smmu_control,
+        stream_id as u64,
+    ))
 }
 
 /// Set a fault handler for a bound SMMU stream.
@@ -1422,7 +1475,12 @@ pub fn get_random(buf: &mut [u8]) -> SyscallResult {
     if buf.len() > 256 {
         return Err(crate::error::SyscallError::InvalidArg);
     }
-    check_result(invoke4(SELF_CAP, method::current::GET_RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64))
+    check_result(invoke4(
+        SELF_CAP,
+        method::current::GET_RANDOM,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+    ))
 }
 
 // -- Cache Maintenance Operations
@@ -1457,7 +1515,12 @@ pub enum DmaDirection {
 /// * `Range` - Address is outside userspace range
 #[inline]
 pub fn cache_clean(vaddr: u64, size: usize) -> SyscallResult {
-    check_result(invoke4(SELF_CAP, method::current::CACHE_CLEAN, vaddr, size as u64))
+    check_result(invoke4(
+        SELF_CAP,
+        method::current::CACHE_CLEAN,
+        vaddr,
+        size as u64,
+    ))
 }
 
 /// Invalidate cache range (discard cache lines without writing back).
@@ -1484,7 +1547,12 @@ pub fn cache_clean(vaddr: u64, size: usize) -> SyscallResult {
 /// Typically used after a device has written new data via DMA.
 #[inline]
 pub fn cache_invalidate(vaddr: u64, size: usize) -> SyscallResult {
-    check_result(invoke4(SELF_CAP, method::current::CACHE_INVALIDATE, vaddr, size as u64))
+    check_result(invoke4(
+        SELF_CAP,
+        method::current::CACHE_INVALIDATE,
+        vaddr,
+        size as u64,
+    ))
 }
 
 /// Flush cache range (clean + invalidate).
@@ -1506,7 +1574,12 @@ pub fn cache_invalidate(vaddr: u64, size: usize) -> SyscallResult {
 /// * `Range` - Address is outside userspace range
 #[inline]
 pub fn cache_flush(vaddr: u64, size: usize) -> SyscallResult {
-    check_result(invoke4(SELF_CAP, method::current::CACHE_FLUSH, vaddr, size as u64))
+    check_result(invoke4(
+        SELF_CAP,
+        method::current::CACHE_FLUSH,
+        vaddr,
+        size as u64,
+    ))
 }
 
 /// Synchronise cache for DMA with direction awareness.

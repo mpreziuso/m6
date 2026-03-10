@@ -252,7 +252,10 @@ impl SmmuInstance {
             if cerror != 0 {
                 log::error!(
                     "SMMU #{}: CERROR={} during cmd_sync (cons={:#x} prod={})",
-                    self.index, cerror, cons_raw, self.cmdq.prod
+                    self.index,
+                    cerror,
+                    cons_raw,
+                    self.cmdq.prod
                 );
                 // Acknowledge error: write cons with CERROR cleared
                 let cons_idx = cons_raw & idx_mask;
@@ -355,11 +358,7 @@ impl SmmuInstance {
     /// Submits CMD_PREFETCH_ADDR for the given stream and IOVA. If the
     /// SMMU can't walk the page tables, an event is generated in the
     /// event queue. If the walk succeeds, the entry is silently cached.
-    pub fn prefetch_va(
-        &mut self,
-        stream_id: u32,
-        iova: u64,
-    ) -> Result<(), SmmuError> {
+    pub fn prefetch_va(&mut self, stream_id: u32, iova: u64) -> Result<(), SmmuError> {
         self.submit_cmd_sync(CommandEntry::prefetch_addr(stream_id, iova))
     }
 
@@ -408,9 +407,7 @@ impl SmmuInstance {
 
             // Invalidate cache to read what SMMU sees in DRAM
             m6_arch::cache::cache_invalidate_range(ste_vaddr, StreamTableEntry::SIZE);
-            let ste = unsafe {
-                core::ptr::read_volatile(ste_vaddr as *const StreamTableEntry)
-            };
+            let ste = unsafe { core::ptr::read_volatile(ste_vaddr as *const StreamTableEntry) };
 
             m6_pal::console::puts("[SMMU]   STE[0x");
             put_hex_u32(stream_id);
@@ -465,13 +462,16 @@ impl SmmuInstance {
             return Err(SmmuError::InvalidStreamId);
         }
 
-        self.stream_bindings.insert(stream_id, StreamBindingEntry {
-            cd_table_phys,
-            iospace_ref,
-            fault_notification: fault_notif,
-            fault_badge,
-            is_bound: true,
-        });
+        self.stream_bindings.insert(
+            stream_id,
+            StreamBindingEntry {
+                cd_table_phys,
+                iospace_ref,
+                fault_notification: fault_notif,
+                fault_badge,
+                is_bound: true,
+            },
+        );
         Ok(())
     }
 
@@ -485,9 +485,7 @@ impl SmmuInstance {
 
     /// Get stream binding info for fault delivery.
     pub fn get_stream_binding(&self, stream_id: u32) -> Option<&StreamBindingEntry> {
-        self.stream_bindings
-            .get(&stream_id)
-            .filter(|e| e.is_bound)
+        self.stream_bindings.get(&stream_id).filter(|e| e.is_bound)
     }
 
     /// Find any stream ID bound to the given IOSpace.
@@ -500,13 +498,10 @@ impl SmmuInstance {
 
     /// Prefetch a VA for ALL streams bound to the given IOSpace.
     /// Returns the number of streams tested.
-    pub fn prefetch_all_for_iospace(
-        &mut self,
-        iospace_ref: ObjectRef,
-        iova: u64,
-    ) -> usize {
+    pub fn prefetch_all_for_iospace(&mut self, iospace_ref: ObjectRef, iova: u64) -> usize {
         // Collect stream IDs first (can't borrow self mutably during iteration)
-        let sids: alloc::vec::Vec<u32> = self.stream_bindings
+        let sids: alloc::vec::Vec<u32> = self
+            .stream_bindings
             .iter()
             .filter(|(_, e)| e.is_bound && e.iospace_ref == iospace_ref)
             .map(|(&sid, _)| sid)
@@ -633,7 +628,11 @@ impl SmmuInstance {
     /// - `smmu_index`: SMMU instance index
     /// - `stream_bindings`: Stream binding table for fault delivery
     /// - `event`: Event queue entry
-    fn handle_event(smmu_index: u8, stream_bindings: &BTreeMap<u32, StreamBindingEntry>, event: &EventEntry) {
+    fn handle_event(
+        smmu_index: u8,
+        stream_bindings: &BTreeMap<u32, StreamBindingEntry>,
+        event: &EventEntry,
+    ) {
         let event_type = event.event_type();
         let stream_id = event.stream_id();
         let address = event.address();
@@ -777,14 +776,16 @@ const CRU_SOFTRST_CON34_OFFSET: usize = 0x0A88;
 /// Caller must ensure the CRU physical address is valid and can be mapped.
 unsafe fn init_rk3588_mmu_clocks(smmu_phys: u64) {
     // Check if this is an RK3588 MMU600
-    let is_rk3588_mmu =
-        smmu_phys == RK3588_MMU600_PCIE_BASE || smmu_phys == RK3588_MMU600_PHP_BASE;
+    let is_rk3588_mmu = smmu_phys == RK3588_MMU600_PCIE_BASE || smmu_phys == RK3588_MMU600_PHP_BASE;
 
     if !is_rk3588_mmu {
         return;
     }
 
-    log::info!("RK3588 MMU600 at {:#x}: enabling power domain and clocks", smmu_phys);
+    log::info!(
+        "RK3588 MMU600 at {:#x}: enabling power domain and clocks",
+        smmu_phys
+    );
 
     let pmu_virt = phys_to_virt(RK3588_PMU_BASE);
     let cru_virt = phys_to_virt(RK3588_CRU_BASE);
@@ -859,11 +860,7 @@ unsafe fn init_rk3588_mmu_clocks(smmu_phys: u64) {
 /// - `smmu_phys` must be the physical base address of the SMMU
 /// - `smmu_virt` must be a valid kernel-mapped address for the SMMU registers
 /// - `index` must be a valid SMMU index (0-3)
-pub unsafe fn init(
-    smmu_phys: u64,
-    smmu_virt: u64,
-    index: u8,
-) -> Result<(), SmmuError> {
+pub unsafe fn init(smmu_phys: u64, smmu_virt: u64, index: u8) -> Result<(), SmmuError> {
     if index as usize >= MAX_SMMUS {
         return Err(SmmuError::InvalidConfig);
     }
@@ -887,9 +884,15 @@ pub unsafe fn init(
     if idr0 == 0xffffffff || idr1 == 0xffffffff {
         log::warn!(
             "SMMU #{} at {:#x}: hardware not responding (IDR0={:#x} IDR1={:#x})",
-            index, smmu_phys, idr0, idr1
+            index,
+            smmu_phys,
+            idr0,
+            idr1
         );
-        log::warn!("SMMU #{}: clocks may not be enabled - skipping initialization", index);
+        log::warn!(
+            "SMMU #{}: clocks may not be enabled - skipping initialization",
+            index
+        );
         // Mark SMMU as not available by not storing an instance
         return Err(SmmuError::NotAvailable);
     }
@@ -937,7 +940,8 @@ pub unsafe fn init(
         log::warn!(
             "SMMU #{}: SIDSIZE={} but linear stream table capped at 17 (8MB). \
              Streams > 0x1FFFF will GBPA-abort.",
-            index, sid_size
+            index,
+            sid_size
         );
     }
 
@@ -957,8 +961,7 @@ pub unsafe fn init(
     let strtab_pages = strtab_size.div_ceil(page::SIZE_4K);
     let strtab_align_pages = strtab_pages.max(1); // alignment in pages
     let strtab_phys =
-        alloc_frames_aligned(strtab_pages, strtab_align_pages)
-            .ok_or(SmmuError::AllocFailed)?;
+        alloc_frames_aligned(strtab_pages, strtab_align_pages).ok_or(SmmuError::AllocFailed)?;
     let strtab_virt = phys_to_virt(strtab_phys);
 
     // Diagnostic: log stream table address and alignment
@@ -968,7 +971,11 @@ pub unsafe fn init(
     put_hex_u64(strtab_size as u64);
     m6_pal::console::puts(" align=");
     let strtab_aligned = (strtab_phys & (strtab_size as u64 - 1)) == 0;
-    m6_pal::console::puts(if strtab_aligned { "OK\n" } else { "MISALIGNED!\n" });
+    m6_pal::console::puts(if strtab_aligned {
+        "OK\n"
+    } else {
+        "MISALIGNED!\n"
+    });
 
     // Allocate command queue
     let cmdq_size = CMDQ_ENTRIES * CommandEntry::SIZE;
@@ -1034,7 +1041,11 @@ pub unsafe fn init(
         }
         if !cr0ack_ok {
             let ack = instance.read32(SMMU_CR0ACK);
-            log::warn!("SMMU #{}: CR0ACK timeout on disable (expected 0, got {:#x})", index, ack);
+            log::warn!(
+                "SMMU #{}: CR0ACK timeout on disable (expected 0, got {:#x})",
+                index,
+                ack
+            );
         }
 
         // Configure stream table base (linear format)
@@ -1086,7 +1097,12 @@ pub unsafe fn init(
         }
         if !cr0ack_ok {
             let ack = instance.read32(SMMU_CR0ACK);
-            log::warn!("SMMU #{}: CR0ACK timeout on queue enable (expected {:#x}, got {:#x})", index, cr0, ack);
+            log::warn!(
+                "SMMU #{}: CR0ACK timeout on queue enable (expected {:#x}, got {:#x})",
+                index,
+                cr0,
+                ack
+            );
         }
 
         // Disable global bypass (abort transactions to unconfigured streams)
@@ -1131,9 +1147,19 @@ pub unsafe fn init(
         m6_pal::console::puts("\n");
 
         if !cr0ack_ok {
-            log::warn!("SMMU #{}: CR0ACK timeout on SMMU enable (expected {:#x}, got {:#x})", index, cr0, final_cr0ack);
+            log::warn!(
+                "SMMU #{}: CR0ACK timeout on SMMU enable (expected {:#x}, got {:#x})",
+                index,
+                cr0,
+                final_cr0ack
+            );
         } else {
-            log::info!("SMMU #{}: enabled (CR0={:#x} CR0ACK={:#x})", index, cr0, final_cr0ack);
+            log::info!(
+                "SMMU #{}: enabled (CR0={:#x} CR0ACK={:#x})",
+                index,
+                cr0,
+                final_cr0ack
+            );
         }
 
         // Now that SMMUEN=1, EVENTQ_PROD has a defined value. Sync CONS to
@@ -1160,14 +1186,24 @@ pub unsafe fn init(
         }
         if !irq_ack_ok {
             let ack = instance.read32(SMMU_IRQ_CTRLACK);
-            log::warn!("SMMU #{}: IRQ_CTRLACK timeout (expected {:#x}, got {:#x})", index, irq_ctrl, ack);
+            log::warn!(
+                "SMMU #{}: IRQ_CTRLACK timeout (expected {:#x}, got {:#x})",
+                index,
+                irq_ctrl,
+                ack
+            );
         }
 
         // Check GERROR for any pre-existing errors
         let gerror = instance.read32(SMMU_GERROR);
         let gerrorn = instance.read32(SMMU_GERRORN);
         if gerror != gerrorn {
-            log::warn!("SMMU #{}: GERROR={:#x} GERRORN={:#x} (active errors)", index, gerror, gerrorn);
+            log::warn!(
+                "SMMU #{}: GERROR={:#x} GERRORN={:#x} (active errors)",
+                index,
+                gerror,
+                gerrorn
+            );
             // Acknowledge all errors
             instance.write32(SMMU_GERRORN, gerror);
         }
@@ -1243,7 +1279,9 @@ pub fn get_smmu_info_by_index(index: u8) -> Option<SmmuInfo> {
 
     SMMU_INSTANCES.get().and_then(|instances_lock| {
         let instances = instances_lock.lock();
-        instances.instances.get(index as usize)
+        instances
+            .instances
+            .get(index as usize)
             .and_then(|opt| opt.as_ref())
             .map(|inst| SmmuInfo {
                 base_phys: inst.base_phys,

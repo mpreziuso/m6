@@ -338,7 +338,10 @@ pub fn handle_user_fault(
     // buffer after early console is disabled, making terminations invisible).
     console_println!(
         "!!! USER FAULT: type={:?} pc={:#x} addr={:#x} esr={:#x}",
-        fault_type, ctx.elr, ctx.far, ctx.esr
+        fault_type,
+        ctx.elr,
+        ctx.far,
+        ctx.esr
     );
 
     match deliver_fault(tcb_ref, &fault_msg) {
@@ -350,18 +353,19 @@ pub fn handle_user_fault(
             // No fault handler — terminate with full crash diagnostics
             console_println!(
                 "!!! THREAD {:?} TERMINATED (no fault handler) pc={:#x}",
-                tcb_ref, ctx.elr
+                tcb_ref,
+                ctx.elr
             );
             for i in (0..30).step_by(2) {
                 console_println!(
                     "  x{:02}={:#018x}  x{:02}={:#018x}",
-                    i, ctx.gpr[i], i + 1, ctx.gpr[i + 1]
+                    i,
+                    ctx.gpr[i],
+                    i + 1,
+                    ctx.gpr[i + 1]
                 );
             }
-            console_println!(
-                "  x30={:#018x}   sp={:#018x}",
-                ctx.gpr[30], ctx.sp
-            );
+            console_println!("  x30={:#018x}   sp={:#018x}", ctx.gpr[30], ctx.sp);
             let vspace = object_table::with_tcb(tcb_ref, |tcb| tcb.tcb.vspace);
             console_println!("  vspace={:?}", vspace);
 
@@ -369,10 +373,7 @@ pub fn handle_user_fault(
             true
         }
         Err(e) => {
-            console_println!(
-                "!!! FAULT DELIVERY FAILED for {:?}: {:?}",
-                tcb_ref, e
-            );
+            console_println!("!!! FAULT DELIVERY FAILED for {:?}: {:?}", tcb_ref, e);
             terminate_thread(tcb_ref);
             true
         }

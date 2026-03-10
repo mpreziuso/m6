@@ -348,11 +348,7 @@ impl FrameAllocator {
     ///
     /// `align_frames` must be a power of 2.
     #[must_use]
-    pub fn alloc_contiguous_aligned(
-        &mut self,
-        count: usize,
-        align_frames: usize,
-    ) -> Option<usize> {
+    pub fn alloc_contiguous_aligned(&mut self, count: usize, align_frames: usize) -> Option<usize> {
         if count == 0
             || self.free_frames < count
             || align_frames == 0

@@ -9,7 +9,7 @@
 
 extern crate std;
 
-use std::ipc::{ipc_set_recv_slots, Endpoint};
+use std::ipc::{Endpoint, ipc_set_recv_slots};
 use std::println;
 
 /// Slot holding the device-mgr registry endpoint (provided by init)
@@ -74,7 +74,10 @@ fn main() -> i32 {
         println!("FAT32 format complete.");
         0
     } else {
-        println!("mkfs-fat32: format failed (error {})", result.label & 0xFFFF);
+        println!(
+            "mkfs-fat32: format failed (error {})",
+            result.label & 0xFFFF
+        );
         1
     }
 }

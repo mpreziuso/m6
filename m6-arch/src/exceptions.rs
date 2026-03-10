@@ -233,9 +233,9 @@ macro_rules! exception_stub {
             "mrs x4, far_el1\n",
             "mrs x5, tpidr_el0\n",
             // Save system registers (3 instructions)
-            "stp x0, x1, [sp, #248]\n",   // sp_el0, elr_el1
-            "stp x2, x3, [sp, #264]\n",   // spsr_el1, esr_el1
-            "stp x4, x5, [sp, #280]\n",   // far_el1, tpidr_el0
+            "stp x0, x1, [sp, #248]\n", // sp_el0, elr_el1
+            "stp x2, x3, [sp, #264]\n", // spsr_el1, esr_el1
+            "stp x4, x5, [sp, #280]\n", // far_el1, tpidr_el0
             // Branch to continuation handler (1 instruction)
             // Total: 1 + 16 + 6 + 3 + 1 = 27 instructions = 108 bytes
             "b ",
@@ -255,7 +255,7 @@ macro_rules! exception_continuation {
             // Save FP/NEON registers (19 instructions)
             "mrs x0, fpcr\n",
             "mrs x1, fpsr\n",
-            "stp x0, x1, [sp, #296]\n",       // fpcr=296, fpsr=304
+            "stp x0, x1, [sp, #296]\n", // fpcr=296, fpsr=304
             "stp q0, q1, [sp, #320]\n",
             "stp q2, q3, [sp, #352]\n",
             "stp q4, q5, [sp, #384]\n",
@@ -278,15 +278,15 @@ macro_rules! exception_continuation {
             stringify!($handler),
             "\n",
             // Restore SP, ELR, SPSR, TPIDR_EL0
-            "ldp x0, x1, [sp, #248]\n",   // sp_el0, elr_el1
-            "ldp x2, x3, [sp, #264]\n",   // spsr_el1, esr_el1 (x3 discarded — esr is read-only)
-            "ldp x4, x5, [sp, #280]\n",   // far_el1, tpidr_el0 (x4 discarded — far is read-only)
+            "ldp x0, x1, [sp, #248]\n", // sp_el0, elr_el1
+            "ldp x2, x3, [sp, #264]\n", // spsr_el1, esr_el1 (x3 discarded — esr is read-only)
+            "ldp x4, x5, [sp, #280]\n", // far_el1, tpidr_el0 (x4 discarded — far is read-only)
             "msr sp_el0, x0\n",
             "msr elr_el1, x1\n",
             "msr spsr_el1, x2\n",
             "msr tpidr_el0, x5\n",
             // Restore FP/NEON registers (reuse x0-x1 as scratch; GPRs not yet restored)
-            "ldp x0, x1, [sp, #296]\n",   // fpcr, fpsr
+            "ldp x0, x1, [sp, #296]\n", // fpcr, fpsr
             "msr fpcr, x0\n",
             "msr fpsr, x1\n",
             "ldp q0, q1, [sp, #320]\n",

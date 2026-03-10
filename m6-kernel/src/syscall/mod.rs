@@ -147,7 +147,11 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
             // Validate pointer is in userspace range (TTBR0: 0x0 to 0x0000_FFFF_FFFF_FFFF)
             const USER_ADDR_LIMIT: u64 = 0x0001_0000_0000_0000;
             let addr = ptr as u64;
-            if addr >= USER_ADDR_LIMIT || addr.checked_add(len as u64).is_none_or(|end| end > USER_ADDR_LIMIT) {
+            if addr >= USER_ADDR_LIMIT
+                || addr
+                    .checked_add(len as u64)
+                    .is_none_or(|end| end > USER_ADDR_LIMIT)
+            {
                 return Err(SyscallError::Range);
             }
 
@@ -285,7 +289,7 @@ fn handle_call(args: &SyscallArgs, ctx: &ExceptionContext) -> SyscallResult {
     let msg = IpcMessage::from_context(ctx);
 
     // Look up endpoint with WRITE + GRANT_REPLY rights
-    let required = CapRights::WRITE | CapRights::GRANT_REPLY;
+    let required = CapRights::WRITE_GRANT_REPLY;
     let cap = ipc::lookup_cap(cptr, ObjectType::Endpoint, required)?;
 
     // Get current task

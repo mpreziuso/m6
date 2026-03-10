@@ -586,8 +586,8 @@ mod tests {
         let b = cdt.new_node();
         let c = cdt.new_node();
         cdt.insert_child(parent, a); // parent → a
-        cdt.insert_sibling(a, b);    // a → b
-        cdt.insert_sibling(b, c);    // a → b → c
+        cdt.insert_sibling(a, b); // a → b
+        cdt.insert_sibling(b, c); // a → b → c
         // Verify doubly-linked chain: a↔b↔c.
         assert_eq!(cdt.get_node(a).unwrap().next_sibling, b);
         assert_eq!(cdt.get_node(b).unwrap().prev_sibling, a);

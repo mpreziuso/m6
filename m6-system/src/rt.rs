@@ -165,7 +165,10 @@ fn alloc_slot_range(count: usize) -> u64 {
         if idx > 0 {
             // Try to pop from the free pool
             let new_idx = idx - 1;
-            if FREE_SLOT_COUNT.compare_exchange(idx, new_idx, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            if FREE_SLOT_COUNT
+                .compare_exchange(idx, new_idx, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 let slot = FREE_SLOT_POOL[new_idx as usize].load(Ordering::Acquire);
                 return slot;
             }
@@ -422,34 +425,51 @@ pub fn init_allocator() {
             }
             match e {
                 m6_alloc::AllocError::OutOfMemory => {
-                    for c in b"OutOfMemory\n" { debug_putc(*c); }
+                    for c in b"OutOfMemory\n" {
+                        debug_putc(*c);
+                    }
                 }
                 m6_alloc::AllocError::MapFailed => {
-                    for c in b"MapFailed\n" { debug_putc(*c); }
+                    for c in b"MapFailed\n" {
+                        debug_putc(*c);
+                    }
                 }
                 m6_alloc::AllocError::UnmapFailed => {
-                    for c in b"UnmapFailed\n" { debug_putc(*c); }
+                    for c in b"UnmapFailed\n" {
+                        debug_putc(*c);
+                    }
                 }
                 m6_alloc::AllocError::SideTableFull => {
-                    for c in b"SideTableFull\n" { debug_putc(*c); }
+                    for c in b"SideTableFull\n" {
+                        debug_putc(*c);
+                    }
                 }
                 m6_alloc::AllocError::NoFreeSpans => {
-                    for c in b"NoFreeSpans\n" { debug_putc(*c); }
+                    for c in b"NoFreeSpans\n" {
+                        debug_putc(*c);
+                    }
                 }
                 m6_alloc::AllocError::NotInitialised => {
-                    for c in b"NotInitialised\n" { debug_putc(*c); }
+                    for c in b"NotInitialised\n" {
+                        debug_putc(*c);
+                    }
                 }
                 m6_alloc::AllocError::AlreadyInitialised => {
-                    for c in b"AlreadyInitialised\n" { debug_putc(*c); }
+                    for c in b"AlreadyInitialised\n" {
+                        debug_putc(*c);
+                    }
                 }
                 m6_alloc::AllocError::InvalidConfig => {
-                    for c in b"InvalidConfig\n" { debug_putc(*c); }
+                    for c in b"InvalidConfig\n" {
+                        debug_putc(*c);
+                    }
                 }
                 m6_alloc::AllocError::Poisoned => {
-                    for c in b"Poisoned\n" { debug_putc(*c); }
+                    for c in b"Poisoned\n" {
+                        debug_putc(*c);
+                    }
                 }
             }
         }
     }
 }
-

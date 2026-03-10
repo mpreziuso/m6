@@ -7,7 +7,7 @@
 
 extern crate alloc;
 
-use crate::dtb_platform::{DtbPlatform, GicVersion, PsciMethod, SmmuConfig, UartType, MAX_SMMUS};
+use crate::dtb_platform::{DtbPlatform, GicVersion, MAX_SMMUS, PsciMethod, SmmuConfig, UartType};
 use fdt::Fdt;
 use m6_common::boot::{BootInfo, KERNEL_PHYS_MAP_BASE};
 use once_cell_no_std::OnceCell;
@@ -447,15 +447,21 @@ fn parse_smmus(fdt: &Fdt) -> ([SmmuConfig; MAX_SMMUS], usize) {
                             break;
                         }
                         let irq_type = u32::from_be_bytes([
-                            data[off], data[off + 1], data[off + 2], data[off + 3],
+                            data[off],
+                            data[off + 1],
+                            data[off + 2],
+                            data[off + 3],
                         ]);
                         let irq_num = u32::from_be_bytes([
-                            data[off + 4], data[off + 5], data[off + 6], data[off + 7],
+                            data[off + 4],
+                            data[off + 5],
+                            data[off + 6],
+                            data[off + 7],
                         ]);
                         // Convert to GIC INTID: SPI = num + 32, PPI = num + 16
                         let intid = match irq_type {
-                            0 => irq_num + 32,  // SPI
-                            1 => irq_num + 16,  // PPI
+                            0 => irq_num + 32, // SPI
+                            1 => irq_num + 16, // PPI
                             _ => irq_num,
                         };
                         match i {

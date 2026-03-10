@@ -267,7 +267,12 @@ mod tests {
     // -- MemoryRegion
 
     fn region(base: u64, size: u64, ty: MemoryType) -> MemoryRegion {
-        MemoryRegion { base, size, memory_type: ty, _reserved: 0 }
+        MemoryRegion {
+            base,
+            size,
+            memory_type: ty,
+            _reserved: 0,
+        }
     }
 
     #[test_case]
@@ -316,7 +321,7 @@ mod tests {
     fn test_memory_map_total_usable_only() {
         let map = make_map(&[
             (0x1000, 0x1000, MemoryType::Conventional),
-            (0x2000, 0x2000, MemoryType::UefiRuntime),         // not usable
+            (0x2000, 0x2000, MemoryType::UefiRuntime), // not usable
             (0x5000, 0x3000, MemoryType::BootloaderReclaimable),
         ]);
         assert_eq!(map.total_usable_memory(), 0x1000 + 0x3000);

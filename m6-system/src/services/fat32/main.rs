@@ -31,9 +31,7 @@ mod io;
 #[path = "../../logger.rs"]
 mod logger;
 
-use embedded_sdmmc::{
-    Mode, ShortFileName, TimeSource, Timestamp, VolumeIdx, VolumeManager,
-};
+use embedded_sdmmc::{Mode, ShortFileName, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 use m6_syscall::invoke::{map_frame, recv, reply_recv, sched_yield};
 
 use block::IpcBlockDevice;
@@ -130,11 +128,14 @@ pub unsafe extern "C" fn _start() -> ! {
     // Initialise block device
     let mut block_dev = IpcBlockDevice::new(BLK_EP, DATA_FRAME, DATA_VADDR);
     if let Err(e) = block_dev.init() {
-        log::error!("Failed to init block device: {}", match e {
-            block::BlockError::IpcError => "IPC error",
-            block::BlockError::IoError => "I/O error",
-            block::BlockError::NotReady => "Not ready",
-        });
+        log::error!(
+            "Failed to init block device: {}",
+            match e {
+                block::BlockError::IpcError => "IPC error",
+                block::BlockError::IoError => "I/O error",
+                block::BlockError::NotReady => "Not ready",
+            }
+        );
         loop {
             sched_yield();
         }
@@ -253,7 +254,12 @@ fn handle_request(
     msg: &[u64; 4],
 ) -> (u64, u64, u64, u64) {
     match label & 0xFFFF {
-        request::OPEN => (handle_open(volume_mgr, volume, handles, badge, msg), 0, 0, 0),
+        request::OPEN => (
+            handle_open(volume_mgr, volume, handles, badge, msg),
+            0,
+            0,
+            0,
+        ),
         request::CLOSE => (handle_close(volume_mgr, handles, badge, msg), 0, 0, 0),
         request::READ => (handle_read(volume_mgr, handles, badge, msg), 0, 0, 0),
         request::WRITE => (handle_write(volume_mgr, handles, badge, msg), 0, 0, 0),
@@ -572,11 +578,21 @@ fn handle_opendir(
             let name_len = format_short_name(&entry.name, &mut name_buf);
             // Reconstruct FAT attribute byte from public methods
             let mut attr = 0u8;
-            if entry.attributes.is_read_only() { attr |= 0x01; }
-            if entry.attributes.is_hidden() { attr |= 0x02; }
-            if entry.attributes.is_system() { attr |= 0x04; }
-            if entry.attributes.is_directory() { attr |= 0x10; }
-            if entry.attributes.is_archive() { attr |= 0x20; }
+            if entry.attributes.is_read_only() {
+                attr |= 0x01;
+            }
+            if entry.attributes.is_hidden() {
+                attr |= 0x02;
+            }
+            if entry.attributes.is_system() {
+                attr |= 0x04;
+            }
+            if entry.attributes.is_directory() {
+                attr |= 0x10;
+            }
+            if entry.attributes.is_archive() {
+                attr |= 0x20;
+            }
             cache.entries[idx].name = name_buf;
             cache.entries[idx].name_len = name_len;
             cache.entries[idx].size = entry.size;
@@ -599,11 +615,7 @@ fn handle_opendir(
 /// m0: file size
 /// m1: name bytes 0..8 packed little-endian
 /// m2: name bytes 8..13 packed little-endian
-fn handle_readdir(
-    handles: &mut HandleTable,
-    badge: u64,
-    msg: &[u64; 4],
-) -> (u64, u64, u64, u64) {
+fn handle_readdir(handles: &mut HandleTable, badge: u64, msg: &[u64; 4]) -> (u64, u64, u64, u64) {
     let handle = msg[0] as u32;
     let cache = match handles.get_dir_cache_mut(handle, badge) {
         Some(c) => c,

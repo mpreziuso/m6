@@ -239,17 +239,37 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
             break;
         }
 
-        // Create capability in destination slot
+        // Create capability in destination slot with CDT registration
         let cap_result = cspace::with_slot_mut(&slot_loc, |slot| {
             *slot = CapSlot::new(
                 obj_ref,
                 target_type,
                 CapRights::ALL, // Full rights for original capability
                 Badge::NONE,
-                SlotFlags::IS_ORIGINAL,
+                SlotFlags::IS_ORIGINAL.with(SlotFlags::IN_CDT),
             );
             Ok(())
         });
+
+        // Register CDT node for the new capability
+        if cap_result.is_ok() {
+            let dest_cnode_ref = ObjectRef::from_index(slot_loc.cnode_ref.index());
+            crate::cap::cdt_storage::with_cdt(|cdt| {
+                use m6_cap::CdtOps;
+                if let Some(node_id) = cdt.alloc_node() {
+                    if let Some(node) = cdt.get_node_mut(node_id) {
+                        node.object_ref = obj_ref;
+                        node.slot_cnode = dest_cnode_ref;
+                        node.slot_index = slot_index as u32;
+                    }
+                    crate::cap::cdt_storage::register_cdt_node(
+                        dest_cnode_ref,
+                        slot_index as u32,
+                        node_id,
+                    );
+                }
+            });
+        }
 
         if let Err(e) = cap_result {
             // Cleanup on failure
@@ -951,13 +971,14 @@ pub fn handle_frame_get_phys(args: &SyscallArgs) -> SyscallResult {
     let frame_cptr = args.arg0;
 
     // Look up frame capability - accept both Frame and DeviceFrame
-    let frame_cap = ipc::lookup_cap(frame_cptr, ObjectType::Frame, CapRights::READ).or_else(|e| {
-        if matches!(e, SyscallError::TypeMismatch) {
-            ipc::lookup_cap(frame_cptr, ObjectType::DeviceFrame, CapRights::READ)
-        } else {
-            Err(e)
-        }
-    })?;
+    let frame_cap =
+        ipc::lookup_cap(frame_cptr, ObjectType::Frame, CapRights::READ).or_else(|e| {
+            if matches!(e, SyscallError::TypeMismatch) {
+                ipc::lookup_cap(frame_cptr, ObjectType::DeviceFrame, CapRights::READ)
+            } else {
+                Err(e)
+            }
+        })?;
 
     // Get frame physical address
     let phys_addr = object_table::with_frame_mut(frame_cap.obj_ref, |frame| frame.phys_addr)

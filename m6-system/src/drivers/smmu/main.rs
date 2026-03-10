@@ -209,9 +209,7 @@ pub unsafe extern "C" fn _start() -> ! {
 
     // Read SMMU instance index (0, 1, 2, or 3)
     // SAFETY: Reading from mapped frame at valid address
-    let instance_idx = unsafe {
-        core::ptr::read_volatile(INSTANCE_INFO_VADDR as *const u64)
-    };
+    let instance_idx = unsafe { core::ptr::read_volatile(INSTANCE_INFO_VADDR as *const u64) };
 
     // Calculate unique virtual address for this SMMU instance
     let smmu_mmio_vaddr = SMMU_MMIO_VADDR_BASE + (instance_idx * SMMU_MMIO_VADDR_OFFSET);
