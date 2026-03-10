@@ -207,9 +207,22 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
             .ok_or(SyscallError::InvalidCap)??
         };
 
-        // Zero physical memory for regular Frame objects to prevent information
-        // leakage between processes. Device frames must not be zeroed (MMIO).
-        if target_type == ObjectType::Frame {
+        // Zero page-table-backing and normal frame objects.
+        // VSpace/PageTable objects must start as all-zeros so that every
+        // descriptor is invalid (bit 0 = 0), preventing spurious translations
+        // through uninitialised memory.  Frame objects are zeroed to prevent
+        // information leakage between processes.  Device frames must NOT be
+        // zeroed (MMIO registers may not tolerate zero-writes).
+        let needs_zero = matches!(
+            target_type,
+            ObjectType::Frame
+                | ObjectType::VSpace
+                | ObjectType::PageTableL0
+                | ObjectType::PageTableL1
+                | ObjectType::PageTableL2
+                | ObjectType::PageTableL3
+        );
+        if needs_zero {
             let virt = crate::memory::translate::phys_to_virt(phys_addr.as_u64());
             // SAFETY: phys_to_virt returns the kernel direct-map VA for a valid
             // physical address obtained from the untyped allocator.  The range

@@ -25,13 +25,32 @@ pub const BOOT_INFO_VERSION: u32 = 8;
 /// Maximum number of memory regions supported
 pub const MAX_MEMORY_REGIONS: usize = 64;
 
-/// Maximum number of device regions supported
-/// RK3588 has 100+ device regions (PCIe, UART, USB PHY GRFs, CRU, QoS, etc.)
+/// Maximum number of device regions (RK3588 has 100+ MMIO regions from DTB).
 pub const MAX_DEVICE_REGIONS: usize = 128;
 
-/// Maximum number of untyped memory regions passed to userspace.
-/// This is 1 (RAM untyped) + MAX_DEVICE_REGIONS (device untypeds).
-pub const MAX_UNTYPED_REGIONS: usize = 1 + MAX_DEVICE_REGIONS;
+// UserBootInfo layout is defined in m6-syscall. These constants mirror the struct
+// so we can compute MAX_UNTYPED_REGIONS here without a circular dependency.
+// A compile-time assert in m6-syscall verifies these stay in sync.
+//
+// Fixed (non-array) overhead in UserBootInfo:
+//   magic(8) + version(4) + cnode_radix(4) + untyped_count(4) + _pad0(4)
+//   + total_memory(8) + free_memory(8) + platform_id(4) + cpu_count(4)
+//   + has_smmu(1) + smmu_count(1) + _pad1[2](2)  = 52 bytes
+//   + 4 bytes alignment padding before the u64 phys_base array
+//   + dtb_vaddr(8) + dtb_size(8) + initrd_vaddr(8) + initrd_size(8) = 32 bytes
+//   Total: 88 bytes.
+pub const USER_BOOT_INFO_FIXED_BYTES: usize = 88;
+// Per-region cost: size_bits(u8=1) + is_device(u8=1) + phys_base(u64=8) = 10 bytes.
+pub const USER_BOOT_INFO_PER_REGION_BYTES: usize = 10;
+
+/// Maximum total untyped regions (RAM + device), sized to fill UserBootInfo in one 4KB page.
+/// Derived: (4096 - USER_BOOT_INFO_FIXED_BYTES) / USER_BOOT_INFO_PER_REGION_BYTES = 400.
+pub const MAX_UNTYPED_REGIONS: usize =
+    (4096 - USER_BOOT_INFO_FIXED_BYTES) / USER_BOOT_INFO_PER_REGION_BYTES;
+
+/// Maximum RAM untyped regions = total slots minus device-MMIO slots.
+/// RK3588 with 16 GB produces ~110-125 buddy chunks; this provides 272 slots.
+pub const MAX_RAM_UNTYPED_REGIONS: usize = MAX_UNTYPED_REGIONS - MAX_DEVICE_REGIONS;
 
 /// First device untyped slot in device-mgr's CSpace.
 /// Init copies device untypeds starting at this slot; device-mgr expects them here.
