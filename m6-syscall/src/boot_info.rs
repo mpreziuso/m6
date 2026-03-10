@@ -208,8 +208,17 @@ impl UserBootInfo {
     }
 }
 
-// Ensure the structure fits in a single 4K page
-const _: () = assert!(
-    core::mem::size_of::<UserBootInfo>() <= 4096,
-    "UserBootInfo must fit in a single page"
-);
+// Verify struct size and that the formula in m6-common stays in sync with the layout.
+// If the second assert fails, update USER_BOOT_INFO_FIXED_BYTES in m6-common/src/boot.rs.
+const _: () = {
+    assert!(
+        core::mem::size_of::<UserBootInfo>() <= 4096,
+        "UserBootInfo must fit in a single page"
+    );
+    const FORMULA_SIZE: usize = m6_common::boot::USER_BOOT_INFO_FIXED_BYTES
+        + m6_common::boot::USER_BOOT_INFO_PER_REGION_BYTES * MAX_UNTYPED_REGIONS;
+    assert!(
+        core::mem::size_of::<UserBootInfo>() == FORMULA_SIZE,
+        "UserBootInfo size formula mismatch: update USER_BOOT_INFO_FIXED_BYTES in m6-common/src/boot.rs"
+    );
+};

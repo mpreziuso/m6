@@ -36,7 +36,7 @@ use super::object_table::{self, KernelObjectType};
 use super::tcb_storage::create_tcb;
 
 use crate::initrd;
-use crate::memory::frame::{alloc_frame_zeroed, alloc_frames_zeroed};
+use crate::memory::frame::alloc_frame_zeroed;
 use crate::memory::translate::phys_to_virt;
 use crate::user::layout::USER_BOOT_INFO_ADDR;
 use crate::user::vspace_setup;
@@ -539,15 +539,37 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         );
     });
 
-    // 8. Allocate untyped memory for init (32 MiB = 2^25 bytes = 8192 frames)
-    const UNTYPED_SIZE_BITS: u8 = 25; // 32 MiB
-    const UNTYPED_FRAMES: usize = 1 << (UNTYPED_SIZE_BITS - 12); // frames = size / 4K
-    let untyped_phys = alloc_frames_zeroed(UNTYPED_FRAMES).ok_or(BootstrapError::OutOfMemory)?;
-    log::info!(
-        "Allocated {} MiB untyped memory for init at {:#x}",
-        1 << (UNTYPED_SIZE_BITS - 20),
-        untyped_phys
+    // 8. Drain all remaining free physical memory into Untyped capabilities.
+    //
+    // Now that every kernel allocation (heap, page tables, VSpace setup) is done,
+    // we claim all remaining free frames and decompose them into maximally-aligned
+    // power-of-2 chunks.  Each chunk becomes one RAM Untyped capability for the
+    // root task — this is the seL4-style "give everything to userspace" handoff.
+    let mut ram_chunks = crate::memory::frame::drain_free_aligned_chunks(
+        m6_common::boot::MAX_RAM_UNTYPED_REGIONS,
     );
+    if ram_chunks.is_empty() {
+        log::error!("No free physical memory left to hand to init — boot failed");
+        return Err(BootstrapError::OutOfMemory);
+    }
+
+    // Sort largest first: init always allocates from Slot::FirstUntyped (slot 12).
+    // Without sorting the first chunk may be as small as 1 page (if the first free
+    // frame has an odd absolute frame number), causing the initial VSpace retype to
+    // fail with NoMemory immediately after the Endpoint has been allocated from it.
+    ram_chunks.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+
+    {
+        let total_bytes: u64 = ram_chunks
+            .iter()
+            .map(|&(_, size_bits)| 1u64 << size_bits)
+            .sum();
+        log::info!(
+            "Handing {} MiB free RAM to init as {} Untyped capability/capabilities",
+            total_bytes / (1024 * 1024),
+            ram_chunks.len(),
+        );
+    }
 
     // 9. Populate root CNode with initial capabilities
     log::debug!("Installing capabilities in root CNode...");
@@ -648,19 +670,21 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
 
         log::debug!("Installed {} control capabilities", cap_count);
 
-        // Create untyped capability (using table-aware version to avoid deadlock)
-        let untyped_ref = create_untyped_cap_with_table(
-            table,
-            cnode,
-            BootSlot::FirstUntyped as usize,
-            PhysAddr::new(untyped_phys),
-            UNTYPED_SIZE_BITS,
-            false, // not device memory
-            cnode_ref,
-        )?;
-        cap_count += 1;
-        untyped_count = 1;
-        //log::debug!("Created untyped cap: {:?}", untyped_ref);
+        // Create RAM Untyped capabilities from the drained free-memory chunks.
+        for &(phys_base, size_bits) in &ram_chunks {
+            let slot = BootSlot::FirstUntyped as usize + untyped_count as usize;
+            let _ram_ref = create_untyped_cap_with_table(
+                table,
+                cnode,
+                slot,
+                PhysAddr::new(phys_base),
+                size_bits,
+                false, // RAM, not device memory
+                cnode_ref,
+            )?;
+            cap_count += 1;
+            untyped_count += 1;
+        }
 
         // Create device untyped capabilities for MMIO regions from DTB
         for i in 0..boot_info.device_region_count as usize {
@@ -697,11 +721,10 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         Ok(())
     })?;
 
-    // 10. Update UserBootInfo with untyped region info (RAM + device regions)
+    // 10. Update UserBootInfo with untyped region info (RAM chunks + device regions)
     update_user_boot_info_all_untyped(
         user_boot_info_phys,
-        untyped_phys,
-        UNTYPED_SIZE_BITS,
+        &ram_chunks,
         boot_info,
     );
 
@@ -743,7 +766,7 @@ fn create_user_boot_info(_boot_info: &BootInfo) -> BootstrapResult<PhysAddr> {
     info.magic = USER_BOOT_INFO_MAGIC;
     info.version = USER_BOOT_INFO_VERSION;
     info.cnode_radix = 12; // 4096 slots
-    info.untyped_count = 0; // No untyped caps for now (TODO: add them)
+    info.untyped_count = 0; // Updated later by update_user_boot_info_all_untyped
 
     let (free, total) = crate::memory::frame::memory_stats();
     info.total_memory = total as u64;
@@ -858,32 +881,41 @@ fn update_user_boot_info_untyped(
     );
 }
 
-/// Update UserBootInfo with all untyped regions (RAM + device).
+/// Update UserBootInfo with all untyped regions (RAM chunks + device MMIO).
 fn update_user_boot_info_all_untyped(
     user_boot_info_phys: PhysAddr,
-    ram_phys_base: u64,
-    ram_size_bits: u8,
+    ram_chunks: &[(u64, u8)],
     boot_info: &BootInfo,
 ) {
     let virt = phys_to_virt(user_boot_info_phys.0);
     // SAFETY: user_boot_info_phys points to a valid UserBootInfo we allocated
     let info = unsafe { &mut *(virt as *mut UserBootInfo) };
 
-    // First region: RAM untyped
-    info.untyped_size_bits[0] = ram_size_bits;
-    info.untyped_is_device[0] = 0; // not device memory
-    info.untyped_phys_base[0] = ram_phys_base;
-
-    // Remaining regions: device untyped from BootInfo
-    // Use a running counter to match the capability creation order
-    // (invalid regions are skipped in both places)
-    let device_count = boot_info.device_region_count as usize;
     let max_regions = m6_syscall::boot_info::MAX_UNTYPED_REGIONS;
-    let mut idx = 1; // Start after RAM untyped
+    let mut idx = 0usize;
+
+    // RAM Untyped regions
+    for &(phys_base, size_bits) in ram_chunks {
+        if idx >= max_regions {
+            log::warn!(
+                "Untyped region limit ({}) reached, cannot record all RAM chunks",
+                max_regions
+            );
+            break;
+        }
+        info.untyped_size_bits[idx] = size_bits;
+        info.untyped_is_device[idx] = 0;
+        info.untyped_phys_base[idx] = phys_base;
+        idx += 1;
+    }
+    let ram_count = idx;
+
+    // Device Untyped regions from BootInfo
+    let device_count = boot_info.device_region_count as usize;
     for i in 0..device_count {
         if idx >= max_regions {
             log::warn!(
-                "Device region limit ({}) reached, skipping remaining {} regions",
+                "Untyped region limit ({}) reached, skipping remaining {} device regions",
                 max_regions,
                 device_count - i
             );
@@ -894,34 +926,19 @@ fn update_user_boot_info_all_untyped(
             continue;
         }
         info.untyped_size_bits[idx] = region.size_bits;
-        info.untyped_is_device[idx] = 1; // device memory
+        info.untyped_is_device[idx] = 1;
         info.untyped_phys_base[idx] = region.phys_base.as_u64();
         idx += 1;
     }
 
-    // Set untyped_count to actual number of valid entries
     info.untyped_count = idx as u32;
 
     log::debug!(
         "Updated UserBootInfo: {} untyped region(s) ({} RAM, {} device)",
         idx,
-        1,
-        idx - 1
+        ram_count,
+        idx - ram_count,
     );
-    //let mut valid_idx = 0;
-    // for i in 0..device_count {
-    //     let region = &boot_info.device_regions[i];
-    //     if region.is_valid() {
-    //         log::debug!(
-    //             "  Device untyped {}: {:?} at {:#x} ({} bytes)",
-    //             valid_idx,
-    //             region.device_type,
-    //             region.phys_base.as_u64(),
-    //             1u64 << region.size_bits
-    //         );
-    //         valid_idx += 1;
-    //     }
-    // }
 }
 
 /// Configure a TCB for EL0 (userspace) execution.

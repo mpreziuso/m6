@@ -2,6 +2,8 @@
 //!
 //! Provides bitmap-based physical memory management.
 
+extern crate alloc;
+
 use core::sync::atomic::{AtomicBool, Ordering};
 use m6_arch::IrqSpinMutex;
 use m6_common::memory::{MemoryMap, page};
@@ -862,6 +864,80 @@ pub fn free_frame(phys_addr: u64) {
     if let Some(alloc) = guard.as_mut() {
         alloc.free(frame);
     }
+}
+
+/// Drain all free physical frames as maximally-aligned power-of-2 chunks.
+///
+/// Scans the bitmap for free regions and decomposes each contiguous run into
+/// the largest power-of-2 aligned chunks possible (buddy decomposition). Each
+/// chunk is immediately marked allocated so the kernel will not reuse it.
+///
+/// Call this exactly once, after all kernel boot allocations are complete.
+/// The returned `(phys_base, size_bits)` pairs become RAM Untyped capabilities
+/// for the root task, giving userspace authority over all remaining memory.
+///
+/// The number of output chunks is bounded by `max_chunks` and is at most
+/// `2 * ceil(log2(total_frames))` per contiguous free run in practice.
+///
+/// This function is interrupt-safe (uses IrqSpinMutex).
+pub fn drain_free_aligned_chunks(max_chunks: usize) -> alloc::vec::Vec<(u64, u8)> {
+    let mut chunks = alloc::vec::Vec::new();
+    let mut guard = FRAME_ALLOCATOR.lock();
+    let Some(alloc) = guard.as_mut() else {
+        return chunks;
+    };
+
+    let first_frame = alloc.first_frame();
+    let total_frames = alloc.total_count();
+    let mut rel = 0usize; // relative frame index into the bitmap
+
+    'outer: while rel < total_frames {
+        if !alloc.is_frame_free(rel) {
+            rel += 1;
+            continue;
+        }
+
+        // Find the end of this contiguous free run.
+        let run_start = rel;
+        while rel < total_frames && alloc.is_frame_free(rel) {
+            rel += 1;
+        }
+        let run_end = rel;
+
+        // Decompose [run_start, run_end) into maximally-aligned power-of-2 chunks.
+        let mut pos = run_start;
+        while pos < run_end {
+            if chunks.len() >= max_chunks {
+                break 'outer;
+            }
+
+            let abs_pos = first_frame + pos;
+            let remaining = run_end - pos;
+
+            // Largest power-of-2 frame count that `abs_pos` is naturally aligned to.
+            // trailing_zeros(0) = 64 on 64-bit, which acts as "aligned to anything".
+            let align_log2 = (abs_pos.trailing_zeros() as usize).min(47 - 12);
+
+            // Largest power-of-2 <= remaining.
+            let fit_log2 =
+                (usize::BITS - 1 - remaining.leading_zeros()) as usize;
+
+            let chunk_log2_frames = fit_log2.min(align_log2);
+            let chunk_frames = 1usize << chunk_log2_frames;
+            let size_bits = (chunk_log2_frames + 12) as u8;
+
+            // Mark these frames as allocated so the kernel won't reuse them.
+            if alloc.mark_allocated(first_frame + pos, chunk_frames).is_err() {
+                break 'outer;
+            }
+
+            let phys_base = abs_pos as u64 * page::SIZE_4K as u64;
+            chunks.push((phys_base, size_bits));
+            pos += chunk_frames;
+        }
+    }
+
+    chunks
 }
 
 /// Get memory statistics.
