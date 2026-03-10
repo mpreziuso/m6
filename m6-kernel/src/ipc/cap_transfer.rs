@@ -179,23 +179,32 @@ pub fn transfer_capabilities(
         let new_cdt_node = cspace::with_two_cnodes(
             src_loc.cnode_ref,
             receiver_cspace,
-            |src_cnode, dst_cnode, _same_cnode| {
-                // Access CDT pool
-                cdt_storage::with_cdt(|cdt| {
-                    // Use cap_copy_with_cdt from m6_cap::ops
-                    let new_node = m6_cap::ops::cap_copy_with_cdt(
-                        src_cnode,
+            |access| match access {
+                cspace::CNodeAccess::Distinct(src_cnode, dst_cnode) => {
+                    cdt_storage::with_cdt(|cdt| {
+                        m6_cap::ops::cap_copy_with_cdt(
+                            src_cnode,
+                            src_loc.slot_index,
+                            dst_cnode,
+                            dest_slot_index,
+                            cdt,
+                            src_cdt_node,
+                            receiver_cspace,
+                        )
+                        .map_err(|_| SyscallError::InvalidCap)
+                    })
+                }
+                cspace::CNodeAccess::Same(cnode) => cdt_storage::with_cdt(|cdt| {
+                    m6_cap::ops::cap_copy_local_with_cdt(
+                        cnode,
                         src_loc.slot_index,
-                        dst_cnode,
                         dest_slot_index,
                         cdt,
                         src_cdt_node,
                         receiver_cspace,
                     )
-                    .map_err(|_| SyscallError::InvalidCap)?;
-
-                    Ok(new_node)
-                })
+                    .map_err(|_| SyscallError::InvalidCap)
+                }),
             },
         )?;
 
@@ -280,11 +289,20 @@ pub fn unwrap_capability(
     cspace::with_two_cnodes(
         src_loc.cnode_ref,
         receiver_cspace,
-        |src_cnode, dst_cnode, _same_cnode| {
-            // Use cap_move from m6_cap::ops
-            m6_cap::ops::cap_move(src_cnode, src_loc.slot_index, dst_cnode, dest_slot_index)
-                .map_err(|_| SyscallError::InvalidCap)?;
-            Ok(())
+        |access| match access {
+            cspace::CNodeAccess::Distinct(src_cnode, dst_cnode) => {
+                m6_cap::ops::cap_move(
+                    src_cnode,
+                    src_loc.slot_index,
+                    dst_cnode,
+                    dest_slot_index,
+                )
+                .map_err(|_| SyscallError::InvalidCap)
+            }
+            cspace::CNodeAccess::Same(cnode) => {
+                m6_cap::ops::cap_move_local(cnode, src_loc.slot_index, dest_slot_index)
+                    .map_err(|_| SyscallError::InvalidCap)
+            }
         },
     )?;
 

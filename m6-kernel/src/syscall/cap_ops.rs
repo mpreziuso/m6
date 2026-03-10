@@ -25,7 +25,7 @@ use m6_cap::{Badge, CNodeOps, CapRights, CdtNodeId, RevocationCallback, ops};
 use m6_syscall::IpcBuffer;
 
 use crate::cap::cdt_storage;
-use crate::cap::cspace::{self, with_two_cnodes};
+use crate::cap::cspace::{self, CNodeAccess, with_two_cnodes};
 use crate::cap::object_table::{self, KernelObjectType};
 use crate::syscall::SyscallArgs;
 use crate::syscall::error::{SyscallError, SyscallResult, cap_error_to_syscall};
@@ -76,35 +76,49 @@ pub fn handle_cap_copy(args: &SyscallArgs) -> SyscallResult {
         .unwrap_or(CdtNodeId::NULL);
 
     // Perform the copy with CDT tracking
-    with_two_cnodes(
-        src_loc.cnode_ref,
-        dest_loc.cnode_ref,
-        |src_cnode, dest_cnode, _| {
-            cdt_storage::with_cdt(|cdt| {
-                let new_cdt_node = ops::cap_copy_with_cdt(
-                    src_cnode,
-                    src_loc.slot_index,
-                    dest_cnode,
-                    dest_loc.slot_index,
-                    cdt,
-                    src_cdt_node,
+    with_two_cnodes(src_loc.cnode_ref, dest_loc.cnode_ref, |access| match access {
+        CNodeAccess::Distinct(src_cnode, dest_cnode) => cdt_storage::with_cdt(|cdt| {
+            let new_cdt_node = ops::cap_copy_with_cdt(
+                src_cnode,
+                src_loc.slot_index,
+                dest_cnode,
+                dest_loc.slot_index,
+                cdt,
+                src_cdt_node,
+                dest_loc.cnode_ref,
+            )
+            .map_err(cap_error_to_syscall)?;
+
+            if new_cdt_node.is_valid() {
+                cdt_storage::register_cdt_node(
                     dest_loc.cnode_ref,
-                )
-                .map_err(cap_error_to_syscall)?;
+                    dest_loc.slot_index as u32,
+                    new_cdt_node,
+                );
+            }
+            Ok(0)
+        }),
+        CNodeAccess::Same(cnode) => cdt_storage::with_cdt(|cdt| {
+            let new_cdt_node = ops::cap_copy_local_with_cdt(
+                cnode,
+                src_loc.slot_index,
+                dest_loc.slot_index,
+                cdt,
+                src_cdt_node,
+                dest_loc.cnode_ref,
+            )
+            .map_err(cap_error_to_syscall)?;
 
-                // Register the new CDT node in the slot map
-                if new_cdt_node.is_valid() {
-                    cdt_storage::register_cdt_node(
-                        dest_loc.cnode_ref,
-                        dest_loc.slot_index as u32,
-                        new_cdt_node,
-                    );
-                }
-
-                Ok(0)
-            })
-        },
-    )
+            if new_cdt_node.is_valid() {
+                cdt_storage::register_cdt_node(
+                    dest_loc.cnode_ref,
+                    dest_loc.slot_index as u32,
+                    new_cdt_node,
+                );
+            }
+            Ok(0)
+        }),
+    })
 }
 
 /// Handle CapMove syscall.
@@ -128,29 +142,32 @@ pub fn handle_cap_move(args: &SyscallArgs) -> SyscallResult {
     let dest_loc = cspace::resolve_cnode_slot(dest_cnode_cptr, dest_depth, dest_index)?;
 
     // Perform the move
-    with_two_cnodes(
-        src_loc.cnode_ref,
-        dest_loc.cnode_ref,
-        |src_cnode, dest_cnode, _| {
-            ops::cap_move(
-                src_cnode,
-                src_loc.slot_index,
-                dest_cnode,
-                dest_loc.slot_index,
-            )
-            .map_err(cap_error_to_syscall)?;
+    with_two_cnodes(src_loc.cnode_ref, dest_loc.cnode_ref, |access| {
+        match access {
+            CNodeAccess::Distinct(src_cnode, dest_cnode) => {
+                ops::cap_move(
+                    src_cnode,
+                    src_loc.slot_index,
+                    dest_cnode,
+                    dest_loc.slot_index,
+                )
+                .map_err(cap_error_to_syscall)?;
+            }
+            CNodeAccess::Same(cnode) => {
+                ops::cap_move_local(cnode, src_loc.slot_index, dest_loc.slot_index)
+                    .map_err(cap_error_to_syscall)?;
+            }
+        }
 
-            // Update CDT mapping
-            cdt_storage::move_cdt_mapping(
-                src_loc.cnode_ref,
-                src_loc.slot_index as u32,
-                dest_loc.cnode_ref,
-                dest_loc.slot_index as u32,
-            );
+        cdt_storage::move_cdt_mapping(
+            src_loc.cnode_ref,
+            src_loc.slot_index as u32,
+            dest_loc.cnode_ref,
+            dest_loc.slot_index as u32,
+        );
 
-            Ok(0)
-        },
-    )
+        Ok(0)
+    })
 }
 
 /// Handle CapMint syscall.
@@ -210,37 +227,53 @@ pub fn handle_cap_mint(args: &SyscallArgs) -> SyscallResult {
         .unwrap_or(CdtNodeId::NULL);
 
     // Perform the mint with CDT tracking
-    with_two_cnodes(
-        src_loc.cnode_ref,
-        dest_loc.cnode_ref,
-        |src_cnode, dest_cnode, _| {
-            cdt_storage::with_cdt(|cdt| {
-                let new_cdt_node = ops::cap_mint_with_cdt(
-                    src_cnode,
-                    src_loc.slot_index,
-                    dest_cnode,
-                    dest_loc.slot_index,
-                    new_rights,
-                    badge,
-                    cdt,
-                    src_cdt_node,
+    with_two_cnodes(src_loc.cnode_ref, dest_loc.cnode_ref, |access| match access {
+        CNodeAccess::Distinct(src_cnode, dest_cnode) => cdt_storage::with_cdt(|cdt| {
+            let new_cdt_node = ops::cap_mint_with_cdt(
+                src_cnode,
+                src_loc.slot_index,
+                dest_cnode,
+                dest_loc.slot_index,
+                new_rights,
+                badge,
+                cdt,
+                src_cdt_node,
+                dest_loc.cnode_ref,
+            )
+            .map_err(cap_error_to_syscall)?;
+
+            if new_cdt_node.is_valid() {
+                cdt_storage::register_cdt_node(
                     dest_loc.cnode_ref,
-                )
-                .map_err(cap_error_to_syscall)?;
+                    dest_loc.slot_index as u32,
+                    new_cdt_node,
+                );
+            }
+            Ok(0)
+        }),
+        CNodeAccess::Same(cnode) => cdt_storage::with_cdt(|cdt| {
+            let new_cdt_node = ops::cap_mint_local_with_cdt(
+                cnode,
+                src_loc.slot_index,
+                dest_loc.slot_index,
+                new_rights,
+                badge,
+                cdt,
+                src_cdt_node,
+                dest_loc.cnode_ref,
+            )
+            .map_err(cap_error_to_syscall)?;
 
-                // Register the new CDT node
-                if new_cdt_node.is_valid() {
-                    cdt_storage::register_cdt_node(
-                        dest_loc.cnode_ref,
-                        dest_loc.slot_index as u32,
-                        new_cdt_node,
-                    );
-                }
-
-                Ok(0)
-            })
-        },
-    )
+            if new_cdt_node.is_valid() {
+                cdt_storage::register_cdt_node(
+                    dest_loc.cnode_ref,
+                    dest_loc.slot_index as u32,
+                    new_cdt_node,
+                );
+            }
+            Ok(0)
+        }),
+    })
 }
 
 /// Handle CapDelete syscall.

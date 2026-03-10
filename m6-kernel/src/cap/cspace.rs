@@ -403,27 +403,32 @@ where
     .ok_or(SyscallError::InvalidCap)?
 }
 
+/// Access pattern for operations involving one or two CNodes.
+///
+/// When the source and destination CNodes are the same object, a single
+/// `&mut CNodeStorage` is provided to avoid creating aliased `&mut`
+/// references (which would be undefined behaviour).
+pub enum CNodeAccess<'a> {
+    /// Two distinct CNodes (first = ref1, second = ref2).
+    Distinct(&'a mut CNodeStorage, &'a mut CNodeStorage),
+    /// Same CNode (ref1 == ref2).
+    Same(&'a mut CNodeStorage),
+}
+
 /// Access two CNodes with proper lock ordering.
 ///
 /// To prevent deadlocks, CNodes are always accessed in order of their
 /// ObjectRef index (lower index first).
 ///
-/// The `swapped` parameter in the callback indicates whether the CNodes
-/// were swapped for ordering - if true, the first CNode passed is actually
-/// ref2 and the second is ref1.
-///
-/// # Same CNode Case
-///
-/// If `ref1 == ref2`, the same CNode is passed twice. The caller must ensure
-/// they don't access overlapping slots mutably (which the capability operations
-/// guarantee by operating on distinct slot indices).
+/// When `ref1 == ref2`, the callback receives [`CNodeAccess::Same`] with
+/// a single `&mut CNodeStorage` to avoid aliasing UB.
 pub fn with_two_cnodes<F, R>(ref1: ObjectRef, ref2: ObjectRef, f: F) -> Result<R, SyscallError>
 where
-    F: FnOnce(&mut CNodeStorage, &mut CNodeStorage, bool) -> Result<R, SyscallError>,
+    F: FnOnce(CNodeAccess<'_>) -> Result<R, SyscallError>,
 {
     // Use a single lock acquisition to avoid self-deadlock when nesting
     object_table::with_table(|table| {
-        // Handle same-CNode case
+        // Handle same-CNode case — single &mut avoids aliasing UB
         if ref1 == ref2 {
             let obj = table.get(ref1).ok_or(SyscallError::InvalidCap)?;
             if obj.obj_type != KernelObjectType::CNode {
@@ -434,15 +439,9 @@ where
                 return Err(SyscallError::InvalidCap);
             }
 
-            // SAFETY: We create two mutable references to the same CNode.
-            // This is safe because:
-            // 1. The capability operations (copy, move, etc.) operate on
-            //    distinct slot indices within the CNode
-            // 2. CapSlot is 16 bytes and slots don't overlap
-            // 3. The caller ensures they don't modify the same slot twice
-            let cnode1 = unsafe { &mut *ptr };
-            let cnode2 = unsafe { &mut *ptr };
-            return f(cnode1, cnode2, false);
+            // SAFETY: ptr is valid and we create only one &mut reference.
+            let cnode = unsafe { &mut *ptr };
+            return f(CNodeAccess::Same(cnode));
         }
 
         // Order by ObjectRef index for consistent ordering (not for deadlock
@@ -469,15 +468,15 @@ where
             return Err(SyscallError::InvalidCap);
         }
 
-        // SAFETY: We've verified both pointers are valid CNodes
-        // and they are different objects (checked above).
+        // SAFETY: Both pointers are valid and they point to different
+        // objects (ref1 != ref2 checked above).
         let cnode1 = unsafe { &mut *ptr1 };
         let cnode2 = unsafe { &mut *ptr2 };
 
         if swapped {
-            f(cnode2, cnode1, swapped)
+            f(CNodeAccess::Distinct(cnode2, cnode1))
         } else {
-            f(cnode1, cnode2, swapped)
+            f(CNodeAccess::Distinct(cnode1, cnode2))
         }
     })
 }
