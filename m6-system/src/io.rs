@@ -64,6 +64,7 @@ fn ipc_write_string(ep: u64, s: &str) {
 }
 
 /// Print a decimal number.
+#[allow(dead_code)]
 pub fn put_u64(mut n: u64) {
     if n == 0 {
         puts("0");
@@ -124,6 +125,7 @@ pub fn put_hex(n: u64) {
 }
 
 /// Print a newline.
+#[allow(dead_code)]
 pub fn newline() {
     puts("\n");
 }

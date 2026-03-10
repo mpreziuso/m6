@@ -254,9 +254,38 @@ fn is_finished(tcb_ref: ObjectRef) -> bool {
 }
 
 /// Restore user context from TCB to exception frame.
+///
+/// After restoring the saved register state, checks for a pending IPC
+/// message staged by `transfer_message`. If present, the message is
+/// applied on top of the restored context and the pending flag is cleared.
+/// This is race-free because `save_context` writes only to `TCB.context`
+/// while `transfer_message` writes to `ipc_message`/`ipc_badge`/
+/// `ipc_msg_pending` — they never touch the same fields.
 fn restore_context(tcb_ref: ObjectRef, ctx: &mut UserCtx) {
-    super::run_queue::with_tcb(tcb_ref, |tcb| {
+    with_tcb_mut(tcb_ref, |tcb| {
         *ctx = tcb.context.clone();
+
+        if tcb.ipc_msg_pending {
+            // Apply staged IPC message to the exception frame.
+            // msg[0..5] → x0..x4, badge → x6
+            ctx.gpr[0] = tcb.ipc_message[0];
+            ctx.gpr[1] = tcb.ipc_message[1];
+            ctx.gpr[2] = tcb.ipc_message[2];
+            ctx.gpr[3] = tcb.ipc_message[3];
+            ctx.gpr[4] = tcb.ipc_message[4];
+            ctx.gpr[6] = tcb.ipc_badge;
+
+            tcb.ipc_msg_pending = false;
+            tcb.ipc_message = [0; 5];
+            tcb.ipc_badge = 0;
+
+            log::trace!(
+                "restore_context: applied pending IPC msg[0]={:#x} badge={:#x} for {:?}",
+                ctx.gpr[0],
+                ctx.gpr[6],
+                tcb_ref
+            );
+        }
     });
 }
 

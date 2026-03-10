@@ -6,7 +6,7 @@
 //! - NBSend/NBRecv: Non-blocking variants
 
 use m6_cap::ObjectRef;
-use m6_cap::objects::{EndpointState, ThreadState};
+use m6_cap::objects::ThreadState;
 
 use crate::cap::object_table::{self, KernelObjectType};
 use crate::syscall::error::SyscallError;
@@ -94,58 +94,32 @@ pub fn do_send(
                 });
             }
 
-            // Commit to the endpoint. An IRQ between the initial state read and here
-            // could have changed the endpoint to RecvQueue. Handle both cases.
-            object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                match endpoint.state {
-                    EndpointState::Idle | EndpointState::SendQueue => {
-                        // No concurrent receiver appeared — enqueue normally.
-                        endpoint.state = EndpointState::SendQueue;
-                        if old_tail.is_valid() {
-                            endpoint.queue_tail = sender_ref;
-                        } else {
-                            endpoint.queue_head = sender_ref;
-                            endpoint.queue_tail = sender_ref;
-                        }
-                    }
-                    EndpointState::RecvQueue => {
-                        // A receiver arrived while we were setting up TCB links.
-                        // Clear the stale old_tail->ipc_next link we wrote above so
-                        // old_tail is not left with a dangling pointer to a sender
-                        // that is about to become Running.
-                        if old_tail.is_valid() {
-                            let _: () = object_table::with_tcb_mut(old_tail, |tcb| {
-                                tcb.ipc_next = ObjectRef::NULL;
-                            });
-                        }
-                        // Deliver the message directly to the receiver instead.
-                        let receiver_ref = endpoint.queue_head;
-                        if receiver_ref.is_valid() {
-                            // Dequeue receiver
-                            let next: ObjectRef = object_table::with_tcb_mut(receiver_ref, |tcb| {
-                                let n = tcb.ipc_next;
-                                tcb.clear_ipc_links();
-                                n
-                            });
-                            endpoint.queue_head = next;
-                            if !next.is_valid() {
-                                endpoint.queue_tail = ObjectRef::NULL;
-                                endpoint.state = EndpointState::Idle;
-                            }
-                            // Unblock sender immediately (message delivered)
-                            object_table::with_tcb_mut(sender_ref, |tcb| {
-                                tcb.tcb.state = ThreadState::Running;
-                                tcb.ipc_blocked_on = ObjectRef::NULL;
-                                tcb.clear_ipc_state();
-                            });
-                            crate::sched::insert_task(sender_ref);
-                            // Transfer message and wake receiver
-                            transfer_message(receiver_ref, msg, badge);
-                            wake_thread(receiver_ref);
-                        }
-                    }
+            // Commit atomically — all queue manipulation happens within
+            // one lock acquisition to prevent self-deadlock on SMP.
+            let commit = object_table::ipc_send_commit(ep_ref, sender_ref, old_tail);
+
+            if let Some(object_table::IpcSendCommitResult::Recovery(info)) = commit {
+                // A receiver arrived concurrently. Deliver message directly.
+
+                // Unblock sender (current thread).
+                let _: () = object_table::with_tcb_mut(sender_ref, |tcb| {
+                    tcb.tcb.state = ThreadState::Running;
+                    tcb.ipc_blocked_on = ObjectRef::NULL;
+                    tcb.clear_ipc_state();
+                });
+                crate::sched::insert_task(sender_ref);
+
+                // Transfer capabilities if Grant right present.
+                if let Err(e) = super::cap_transfer::transfer_capabilities(
+                    sender_ref, info.receiver_ref, has_grant,
+                ) {
+                    log::debug!("Capability transfer failed during send recovery: {:?}", e);
                 }
-            });
+
+                // Transfer message and wake receiver.
+                transfer_message(info.receiver_ref, msg, badge);
+                wake_thread(info.receiver_ref);
+            }
 
             Ok(false)
         }
@@ -274,52 +248,56 @@ pub fn do_recv(
                 });
             }
 
-            // Commit to the endpoint. An IRQ between the initial state read and here
-            // could have changed the endpoint to SendQueue. Handle both cases.
-            object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                match endpoint.state {
-                    EndpointState::Idle | EndpointState::RecvQueue => {
-                        // No concurrent sender appeared — enqueue normally.
-                        endpoint.state = EndpointState::RecvQueue;
-                        if old_tail.is_valid() {
-                            endpoint.queue_tail = receiver_ref;
-                        } else {
-                            endpoint.queue_head = receiver_ref;
-                            endpoint.queue_tail = receiver_ref;
-                        }
-                    }
-                    EndpointState::SendQueue => {
-                        // A sender arrived concurrently. Deliver immediately.
-                        let sender_ref = endpoint.queue_head;
-                        if sender_ref.is_valid() {
-                            let next: ObjectRef = object_table::with_tcb_mut(sender_ref, |tcb| {
-                                let n = tcb.ipc_next;
-                                tcb.clear_ipc_links();
-                                n
-                            });
-                            endpoint.queue_head = next;
-                            if !next.is_valid() {
-                                endpoint.queue_tail = ObjectRef::NULL;
-                                endpoint.state = EndpointState::Idle;
-                            }
-                            // Unblock receiver
-                            object_table::with_tcb_mut(receiver_ref, |tcb| {
-                                tcb.tcb.state = ThreadState::Running;
-                                tcb.ipc_blocked_on = ObjectRef::NULL;
-                                tcb.clear_ipc_state();
-                            });
-                            crate::sched::insert_task(receiver_ref);
-                            // Transfer message from sender
-                            let (pending_msg, badge) = get_pending_message(sender_ref);
-                            transfer_message(receiver_ref, &pending_msg, badge);
-                            wake_thread(sender_ref);
-                        }
-                    }
-                }
-            })
-            .ok_or(SyscallError::InvalidCap)?;
+            // Commit to the endpoint atomically. All queue manipulation and
+            // sender TCB field reads happen within one lock acquisition to
+            // prevent self-deadlock on SMP recovery paths.
+            let commit = object_table::ipc_recv_commit(ep_ref, receiver_ref, old_tail)
+                .ok_or(SyscallError::InvalidCap)?;
 
-            Ok(None)
+            match commit {
+                object_table::IpcRecvCommitResult::Enqueued => Ok(None),
+                object_table::IpcRecvCommitResult::Recovery(info) => {
+                    // A sender arrived concurrently. Deliver its message
+                    // through the return value so the syscall handler writes
+                    // it to the kernel stack (not TCB.context which would be
+                    // overwritten since we're the current thread).
+
+                    // Unblock receiver (current thread).
+                    let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
+                        tcb.tcb.state = ThreadState::Running;
+                        tcb.ipc_blocked_on = ObjectRef::NULL;
+                        tcb.clear_ipc_state();
+                    });
+                    crate::sched::insert_task(receiver_ref);
+
+                    // Transfer capabilities if Grant right present.
+                    if let Err(e) = super::cap_transfer::transfer_capabilities(
+                        info.sender_ref, receiver_ref, has_grant,
+                    ) {
+                        log::debug!("Capability transfer failed during recv recovery: {:?}", e);
+                    }
+
+                    let msg = IpcMessage::from_regs(info.pending_msg);
+
+                    if info.sender_reply_slot.is_valid() {
+                        // Sender used Call: transfer reply cap, keep sender blocked.
+                        let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
+                            tcb.tcb.caller = info.sender_reply_slot;
+                        });
+                        let _: () = object_table::with_tcb_mut(info.sender_ref, |tcb| {
+                            tcb.tcb.state = ThreadState::BlockedOnReply;
+                            tcb.ipc_blocked_on = ObjectRef::NULL;
+                            tcb.tcb.reply_slot = ObjectRef::NULL;
+                            tcb.clear_ipc_state();
+                        });
+                    } else {
+                        // Sender used Send: wake it.
+                        wake_thread(info.sender_ref);
+                    }
+
+                    Ok(Some((info.badge, msg)))
+                }
+            }
         }
 
         Action::WouldBlock => Err(SyscallError::WouldBlock),
@@ -418,56 +396,37 @@ pub fn do_call(
                 });
             }
 
-            object_table::with_endpoint_mut(ep_ref, |endpoint| {
-                match endpoint.state {
-                    EndpointState::Idle | EndpointState::SendQueue => {
-                        // No concurrent receiver — enqueue normally.
-                        endpoint.state = EndpointState::SendQueue;
-                        if old_tail.is_valid() {
-                            endpoint.queue_tail = caller_ref;
-                        } else {
-                            endpoint.queue_head = caller_ref;
-                            endpoint.queue_tail = caller_ref;
-                        }
-                    }
-                    EndpointState::RecvQueue => {
-                        // A receiver arrived concurrently. Clear the stale
-                        // old_tail->ipc_next link before proceeding.
-                        if old_tail.is_valid() {
-                            let _: () = object_table::with_tcb_mut(old_tail, |tcb| {
-                                tcb.ipc_next = ObjectRef::NULL;
-                            });
-                        }
-                        let receiver_ref = endpoint.queue_head;
-                        if receiver_ref.is_valid() {
-                            let next: ObjectRef = object_table::with_tcb_mut(receiver_ref, |tcb| {
-                                let n = tcb.ipc_next;
-                                tcb.clear_ipc_links();
-                                n
-                            });
-                            endpoint.queue_head = next;
-                            if !next.is_valid() {
-                                endpoint.queue_tail = ObjectRef::NULL;
-                                endpoint.state = EndpointState::Idle;
-                            }
-                            // Grant reply capability to receiver.
-                            let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
-                                tcb.tcb.caller = reply_ref;
-                            });
-                            // Transition caller from BlockedOnSend to BlockedOnReply.
-                            let _: () = object_table::with_tcb_mut(caller_ref, |tcb| {
-                                tcb.tcb.state = ThreadState::BlockedOnReply;
-                                tcb.ipc_blocked_on = ObjectRef::NULL;
-                                tcb.tcb.reply_slot = ObjectRef::NULL;
-                                tcb.clear_ipc_state();
-                            });
-                            // Transfer message and wake receiver.
-                            transfer_message(receiver_ref, msg, badge);
-                            wake_thread(receiver_ref);
-                        }
-                    }
+            // Commit atomically — all queue manipulation happens within
+            // one lock acquisition to prevent self-deadlock on SMP.
+            let commit = object_table::ipc_send_commit(ep_ref, caller_ref, old_tail);
+
+            if let Some(object_table::IpcSendCommitResult::Recovery(info)) = commit {
+                // A receiver arrived concurrently. Deliver message directly.
+
+                // Transfer capabilities if Grant right present.
+                if let Err(e) = super::cap_transfer::transfer_capabilities(
+                    caller_ref, info.receiver_ref, has_grant,
+                ) {
+                    log::debug!("Capability transfer failed during call recovery: {:?}", e);
                 }
-            });
+
+                // Grant reply capability to receiver.
+                let _: () = object_table::with_tcb_mut(info.receiver_ref, |tcb| {
+                    tcb.tcb.caller = reply_ref;
+                });
+
+                // Transition caller from BlockedOnSend to BlockedOnReply.
+                let _: () = object_table::with_tcb_mut(caller_ref, |tcb| {
+                    tcb.tcb.state = ThreadState::BlockedOnReply;
+                    tcb.ipc_blocked_on = ObjectRef::NULL;
+                    tcb.tcb.reply_slot = ObjectRef::NULL;
+                    tcb.clear_ipc_state();
+                });
+
+                // Transfer message and wake receiver.
+                transfer_message(info.receiver_ref, msg, badge);
+                wake_thread(info.receiver_ref);
+            }
 
             Ok(false)
         }
@@ -599,19 +558,24 @@ fn get_pending_message(tcb_ref: ObjectRef) -> (IpcMessage, u64) {
     })
 }
 
-/// Transfer a message to a receiver's saved context.
+/// Stage a message for delivery to a receiver.
+///
+/// Instead of writing directly to `TCB.context` (which races with
+/// `save_context` on SMP), we write to the `ipc_message`/`ipc_badge`
+/// staging fields and set `ipc_msg_pending`. The dispatcher applies
+/// these to the exception frame in `restore_context`, which is
+/// guaranteed to run after `save_context` has completed.
 fn transfer_message(receiver_ref: ObjectRef, msg: &IpcMessage, badge: u64) {
     let _: () = object_table::with_tcb_mut(receiver_ref, |tcb| {
         log::trace!(
-            "transfer_message: before x0={:#x}, writing msg[0]={:#x}",
-            tcb.context.gpr[0],
-            msg.regs[0]
+            "transfer_message: staging msg[0]={:#x}, badge={:#x} for {:?}",
+            msg.regs[0],
+            badge,
+            receiver_ref
         );
-        // Write message to receiver's saved register context
-        msg.to_context(&mut tcb.context);
-        // Badge goes in x6
-        tcb.context.gpr[6] = badge;
-        log::trace!("transfer_message: after x0={:#x}", tcb.context.gpr[0]);
+        tcb.ipc_message = msg.regs;
+        tcb.ipc_badge = badge;
+        tcb.ipc_msg_pending = true;
     });
 }
 
@@ -627,11 +591,15 @@ fn block_thread(tcb_ref: ObjectRef, blocked_on: ObjectRef, state: ThreadState) {
 }
 
 /// Wake a blocked thread.
+///
+/// Only clears blocking metadata and queue links — not `ipc_message`/
+/// `ipc_badge`/`ipc_msg_pending`, because `transfer_message` may have
+/// staged an incoming message that `restore_context` still needs to apply.
 fn wake_thread(tcb_ref: ObjectRef) {
     let _: () = object_table::with_tcb_mut(tcb_ref, |tcb| {
         tcb.tcb.state = ThreadState::Running;
         tcb.ipc_blocked_on = ObjectRef::NULL;
-        tcb.clear_ipc_state();
+        tcb.clear_ipc_links();
     });
 
     // Add to run queue

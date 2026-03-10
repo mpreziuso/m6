@@ -35,9 +35,7 @@ fn resolve_smmu_phandle_to_slot(phandle: u32) -> Option<u64> {
         0x191 => Some(slots::SMMU_CONTROL_1), // PHP SMMU (USB, etc.)
         0 => None, // No SMMU
         _ => {
-            crate::io::puts("[device-mgr] WARN: Unknown SMMU phandle ");
-            crate::io::put_hex(phandle as u64);
-            crate::io::puts(", refusing to bind\n");
+            log::warn!("Unknown SMMU phandle {:#x}, refusing to bind", phandle);
             None
         }
     }
@@ -402,18 +400,10 @@ pub fn spawn_driver(
 
     // Claim IRQ handler if needed
     if let Some(irq_slot) = irq_handler_slot {
-        crate::io::puts("[device-mgr] Claiming IRQ ");
-        crate::io::put_u64(config.device_info.irq as u64);
-        crate::io::puts(" for ");
-        crate::io::puts(config.manifest.compatible);
-        crate::io::newline();
+        log::info!("Claiming IRQ {} for {}", config.device_info.irq, config.manifest.compatible);
         claim_irq(irq_slot, config.device_info.irq, &cptr)?;
     } else if config.manifest.needs_irq && !config.manifest.needs_msix {
-        crate::io::puts("[device-mgr] WARNING: needs_irq but irq=");
-        crate::io::put_u64(config.device_info.irq as u64);
-        crate::io::puts(" for ");
-        crate::io::puts(config.manifest.compatible);
-        crate::io::newline();
+        log::warn!("needs_irq but irq={} for {}", config.device_info.irq, config.manifest.compatible);
     }
 
     // Create notification for IRQ delivery if needed
@@ -434,27 +424,20 @@ pub fn spawn_driver(
         let smmu_slot = if has_smmu_control {
             // Resolve device's SMMU phandle to the correct SmmuControl slot
             let slot = resolve_smmu_phandle_to_slot(config.device_info.smmu_phandle);
-            crate::io::puts("[device-mgr] SMMU phandle ");
-            crate::io::put_hex(config.device_info.smmu_phandle as u64);
-            crate::io::puts(" -> slot ");
-            if let Some(s) = slot {
-                crate::io::put_u64(s);
-            } else {
-                crate::io::puts("None");
+            match slot {
+                Some(s) => log::debug!("SMMU phandle {:#x} -> slot {}", config.device_info.smmu_phandle, s),
+                None => log::debug!("SMMU phandle {:#x} -> None", config.device_info.smmu_phandle),
             }
-            crate::io::newline();
             slot
         } else {
             None
         };
         create_iospace(io_slot, smmu_slot, config.device_info.stream_id, &cptr)?;
-        crate::io::puts("[device-mgr] IOSpace created for ");
-        crate::io::puts(config.manifest.binary_name);
         if let Some(sid) = config.device_info.stream_id {
-            crate::io::puts(" with stream ID ");
-            crate::io::put_hex(sid as u64);
+            log::info!("IOSpace created for {} with stream ID {:#x}", config.manifest.binary_name, sid);
+        } else {
+            log::info!("IOSpace created for {}", config.manifest.binary_name);
         }
-        crate::io::newline();
     }
 
     // Create DMA buffer frames for DMA-capable drivers
@@ -491,7 +474,7 @@ pub fn spawn_driver(
         ) {
             Ok(_) => Some(pool_slot),
             Err(SyscallError::WouldBlock) => {
-                crate::io::puts("[device-mgr] WARN: DMA pool creation timed out\n");
+                log::warn!("DMA pool creation timed out");
                 None
             }
             Err(e) => return Err(SpawnError::RetypeFailed(e)),
@@ -703,13 +686,11 @@ pub fn spawn_driver(
         ) {
             Ok(msix_result) => {
                 if let Err(_e) = install_msix_caps(cptr(cspace_slot), cptr(slots::ROOT_CNODE), &msix_result) {
-                    crate::io::puts("[device-mgr] WARN: MSI-X cap install failed for ");
-                    crate::io::puts(config.manifest.binary_name);
-                    crate::io::newline();
+                    log::warn!("MSI-X cap install failed for {}", config.manifest.binary_name);
                 }
             }
             Err(_) => {
-                crate::io::puts("[device-mgr] WARN: MSI-X setup failed, driver will use polling\n");
+                log::warn!("MSI-X setup failed, driver will use polling");
             }
         }
     }
@@ -851,9 +832,7 @@ fn create_extended_mmio_frames(
         .find_device_untyped(device_info.phys_base)
         .ok_or(SpawnError::DeviceUntypedNotFound)?;
 
-    crate::io::puts("[device-mgr] Creating ");
-    crate::io::put_u64(pages_to_create as u64);
-    crate::io::puts(" extended MMIO frames\n");
+    log::info!("Creating {} extended MMIO frames", pages_to_create);
 
     for (i, frame_slot) in frame_slots.iter_mut().enumerate().take(pages_to_create) {
         // Page 0 is at phys_base, page 1 is at phys_base + 0x1000, etc.
@@ -872,13 +851,7 @@ fn create_extended_mmio_frames(
             slot,
             offset_in_untyped,
         ) {
-            crate::io::puts("[device-mgr] WARN: Failed to create extended MMIO frame ");
-            crate::io::put_u64(i as u64);
-            crate::io::puts(" at offset ");
-            crate::io::put_hex(offset_in_untyped);
-            crate::io::puts(": ");
-            crate::io::puts(e.name());
-            crate::io::newline();
+            log::warn!("Failed to create extended MMIO frame {} at offset {:#x}: {}", i, offset_in_untyped, e.name());
             // Continue trying remaining frames
             continue;
         }
@@ -918,7 +891,7 @@ fn create_additional_frames(
 
     for (i, frame) in manifest.additional_frames.iter().enumerate() {
         if i >= slots::driver::ADDITIONAL_FRAME_MAX {
-            crate::io::puts("[device-mgr] WARN: too many additional frames\n");
+            log::warn!("Too many additional frames");
             break;
         }
 
@@ -927,13 +900,7 @@ fn create_additional_frames(
         let is_large = num_pages > 1;
 
         // Debug: show what we're looking for
-        crate::io::puts("[device-mgr] Looking for ");
-        crate::io::puts(frame.name);
-        crate::io::puts(" at phys ");
-        crate::io::put_hex(frame.phys_addr);
-        crate::io::puts(" (");
-        crate::io::put_u64(num_pages as u64);
-        crate::io::puts(" pages)\n");
+        log::debug!("Looking for {} at phys {:#x} ({} pages)", frame.name, frame.phys_addr, num_pages);
 
         // Check if we already have this frame cached from a previous driver
         if let Some(cached_slot) = registry.find_additional_frame(frame.phys_addr) {
@@ -942,11 +909,7 @@ fn create_additional_frames(
             let cnode_cptr = cptr(slots::ROOT_CNODE);
 
             if let Err(e) = cap_copy(cnode_cptr, new_slot, 0, cnode_cptr, cached_slot, 0) {
-                crate::io::puts("[device-mgr] WARN: failed to copy ");
-                crate::io::puts(frame.name);
-                crate::io::puts(": ");
-                crate::io::puts(e.name());
-                crate::io::newline();
+                log::warn!("Failed to copy {}: {}", frame.name, e.name());
                 continue;
             }
 
@@ -965,23 +928,13 @@ fn create_additional_frames(
             .find_device_untyped(frame.phys_addr)
         {
             Some(v) => {
-                crate::io::puts("[device-mgr] Found device untyped at ");
-                crate::io::put_hex(v.2);
-                crate::io::puts(" size ");
-                crate::io::put_hex(v.1);
-                crate::io::puts(" for ");
-                crate::io::puts(frame.name);
-                crate::io::newline();
+                log::debug!("Found device untyped at {:#x} size {:#x} for {}", v.2, v.1, frame.name);
                 v
             }
             None => {
                 // GRF/CRU regions might not have device untypeds on non-RK3588 platforms
                 // This is not an error - just skip this frame
-                crate::io::puts("[device-mgr] WARN: no device untyped for ");
-                crate::io::puts(frame.name);
-                crate::io::puts(" at ");
-                crate::io::put_hex(frame.phys_addr);
-                crate::io::newline();
+                log::warn!("No device untyped for {} at {:#x}", frame.name, frame.phys_addr);
                 continue;
             }
         };
@@ -1006,11 +959,7 @@ fn create_additional_frames(
             slot,
             offset,
         ) {
-            crate::io::puts("[device-mgr] WARN: failed to create DeviceFrame for ");
-            crate::io::puts(frame.name);
-            crate::io::puts(": ");
-            crate::io::puts(e.name());
-            crate::io::newline();
+            log::warn!("Failed to create DeviceFrame for {}: {}", frame.name, e.name());
             continue;
         }
 
@@ -1033,7 +982,7 @@ fn create_additional_frames(
         if is_large && large_frame_idx < slots::driver::LARGE_FRAME_MAX {
             for page in 1..num_pages {
                 if large_frame_idx >= slots::driver::LARGE_FRAME_MAX {
-                    crate::io::puts("[device-mgr] WARN: out of large frame slots\n");
+                    log::warn!("Out of large frame slots");
                     break;
                 }
 
@@ -1048,11 +997,7 @@ fn create_additional_frames(
                     page_slot,
                     page_offset,
                 ) {
-                    crate::io::puts("[device-mgr] WARN: failed to create large frame page ");
-                    crate::io::put_u64(page as u64);
-                    crate::io::puts(": ");
-                    crate::io::puts(e.name());
-                    crate::io::newline();
+                    log::warn!("Failed to create large frame page {}: {}", page, e.name());
                     break;
                 }
 
@@ -1135,9 +1080,7 @@ fn create_iospace(
     }
 
     create_result.map_err(|e| {
-        crate::io::puts("[device-mgr] IOSpace creation failed: ");
-        crate::io::puts(e.name());
-        crate::io::newline();
+        log::error!("IOSpace creation failed: {}", e.name());
         SpawnError::IOSpaceOpFailed(e)
     })?;
 
@@ -1165,21 +1108,13 @@ fn create_iospace(
 
         match bind_result {
             Ok(_) => {
-                crate::io::puts("[device-mgr] Bound stream ID 0x");
-                crate::io::put_hex(sid as u64);
-                crate::io::puts(" to IOSpace\n");
+                log::info!("Bound stream ID {:#x} to IOSpace", sid);
             }
             Err(SyscallError::AlreadyMapped) => {
-                crate::io::puts("[device-mgr] Stream 0x");
-                crate::io::put_hex(sid as u64);
-                crate::io::puts(" already bound by firmware\n");
+                log::debug!("Stream {:#x} already bound by firmware", sid);
             }
             Err(e) => {
-                crate::io::puts("[device-mgr] Stream bind failed for 0x");
-                crate::io::put_hex(sid as u64);
-                crate::io::puts(": ");
-                crate::io::puts(e.name());
-                crate::io::newline();
+                log::error!("Stream bind failed for {:#x}: {}", sid, e.name());
                 return Err(SpawnError::IOSpaceOpFailed(e));
             }
         }
@@ -1192,17 +1127,13 @@ fn create_iospace(
             let raw_bind = iospace_bind_stream(cptr(slot), cptr(smmu_slot), raw_bdf);
             match raw_bind {
                 Ok(_) => {
-                    crate::io::puts("[device-mgr] Also bound raw BDF 0x");
-                    crate::io::put_hex(raw_bdf as u64);
-                    crate::io::puts(" to IOSpace\n");
+                    log::info!("Also bound raw BDF {:#x} to IOSpace", raw_bdf);
                 }
                 Err(SyscallError::AlreadyMapped) => {
                     // Another device already has this raw BDF — fine, skip
                 }
                 Err(e) => {
-                    crate::io::puts("[device-mgr] WARN: raw BDF bind failed: ");
-                    crate::io::puts(e.name());
-                    crate::io::newline();
+                    log::warn!("Raw BDF bind failed: {}", e.name());
                     // Non-fatal: the primary binding should still work
                 }
             }
@@ -1729,8 +1660,6 @@ pub fn setup_msix(
     registry: &mut Registry,
     cptr: &impl Fn(u64) -> u64,
 ) -> Result<MsixSetupResult, SpawnError> {
-    use crate::io;
-
     // Clamp requested vectors to device capability and our maximum
     let max_vectors = (msix.table_size as u32)
         .min(requested_vectors)
@@ -1740,21 +1669,16 @@ pub fn setup_msix(
         return Err(SpawnError::MsixSetupFailed);
     }
 
-    io::puts("[device-mgr] MSI-X: allocating ");
-    io::put_u64(max_vectors as u64);
-    io::puts(" vectors\n");
+    log::info!("MSI-X: allocating {} vectors", max_vectors);
 
     // Allocate MSI vectors from the kernel
     let msi_result = msi_allocate(cptr(slots::IRQ_CONTROL), max_vectors)
         .map_err(SpawnError::MsiAllocateFailed)?;
 
-    io::puts("[device-mgr] MSI-X: allocated ");
-    io::put_u64(msi_result.vector_count as u64);
-    io::puts(" vectors, base SPI=");
-    io::put_u64(msi_result.base_spi as u64);
-    io::puts(", target=");
-    io::put_hex(msi_result.target_addr);
-    io::newline();
+    log::info!(
+        "MSI-X: allocated {} vectors, base SPI={}, target={:#x}",
+        msi_result.vector_count, msi_result.base_spi, msi_result.target_addr
+    );
 
     let mut result = MsixSetupResult {
         vector_count: msi_result.vector_count,
@@ -1830,8 +1754,6 @@ fn programme_msix_table(
     registry: &mut Registry,
     cptr: &impl Fn(u64) -> u64,
 ) -> Result<(), SpawnError> {
-    use crate::io;
-
     // SAFETY: Called after _start has initialised BOOT_INFO
     let boot_info = unsafe { crate::get_boot_info() };
 
@@ -1885,9 +1807,7 @@ fn programme_msix_table(
     // Each entry is 16 bytes: [msg_addr_lo (4), msg_addr_hi (4), msg_data (4), vector_ctrl (4)]
     let table_vaddr = MSIX_TABLE_VADDR as usize + page_offset;
 
-    io::puts("[device-mgr] MSI-X: programming table at vaddr ");
-    io::put_hex(table_vaddr as u64);
-    io::newline();
+    log::debug!("MSI-X: programming table at vaddr {:#x}", table_vaddr);
 
     // Mask ALL MSI-X vectors first. UEFI may have left MSI-X enabled with
     // stale table entries pointing to UEFI's MSI addresses. If we fail to
@@ -1921,11 +1841,7 @@ fn programme_msix_table(
             core::ptr::write_volatile((entry_addr + 12) as *mut u32, 0);
         }
 
-        io::puts("[device-mgr] MSI-X: vector ");
-        io::put_u64(i as u64);
-        io::puts(" -> SPI ");
-        io::put_u64((base_spi + i) as u64);
-        io::newline();
+        log::debug!("MSI-X: vector {} -> SPI {}", i, base_spi + i);
     }
 
     // Unmap the temporary mapping
@@ -1936,13 +1852,7 @@ fn programme_msix_table(
     // won't generate stale TLPs)
     if enable_msix_in_config(pcie_bdf, msix.cap_offset, bar_phys_base, registry, cptr).is_err() {
         let (bus, dev, func) = pcie_bdf;
-        io::puts("[device-mgr] MSI-X: config space enable FAILED for ");
-        io::put_hex(bus as u64);
-        io::puts(":");
-        io::put_hex(dev as u64);
-        io::puts(".");
-        io::put_hex(func as u64);
-        io::puts(" — vectors masked via BAR only\n");
+        log::error!("MSI-X: config space enable FAILED for {:#x}:{:#x}.{:#x} — vectors masked via BAR only", bus, dev, func);
         return Ok(());
     }
 
@@ -1961,13 +1871,12 @@ fn enable_msix_in_config(
     registry: &mut Registry,
     cptr: &impl Fn(u64) -> u64,
 ) -> Result<(), SpawnError> {
-    use crate::io;
     use crate::pcie;
 
     // SAFETY: Called after _start has initialised BOOT_INFO
     let boot_info = unsafe { crate::get_boot_info() };
     let Some(dtb_data) = (unsafe { boot_info.dtb_slice() }) else {
-        io::puts("[device-mgr] MSI-X: DTB not available\n");
+        log::error!("MSI-X: DTB not available");
         return Err(SpawnError::MsixSetupFailed);
     };
 
@@ -1997,30 +1906,18 @@ fn enable_msix_in_config(
     }
 
     let Some(host) = found_host else {
-        io::puts("[device-mgr] MSI-X: no PCIe host found for config access (BAR0=");
-        io::put_hex(bar_phys_base);
-        io::puts(") BDF=");
-        io::put_u64(bus as u64);
-        io::puts(":");
-        io::put_u64(dev as u64);
-        io::puts(".");
-        io::put_u64(func as u64);
-        io::puts("\n[device-mgr] MSI-X: parsed hosts:");
+        log::error!(
+            "MSI-X: no PCIe host found for config access (BAR0={:#x}) BDF={}:{}:{}",
+            bar_phys_base, bus, dev, func
+        );
         for (i, h) in hosts.iter().enumerate() {
             if let Some(h) = h {
-                io::puts(" [");
-                io::put_u64(i as u64);
-                io::puts("]=mem32@");
-                io::put_hex(h.mem32_cpu);
-                io::puts("+");
-                io::put_hex(h.mem32_size);
-                io::puts(",bus=");
-                io::put_u64(h.bus_range.0 as u64);
-                io::puts("-");
-                io::put_u64(h.bus_range.1 as u64);
+                log::debug!(
+                    "MSI-X: parsed host [{}]=mem32@{:#x}+{:#x},bus={}-{}",
+                    i, h.mem32_cpu, h.mem32_size, h.bus_range.0, h.bus_range.1
+                );
             }
         }
-        io::newline();
         return Err(SpawnError::MsixSetupFailed);
     };
 
@@ -2094,7 +1991,6 @@ fn enable_msix_dwc(
     boot_info: &crate::boot_info::DevMgrBootInfo,
     cptr: &impl Fn(u64) -> u64,
 ) -> Result<(), SpawnError> {
-    use crate::io;
     use crate::pcie;
 
     let (bus, _dev, _func) = pcie_bdf;
@@ -2104,7 +2000,7 @@ fn enable_msix_dwc(
         host.dbi_base
     } else {
         pcie::dbi_low_addr_for_config(host.config_base).ok_or_else(|| {
-            io::puts("[device-mgr] MSI-X DWC: no DBI base\n");
+            log::error!("MSI-X DWC: no DBI base");
             SpawnError::MsixSetupFailed
         })?
     };
@@ -2115,9 +2011,7 @@ fn enable_msix_dwc(
     let _iatu_slot = match map_device_page(iatu_phys, iatu_vaddr, registry, boot_info, cptr) {
         Ok(slot) => slot,
         Err(e) => {
-            io::puts("[device-mgr] MSI-X DWC: iATU map failed at ");
-            io::put_hex(iatu_phys);
-            io::puts(" (likely consumed during PCIe scan)\n");
+            log::error!("MSI-X DWC: iATU map failed at {:#x} (likely consumed during PCIe scan)", iatu_phys);
             return Err(e);
         }
     };
@@ -2141,9 +2035,7 @@ fn enable_msix_dwc(
     let _sec_config_slot = match map_device_page(sec_cpu_addr, sec_config_vaddr, registry, boot_info, cptr) {
         Ok(slot) => slot,
         Err(e) => {
-            io::puts("[device-mgr] MSI-X DWC: config page map failed at ");
-            io::put_hex(sec_cpu_addr);
-            io::newline();
+            log::error!("MSI-X DWC: config page map failed at {:#x}", sec_cpu_addr);
             let _ = unmap_frame(cptr(slots::ROOT_VSPACE), iatu_vaddr);
             return Err(e);
         }
@@ -2173,7 +2065,7 @@ fn msix_enable_write(cap_vaddr: usize) {
         let new_msg_ctrl = (msg_ctrl | (1 << 15)) & !(1 << 14);
         core::ptr::write_volatile(msg_ctrl_addr as *mut u16, new_msg_ctrl);
     }
-    crate::io::puts("[device-mgr] MSI-X: enabled in config space\n");
+    log::info!("MSI-X: enabled in config space");
 }
 
 /// Map a single 4KB device page into the device-mgr's VSpace.
@@ -2445,7 +2337,7 @@ pub fn spawn_class_driver(
     // Resume the driver
     tcb_resume(cptr(tcb_slot)).map_err(|_| "TCB resume failed")?;
 
-    crate::io::puts("[device-mgr] Class driver spawned successfully\n");
+    log::info!("Class driver spawned successfully");
 
     Ok(ClassDriverSpawnResult {
         tcb_slot,
@@ -2545,4 +2437,237 @@ fn install_class_driver_caps(
     .map_err(SpawnError::CapCopyFailed)?;
 
     Ok(())
+}
+
+// -- FAT32 service well-known slots (in its CSpace)
+
+pub mod fat32_driver {
+    /// Service endpoint (for clients like shell) - slot 12
+    pub const SERVICE_EP: u64 = 12;
+    /// NVMe block device endpoint - slot 30
+    pub const BLK_EP: u64 = 30;
+    /// Data frame for block I/O - slot 31
+    pub const DATA_FRAME: u64 = 31;
+    /// Path/data buffer frame - slot 32
+    pub const PATH_FRAME: u64 = 32;
+}
+
+/// Spawn the FAT32 filesystem service.
+///
+/// Initial capabilities granted:
+/// - Slot 0: Root CNode (self-reference)
+/// - Slot 1: Root TCB
+/// - Slot 2: Root VSpace
+/// - Slot 12: Service endpoint (for clients)
+/// - Slot 30: NVMe driver endpoint (for block I/O)
+/// - Slot 31: Data frame (for DMA transfers)
+/// - Slot 32: Path/data buffer frame
+/// - Slot 17: RAM untyped (for heap)
+pub fn spawn_fat32_service(
+    registry: &mut Registry,
+    elf_data: &[u8],
+    nvme_ep_slot: u64,
+) -> Result<ClassDriverSpawnResult, &'static str> {
+    // SAFETY: Called after _start has initialised BOOT_INFO
+    let boot_info = unsafe { crate::get_boot_info() };
+    let cptr = |slot: u64| slot_to_cptr(slot, boot_info.cnode_radix);
+
+    let elf = Elf64::parse(elf_data).map_err(|_| "Invalid ELF")?;
+
+    // Allocate capability slots
+    let vspace_slot = registry.alloc_slot();
+    let cspace_slot = registry.alloc_slot();
+    let tcb_slot = registry.alloc_slot();
+    let ipc_buf_slot = registry.alloc_slot();
+    let service_ep_slot = registry.alloc_slot();
+    let data_frame_slot = registry.alloc_slot();
+    let path_frame_slot = registry.alloc_slot();
+
+    // Create VSpace
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::VSpace as u64,
+        0,
+        cptr(slots::ROOT_CNODE),
+        vspace_slot,
+        1,
+    )
+    .map_err(|_| "VSpace retype failed")?;
+
+    asid_pool_assign(cptr(slots::ASID_POOL), cptr(vspace_slot))
+        .map_err(|_| "ASID assign failed")?;
+
+    // Create CSpace (radix 10 = 1024 slots)
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::CNode as u64,
+        10,
+        cptr(slots::ROOT_CNODE),
+        cspace_slot,
+        1,
+    )
+    .map_err(|_| "CSpace retype failed")?;
+
+    // Create TCB
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::TCB as u64,
+        0,
+        cptr(slots::ROOT_CNODE),
+        tcb_slot,
+        1,
+    )
+    .map_err(|_| "TCB retype failed")?;
+
+    // Create IPC buffer frame
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::Frame as u64,
+        12,
+        cptr(slots::ROOT_CNODE),
+        ipc_buf_slot,
+        1,
+    )
+    .map_err(|_| "IPC buffer retype failed")?;
+
+    // Create service endpoint
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::Endpoint as u64,
+        0,
+        cptr(slots::ROOT_CNODE),
+        service_ep_slot,
+        1,
+    )
+    .map_err(|_| "Endpoint retype failed")?;
+
+    // Create data frame for block I/O DMA
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::Frame as u64,
+        12,
+        cptr(slots::ROOT_CNODE),
+        data_frame_slot,
+        1,
+    )
+    .map_err(|_| "Data frame retype failed")?;
+
+    // Create path/data buffer frame
+    retype(
+        cptr(slots::RAM_UNTYPED),
+        ObjectType::Frame as u64,
+        12,
+        cptr(slots::ROOT_CNODE),
+        path_frame_slot,
+        1,
+    )
+    .map_err(|_| "Path frame retype failed")?;
+
+    // Load ELF and create stack
+    let entry = elf.entry();
+    let stack_top = load_elf_and_stack(vspace_slot, &elf, elf_data, registry, &cptr)
+        .map_err(|_| "ELF loading failed")?;
+
+    // Map IPC buffer
+    const IPC_BUFFER_ADDR: u64 = m6_syscall::IPC_BUFFER_ADDR;
+    ensure_page_tables(
+        vspace_slot,
+        IPC_BUFFER_ADDR,
+        IPC_BUFFER_ADDR + PAGE_SIZE as u64,
+        registry,
+        &cptr,
+    )
+    .map_err(|_| "Page table creation failed")?;
+
+    map_frame(
+        cptr(vspace_slot),
+        cptr(ipc_buf_slot),
+        IPC_BUFFER_ADDR,
+        MapRights::RW.to_bits(),
+        0,
+    )
+    .map_err(|_| "IPC buffer map failed")?;
+
+    // Ensure page tables for data/path frame region (0x80020000-0x80040000)
+    const DATA_VADDR: u64 = 0x8002_0000;
+    const PATH_VADDR: u64 = 0x8003_0000;
+    ensure_page_tables(vspace_slot, DATA_VADDR, PATH_VADDR + PAGE_SIZE as u64, registry, &cptr)
+        .map_err(|_| "Data/path page table failed")?;
+
+    // Ensure page tables for heap region
+    const HEAP_BASE: u64 = 0x4000_0000;
+    const HEAP_SIZE: u64 = 128 * 1024 * 1024;
+    ensure_page_tables(vspace_slot, HEAP_BASE, HEAP_BASE + HEAP_SIZE, registry, &cptr)
+        .map_err(|_| "Heap page table failed")?;
+
+    // Install capabilities into FAT32 service's CSpace
+    let child_cspace_cptr = cptr(cspace_slot);
+    let src_cnode_cptr = cptr(slots::ROOT_CNODE);
+
+    // Slot 0: CSpace self-reference
+    cap_copy(child_cspace_cptr, slots::driver::ROOT_CNODE, 0, src_cnode_cptr, cspace_slot, 0)
+        .map_err(SpawnError::CapCopyFailed)
+        .map_err(|_| "Cap install failed")?;
+
+    // Slot 1: TCB
+    cap_copy(child_cspace_cptr, slots::driver::ROOT_TCB, 0, src_cnode_cptr, tcb_slot, 0)
+        .map_err(SpawnError::CapCopyFailed)
+        .map_err(|_| "Cap install failed")?;
+
+    // Slot 2: VSpace
+    cap_copy(child_cspace_cptr, slots::driver::ROOT_VSPACE, 0, src_cnode_cptr, vspace_slot, 0)
+        .map_err(SpawnError::CapCopyFailed)
+        .map_err(|_| "Cap install failed")?;
+
+    // Slot 12: Service endpoint
+    cap_copy(child_cspace_cptr, fat32_driver::SERVICE_EP, 0, src_cnode_cptr, service_ep_slot, 0)
+        .map_err(SpawnError::CapCopyFailed)
+        .map_err(|_| "Cap install failed")?;
+
+    // Slot 30: NVMe driver endpoint
+    cap_copy(child_cspace_cptr, fat32_driver::BLK_EP, 0, src_cnode_cptr, nvme_ep_slot, 0)
+        .map_err(SpawnError::CapCopyFailed)
+        .map_err(|_| "Cap install failed")?;
+
+    // Slot 31: Data frame for block I/O
+    cap_copy(child_cspace_cptr, fat32_driver::DATA_FRAME, 0, src_cnode_cptr, data_frame_slot, 0)
+        .map_err(SpawnError::CapCopyFailed)
+        .map_err(|_| "Cap install failed")?;
+
+    // Slot 32: Path/data buffer frame
+    cap_copy(child_cspace_cptr, fat32_driver::PATH_FRAME, 0, src_cnode_cptr, path_frame_slot, 0)
+        .map_err(SpawnError::CapCopyFailed)
+        .map_err(|_| "Cap install failed")?;
+
+    // Slot 17: RAM untyped for heap
+    cap_copy(child_cspace_cptr, slots::driver::RAM_UNTYPED, 0, src_cnode_cptr, slots::RAM_UNTYPED, 0)
+        .map_err(SpawnError::CapCopyFailed)
+        .map_err(|_| "Cap install failed")?;
+
+    // Configure TCB
+    tcb_configure(
+        cptr(tcb_slot),
+        0,
+        cptr(cspace_slot),
+        cptr(vspace_slot),
+        IPC_BUFFER_ADDR,
+        cptr(ipc_buf_slot),
+    )
+    .map_err(|_| "TCB configure failed")?;
+
+    // Set initial registers
+    tcb_write_registers(cptr(tcb_slot), entry, stack_top, 0)
+        .map_err(|_| "TCB write registers failed")?;
+
+    // Resume
+    tcb_resume(cptr(tcb_slot)).map_err(|_| "TCB resume failed")?;
+
+    log::debug!("FAT32 service spawned");
+
+    Ok(ClassDriverSpawnResult {
+        tcb_slot,
+        vspace_slot,
+        cspace_slot,
+        endpoint_slot: service_ep_slot,
+    })
 }

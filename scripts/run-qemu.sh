@@ -106,12 +106,16 @@ else
         echo "Created $DISK_IMG (64MB)"
     fi
 
-    # Create an NVMe test image if it doesn't exist
+    # Create an NVMe FAT32 test image if it doesn't exist
     NVME_IMG="$BUILD_DIR/nvme.img"
     if [ ! -f "$NVME_IMG" ]; then
-        echo "Creating NVMe test image..."
+        echo "Creating NVMe FAT32 test image..."
         dd if=/dev/zero of="$NVME_IMG" bs=1M count=64 2>/dev/null
-        echo "Created $NVME_IMG (64MB)"
+        mkfs.vfat -F 32 "$NVME_IMG"
+        echo "Hello from M6!" | mcopy -i "$NVME_IMG" - ::hello.txt
+        echo "M6 microkernel" | mcopy -i "$NVME_IMG" - ::readme.txt
+        mmd -i "$NVME_IMG" ::docs
+        echo "Created FAT32 NVMe image with test files"
     fi
 
     # Run QEMU

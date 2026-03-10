@@ -385,13 +385,14 @@ impl NvmeCommand {
     #[inline]
     #[must_use]
     pub fn write(cid: u16, nsid: u32, lba: u64, nlb: u16, prp1: u64, prp2: u64) -> Self {
+        const FUA: u32 = 1 << 30;
         let mut cmd = Self::new(nvm_opcode::WRITE, cid);
         cmd.nsid = nsid;
         cmd.prp1 = prp1;
         cmd.prp2 = prp2;
         cmd.cdw10 = lba as u32;
         cmd.cdw11 = (lba >> 32) as u32;
-        cmd.cdw12 = (nlb - 1) as u32;
+        cmd.cdw12 = (nlb - 1) as u32 | FUA;
         cmd
     }
 

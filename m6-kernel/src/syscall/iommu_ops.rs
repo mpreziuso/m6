@@ -25,7 +25,7 @@
 use core::mem::ManuallyDrop;
 use core::sync::atomic::Ordering;
 
-use m6_arch::cache::{cache_clean_range, cache_invalidate_range};
+use m6_arch::cache::cache_clean_range;
 use m6_cap::objects::{DmaPoolObject, IOSpaceObject, Ioasid};
 use m6_cap::{Badge, CapRights, CapSlot, ObjectType, SlotFlags};
 
@@ -576,30 +576,12 @@ pub fn handle_iospace_map_frame(args: &SyscallArgs) -> SyscallResult {
         iospace.mapped_frames = iospace.mapped_frames.saturating_add(1);
     });
 
-    log::debug!(
+    log::trace!(
         "IOSpace map: iova={:#x} -> frame={:#x} writable={}",
         iova,
         frame_phys,
         writable
     );
-
-    // Diagnostic: dump IO page table walk for the first mapping to verify
-    // entries are correct in DRAM (after cache flush).
-    static DUMP_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-    if !DUMP_DONE.swap(true, core::sync::atomic::Ordering::Relaxed) {
-        debug_walk_io_page_table(root_table, iova);
-
-        // Issue SMMU CMD_PREFETCH_ADDR for ALL bound streams to test the
-        // hardware page table walk. If any walk fails, an event appears
-        // in the event queue.
-        match smmu::with_smmu(smmu_index, |smmu| {
-            smmu.prefetch_all_for_iospace(iospace_ref, iova)
-        }) {
-            Ok(0) => log::info!("SMMU prefetch: no streams bound yet, skipping"),
-            Ok(n) => log::info!("SMMU prefetch: tested {} stream(s)", n),
-            Err(e) => log::warn!("SMMU prefetch error: {:?}", e),
-        }
-    }
 
     Ok(0)
 }
@@ -668,7 +650,7 @@ pub fn handle_iospace_unmap_frame(args: &SyscallArgs) -> SyscallResult {
         iospace.mapped_frames = iospace.mapped_frames.saturating_sub(1);
     });
 
-    log::debug!("IOSpace unmap: iova={:#x}", iova);
+    log::trace!("IOSpace unmap: iova={:#x}", iova);
 
     Ok(0)
 }
@@ -1237,78 +1219,3 @@ pub fn handle_dma_pool_free(args: &SyscallArgs) -> SyscallResult {
     Ok(0)
 }
 
-// -- Diagnostic helpers
-
-/// Walk IO page tables and log each level's descriptor for debugging.
-///
-/// Invalidates cache before each read so we see what the SMMU sees in DRAM.
-/// Only called once (gated by `DUMP_DONE` in `handle_iospace_map_frame`).
-fn debug_walk_io_page_table(root_table_phys: u64, iova: u64) {
-    let idx0 = l0_index(iova);
-    let idx1 = l1_index(iova);
-    let idx2 = l2_index(iova);
-    let idx3 = l3_index(iova);
-
-    log::info!(
-        "IO page walk: iova={:#x} indices=[{},{},{},{}] root={:#x}",
-        iova, idx0, idx1, idx2, idx3, root_table_phys
-    );
-
-    // L0
-    let l0_table = phys_to_virt(root_table_phys) as *const u64;
-    let l0_ptr = unsafe { l0_table.add(idx0) } as u64;
-    cache_invalidate_range(l0_ptr, 8);
-    // SAFETY: root_table_phys is a valid kernel-mapped page table
-    let l0_entry = unsafe { l0_table.add(idx0).read_volatile() };
-    log::info!("  L0[{}] @ {:#x} = {:#018x}", idx0, l0_ptr, l0_entry);
-    if !is_valid(l0_entry) || !is_table(l0_entry) {
-        log::info!("  L0 invalid/block — walk stops");
-        return;
-    }
-
-    // L1
-    let l1_phys = table_address(l0_entry);
-    let l1_table = phys_to_virt(l1_phys) as *const u64;
-    let l1_ptr = unsafe { l1_table.add(idx1) } as u64;
-    cache_invalidate_range(l1_ptr, 8);
-    let l1_entry = unsafe { l1_table.add(idx1).read_volatile() };
-    log::info!("  L1[{}] @ {:#x} = {:#018x} (table={:#x})", idx1, l1_ptr, l1_entry, l1_phys);
-    if !is_valid(l1_entry) || !is_table(l1_entry) {
-        log::info!("  L1 invalid/block — walk stops");
-        return;
-    }
-
-    // L2
-    let l2_phys = table_address(l1_entry);
-    let l2_table = phys_to_virt(l2_phys) as *const u64;
-    let l2_ptr = unsafe { l2_table.add(idx2) } as u64;
-    cache_invalidate_range(l2_ptr, 8);
-    let l2_entry = unsafe { l2_table.add(idx2).read_volatile() };
-    log::info!("  L2[{}] @ {:#x} = {:#018x} (table={:#x})", idx2, l2_ptr, l2_entry, l2_phys);
-    if !is_valid(l2_entry) || !is_table(l2_entry) {
-        log::info!("  L2 invalid/block — walk stops");
-        return;
-    }
-
-    // L3
-    let l3_phys = table_address(l2_entry);
-    let l3_table = phys_to_virt(l3_phys) as *const u64;
-    let l3_ptr = unsafe { l3_table.add(idx3) } as u64;
-    cache_invalidate_range(l3_ptr, 8);
-    let l3_entry = unsafe { l3_table.add(idx3).read_volatile() };
-    log::info!("  L3[{}] @ {:#x} = {:#018x} (table={:#x})", idx3, l3_ptr, l3_entry, l3_phys);
-
-    if is_valid(l3_entry) {
-        let output_addr = l3_entry & 0x0000_FFFF_FFFF_F000;
-        let af = (l3_entry >> 10) & 1;
-        let ap = (l3_entry >> 6) & 0b11;
-        let sh = (l3_entry >> 8) & 0b11;
-        let attr_idx = (l3_entry >> 2) & 0b111;
-        log::info!(
-            "  => phys={:#x} AF={} AP={:#04b} SH={:#04b} AttrIdx={}",
-            output_addr, af, ap, sh, attr_idx
-        );
-    } else {
-        log::info!("  L3 invalid — no mapping");
-    }
-}

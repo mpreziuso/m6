@@ -267,6 +267,8 @@ pub struct Registry {
     pub additional_frame_cache: [AdditionalFrameEntry; MAX_ADDITIONAL_FRAME_CACHE],
     /// USB HID driver endpoint slot (for class-based ENSURE)
     pub hid_driver_endpoint: Option<u64>,
+    /// FAT32 filesystem service endpoint slot (for class-based ENSURE)
+    pub fat32_ep_slot: Option<u64>,
 }
 
 impl Registry {
@@ -284,6 +286,7 @@ impl Registry {
             virtio_probe_frames: [const { VirtioProbeFrame::empty() }; MAX_VIRTIO_PROBE_FRAMES],
             additional_frame_cache: [const { AdditionalFrameEntry::empty() }; MAX_ADDITIONAL_FRAME_CACHE],
             hid_driver_endpoint: None,
+            fat32_ep_slot: None,
         }
     }
 

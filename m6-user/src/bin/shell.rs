@@ -34,8 +34,23 @@ mod devmgr_ipc {
     pub const ENSURE: u64 = 0x0001;
     /// Class ID for USB HID driver
     pub const CLASS_USB_HID: u64 = 0x1001;
+    /// Class ID for FAT32 filesystem service
+    pub const CLASS_FAT32: u64 = 0x2001;
     /// Response: success
     pub const OK: u64 = 0;
+}
+
+// -- FAT32 service IPC protocol
+
+mod fat32_ipc {
+    pub const FORMAT: u64 = 0x0500;
+    pub const OPENDIR: u64 = 0x0303;
+    pub const READDIR: u64 = 0x0302;
+    pub const CLOSEDIR: u64 = 0x0304;
+    pub const OK: u64 = 0;
+    pub const ERR_END_OF_DIR: u64 = 13;
+    /// Directory attribute bit
+    pub const ATTR_DIR: u8 = 0x10;
 }
 
 // -- HID driver IPC protocol
@@ -236,6 +251,8 @@ fn slot_to_cptr(slot: u64, radix: u8) -> u64 {
 
 /// Slot to receive the HID endpoint capability
 const HID_EP_SLOT: u64 = 11;
+/// Slot to receive the FAT32 service endpoint capability
+const FAT32_EP_SLOT: u64 = 12;
 
 /// Try to get HID driver endpoint via device-mgr ENSURE
 fn try_get_hid_endpoint(cnode_radix: u8) -> Option<Endpoint> {
@@ -255,6 +272,7 @@ fn try_get_hid_endpoint(cnode_radix: u8) -> Option<Endpoint> {
     let result = registry_ep
         .call(devmgr_ipc::ENSURE, [devmgr_ipc::CLASS_USB_HID, 0, 0, 0])
         .ok()?;
+    println!("[shell] Got HID ENSURE reply: label={:#x}", result.label);
 
     if result.label == devmgr_ipc::OK {
         // Check if capability was received
@@ -272,6 +290,120 @@ fn try_get_hid_endpoint(cnode_radix: u8) -> Option<Endpoint> {
         println!("ENSURE failed with code: {}", result.label);
         None
     }
+}
+
+/// Try to get FAT32 service endpoint via device-mgr ENSURE
+fn try_get_fat32_endpoint(cnode_radix: u8) -> Option<Endpoint> {
+    let cptr = |slot: u64| slot_to_cptr(slot, cnode_radix);
+    let registry_ep = Endpoint::from_cptr(cptr(REGISTRY_EP_SLOT));
+
+    // SAFETY: IPC buffer is mapped at the standard userspace address
+    unsafe {
+        ipc_set_recv_slots(&[FAT32_EP_SLOT]);
+    }
+
+    let result = registry_ep
+        .call(devmgr_ipc::ENSURE, [devmgr_ipc::CLASS_FAT32, 0, 0, 0])
+        .ok()?;
+
+    if result.label == devmgr_ipc::OK {
+        Some(Endpoint::from_cptr(cptr(FAT32_EP_SLOT)))
+    } else {
+        None
+    }
+}
+
+/// Format the NVMe drive as FAT32 via svc-fat32.
+fn cmd_mkfs(cnode_radix: u8) {
+    let fat32_ep = match try_get_fat32_endpoint(cnode_radix) {
+        Some(ep) => ep,
+        None => {
+            println!("mkfs: FAT32 service unavailable");
+            return;
+        }
+    };
+
+    let result = match fat32_ep.call(fat32_ipc::FORMAT, [0, 0, 0, 0]) {
+        Ok(r) => r,
+        Err(_) => {
+            println!("mkfs: IPC error");
+            return;
+        }
+    };
+
+    if result.label & 0xFFFF == fat32_ipc::OK {
+        println!("FAT32 format complete.");
+    } else {
+        println!("mkfs: format failed (error {})", result.label & 0xFFFF);
+    }
+}
+
+/// List the root directory of the FAT32 volume.
+fn cmd_ls(cnode_radix: u8) {
+    let fat32_ep = match try_get_fat32_endpoint(cnode_radix) {
+        Some(ep) => ep,
+        None => {
+            println!("ls: FAT32 service unavailable");
+            return;
+        }
+    };
+
+    // Open root directory
+    let open_result = match fat32_ep.call(fat32_ipc::OPENDIR, [0, 0, 0, 0]) {
+        Ok(r) => r,
+        Err(_) => {
+            println!("ls: OPENDIR failed");
+            return;
+        }
+    };
+
+    if open_result.label & 0xFFFF != fat32_ipc::OK {
+        println!("ls: OPENDIR error {}", open_result.label & 0xFFFF);
+        return;
+    }
+
+    let handle = open_result.label >> 16;
+
+    // Read entries
+    loop {
+        let r = match fat32_ep.call(fat32_ipc::READDIR, [handle, 0, 0, 0]) {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+
+        if r.label & 0xFFFF == fat32_ipc::ERR_END_OF_DIR {
+            break;
+        }
+        if r.label & 0xFFFF != fat32_ipc::OK {
+            break;
+        }
+
+        let name_len = ((r.label >> 16) & 0xFF) as usize;
+        let attr = ((r.label >> 32) & 0xFF) as u8;
+        let size = r.msg[0];
+        let m1 = r.msg[1];
+        let m2 = r.msg[2];
+
+        // Unpack name bytes
+        let mut name_buf = [0u8; 13];
+        for i in 0..8usize.min(name_len) {
+            name_buf[i] = ((m1 >> (i * 8)) & 0xFF) as u8;
+        }
+        for i in 0..5usize.min(name_len.saturating_sub(8)) {
+            name_buf[8 + i] = ((m2 >> (i * 8)) & 0xFF) as u8;
+        }
+
+        let name = core::str::from_utf8(&name_buf[..name_len]).unwrap_or("?");
+
+        if attr & fat32_ipc::ATTR_DIR != 0 {
+            println!("{}/\t<DIR>", name);
+        } else {
+            println!("{}\t{} bytes", name, size);
+        }
+    }
+
+    // Close directory handle
+    let _ = fat32_ep.call(fat32_ipc::CLOSEDIR, [handle, 0, 0, 0]);
 }
 
 /// Subscribe to keyboard events from HID driver
@@ -327,7 +459,7 @@ fn poll_keyboard_events(hid_ep: &Endpoint, sub_id: u64) -> Vec<InputEvent> {
 }
 
 /// Execute a shell command
-fn execute_command(cmd: &str) {
+fn execute_command(cmd: &str, cnode_radix: u8) {
     let cmd = cmd.trim();
     if cmd.is_empty() {
         return;
@@ -342,9 +474,17 @@ fn execute_command(cmd: &str) {
         "help" => {
             println!("Available commands:");
             println!("  help     - Show this help");
+            println!("  ls       - List root directory (FAT32 NVMe)");
+            println!("  mkfs     - Format NVMe drive as FAT32");
             println!("  echo     - Print arguments");
             println!("  clear    - Clear screen");
             println!("  version  - Show M6 version");
+        }
+        "ls" => {
+            cmd_ls(cnode_radix);
+        }
+        "mkfs" => {
+            cmd_mkfs(cnode_radix);
         }
         "echo" => {
             let args = parts[1..].join(" ");
@@ -442,7 +582,7 @@ fn main() -> i32 {
                     match ch {
                         '\n' => {
                             println!();
-                            execute_command(&line);
+                            execute_command(&line, cnode_radix);
                             line.clear();
                             print!("\x1b[32mm6>\x1b[0m ");
                         }

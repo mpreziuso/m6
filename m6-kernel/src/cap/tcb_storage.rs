@@ -53,12 +53,23 @@ pub struct TcbFull {
     /// Previous TCB in IPC wait queue.
     pub ipc_prev: ObjectRef,
 
-    /// Pending IPC message registers (5 words) for blocked sender.
+    /// Pending IPC message registers (5 words).
+    ///
+    /// For blocked senders: the outgoing message to deliver.
+    /// For receivers with `ipc_msg_pending`: the incoming message to apply
+    /// during `restore_context`.
     pub ipc_message: [u64; 5],
     /// Badge to deliver with pending message.
     pub ipc_badge: u64,
     /// Object we're blocked on (endpoint/notification).
     pub ipc_blocked_on: ObjectRef,
+    /// True when an incoming IPC message is staged in `ipc_message`/`ipc_badge`
+    /// and should be applied to the exception frame during `restore_context`.
+    ///
+    /// This avoids a race on SMP where `save_context` (writing to
+    /// `TCB.context`) could overwrite a message that `transfer_message` just
+    /// wrote to `TCB.context` on another core.
+    pub ipc_msg_pending: bool,
 
     /// Async work context (signal_work, kernel_work futures).
     pub task_ctx: TaskContext,
@@ -90,6 +101,7 @@ impl TcbFull {
             ipc_message: [0; 5],
             ipc_badge: 0,
             ipc_blocked_on: ObjectRef::NULL,
+            ipc_msg_pending: false,
             // Async work context
             task_ctx: TaskContext::new(),
         }
@@ -129,6 +141,7 @@ impl TcbFull {
             (*tcb).ipc_message = [0; 5];
             (*tcb).ipc_badge = 0;
             (*tcb).ipc_blocked_on = ObjectRef::NULL;
+            (*tcb).ipc_msg_pending = false;
             // Async work context
             (*tcb).task_ctx = TaskContext::new();
         }
@@ -170,11 +183,12 @@ impl TcbFull {
         self.ipc_prev = ObjectRef::NULL;
     }
 
-    /// Clear all IPC state (message, badge, blocked_on, links).
+    /// Clear all IPC state (message, badge, blocked_on, pending flag, links).
     pub fn clear_ipc_state(&mut self) {
         self.ipc_message = [0; 5];
         self.ipc_badge = 0;
         self.ipc_blocked_on = ObjectRef::NULL;
+        self.ipc_msg_pending = false;
         self.clear_ipc_links();
     }
 

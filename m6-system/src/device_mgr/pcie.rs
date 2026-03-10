@@ -9,8 +9,6 @@
 //! - ECAM (Enhanced Configuration Access Mechanism) - QEMU virt
 //! - DesignWare Core (DWC) - RK3588
 
-use crate::io;
-
 // -- PCIe config space register offsets (Type 0 header)
 
 /// Vendor ID (16-bit) at offset 0x00
@@ -325,7 +323,7 @@ unsafe fn cfg_read32(config_vaddr: usize, bus: u8, dev: u8, func: u8, reg: u16) 
 ///
 /// # Safety
 /// The config space must be mapped at `config_vaddr`.
-unsafe fn cfg_write32(config_vaddr: usize, bus: u8, dev: u8, func: u8, reg: u16, val: u32) {
+pub(super) unsafe fn cfg_write32(config_vaddr: usize, bus: u8, dev: u8, func: u8, reg: u16, val: u32) {
     let addr = ecam_addr(config_vaddr as u64, bus, dev, func, reg);
     // SAFETY: Caller guarantees config space is mapped.
     unsafe { core::ptr::write_volatile(addr as *mut u32, val) }
@@ -720,13 +718,7 @@ pub unsafe fn enumerate_devices(
 
     let scan_bus_end = bus_start.saturating_add(max_buses - 1).min(bus_end);
 
-    io::puts("[device-mgr] PCIe: scanning bus ");
-    io::put_u64(bus_start as u64);
-    io::puts("-");
-    io::put_u64(scan_bus_end as u64);
-    io::puts(" (mapped ");
-    io::put_u64((mapped_size / 1024) as u64);
-    io::puts("KB)...\n");
+    log::info!("PCIe: scanning bus {}-{} (mapped {}KB)...", bus_start, scan_bus_end, mapped_size / 1024);
 
     // Scan buses in range
     for bus in bus_start..=scan_bus_end {
@@ -788,9 +780,7 @@ pub unsafe fn enumerate_devices(
         }
     }
 
-    io::puts("[device-mgr] PCIe: found ");
-    io::put_u64(dev_count as u64);
-    io::puts(" device(s)\n");
+    log::info!("PCIe: found {} device(s)", dev_count);
 
     devices
 }
@@ -824,17 +814,11 @@ unsafe fn probe_device(
     // Check function 0 first
     // SAFETY: config space is mapped by caller
     // Use rel_bus for ECAM access
-    io::puts("[device-mgr] PCIe: probing ");
-    io::put_u64(abs_bus as u64);
-    io::puts(":");
-    io::put_u64(dev as u64);
-    io::puts(".0\n");
+    log::debug!("PCIe: probing {}:{}.0", abs_bus, dev);
 
     let vendor_id = unsafe { cfg_read16(config_vaddr, rel_bus, dev, 0, CFG_VENDOR_ID) };
 
-    io::puts("[device-mgr] PCIe: vendor=");
-    io::put_hex16(vendor_id);
-    io::newline();
+    log::debug!("PCIe: vendor={:#06x}", vendor_id);
     if vendor_id == VENDOR_ID_INVALID || vendor_id == 0 {
         return None;
     }
@@ -973,11 +957,10 @@ unsafe fn probe_bar0(
     // SAFETY: config space is mapped by caller
     let bar0 = unsafe { cfg_read32(config_vaddr, bus, dev, func, CFG_BAR0) };
 
-    io::puts("[device-mgr] PCIe: BAR0 raw=");
-    io::put_hex(bar0 as u64);
+    log::debug!("PCIe: BAR0 raw={:#x}", bar0);
 
     if bar0 == 0 || bar0 == 0xFFFFFFFF {
-        io::puts(" (empty)\n");
+        log::debug!("PCIe: BAR0 empty");
         return (0, 0);
     }
 
@@ -992,9 +975,7 @@ unsafe fn probe_bar0(
         0
     };
 
-    io::puts(" BAR1 raw=");
-    io::put_hex(bar1_orig as u64);
-    io::puts(if is_64bit { " (64-bit)\n" } else { " (32-bit)\n" });
+    log::debug!("PCIe: BAR1 raw={:#x} ({})", bar1_orig, if is_64bit { "64-bit" } else { "32-bit" });
 
     let pci_addr = if is_64bit {
         ((bar1_orig as u64) << 32) | ((bar0 & !0xF) as u64)
@@ -1058,11 +1039,7 @@ unsafe fn probe_bar0(
         // Align to BAR size within mem32 window
         let aligned = (host.mem32_pci + size - 1) & !(size - 1);
         if aligned + size <= host.mem32_pci + host.mem32_size {
-            io::puts("[device-mgr] PCIe: BAR0 at ");
-            io::put_hex(pci_addr);
-            io::puts(" outside memory windows, reassigning to ");
-            io::put_hex(aligned);
-            io::newline();
+            log::info!("PCIe: BAR0 at {:#x} outside memory windows, reassigning to {:#x}", pci_addr, aligned);
 
             // Write new BAR0 value (preserve type bits from original)
             let bar0_new = (aligned as u32 & !0xF) | (bar0 & 0xF);
@@ -1099,23 +1076,14 @@ unsafe fn probe_bar0(
     }
     // Read back and log Command register to verify BME is actually set
     let cmd_rb = unsafe { cfg_read16(config_vaddr, bus, dev, func, CFG_COMMAND) };
-    io::puts("[device-mgr] PCIe: CMD=");
-    io::put_hex(cmd_rb as u64);
-    if cmd_rb & 0x04 != 0 { io::puts(" BME"); } else { io::puts(" !BME"); }
-    if cmd_rb & 0x02 != 0 { io::puts(" MEM"); } else { io::puts(" !MEM"); }
-    io::newline();
+    log::debug!("PCIe: CMD={:#x}{}{}", cmd_rb,
+        if cmd_rb & 0x04 != 0 { " BME" } else { " !BME" },
+        if cmd_rb & 0x02 != 0 { " MEM" } else { " !MEM" });
 
     // Translate PCI address to CPU address using memory windows
     let cpu_addr = host.pci_to_cpu(pci_addr);
 
-    // Diagnostic: log BAR details for debugging
-    io::puts("[device-mgr] PCIe: BAR0 pci_addr=");
-    io::put_hex(pci_addr);
-    io::puts(" cpu_addr=");
-    io::put_hex(cpu_addr);
-    io::puts(" size=");
-    io::put_hex(size);
-    io::newline();
+    log::debug!("PCIe: BAR0 pci_addr={:#x} cpu_addr={:#x} size={:#x}", pci_addr, cpu_addr, size);
 
     (cpu_addr, size)
 }
@@ -1124,48 +1092,24 @@ unsafe fn probe_bar0(
 fn print_device_info(device: &PcieDevice) {
     let (bus, dev, func) = device.bdf;
     let class_str = device.format_class_code();
-
-    io::puts("[device-mgr] PCIe: found ");
-    // Format BDF as XX:XX.X
-    io::put_hex_byte(bus);
-    io::puts(":");
-    io::put_hex_byte(dev);
-    io::puts(".");
-    io::put_u64(func as u64);
-    io::puts(" vendor=");
-    io::put_hex16(device.vendor_id);
-    io::puts(" device=");
-    io::put_hex16(device.device_id);
-    io::puts(" class=");
     // SAFETY: class_str is valid UTF-8 (only hex digits)
-    io::puts(core::str::from_utf8(&class_str).unwrap_or("??????"));
+    let class_str = core::str::from_utf8(&class_str).unwrap_or("??????");
 
-    // Print class description
     let class = (device.class_code >> 16) & 0xFF;
     let subclass = (device.class_code >> 8) & 0xFF;
-    io::puts(" (");
-    io::puts(class_name(class as u8, subclass as u8));
-    io::puts(")");
+
+    log::info!("PCIe: found {:02x}:{:02x}.{} vendor={:#06x} device={:#06x} class={} ({})",
+        bus, dev, func, device.vendor_id, device.device_id, class_str,
+        class_name(class as u8, subclass as u8));
 
     if device.bar0_cpu_addr != 0 {
-        io::puts("\n[device-mgr] PCIe:   BAR0 at ");
-        io::put_hex(device.bar0_cpu_addr);
-        io::puts(" (");
-        io::put_u64(device.bar0_size / 1024);
-        io::puts("KB)");
+        log::info!("PCIe:   BAR0 at {:#x} ({}KB)", device.bar0_cpu_addr, device.bar0_size / 1024);
     }
 
-    // Print MSI-X info if present
     if device.msix.present {
-        io::puts("\n[device-mgr] PCIe:   MSI-X: ");
-        io::put_u64(device.msix.table_size as u64);
-        io::puts(" vectors, table in BAR");
-        io::put_u64(device.msix.table_bir as u64);
-        io::puts("+0x");
-        io::put_hex32(device.msix.table_offset);
+        log::info!("PCIe:   MSI-X: {} vectors, table in BAR{}+{:#x}",
+            device.msix.table_size, device.msix.table_bir, device.msix.table_offset);
     }
-
-    io::newline();
 }
 
 // -- Type 1 header (PCI-PCI bridge) register offsets
@@ -1537,11 +1481,7 @@ pub unsafe fn enumerate_devices_at(
     // How many devices can we scan? Each device occupies 32KB in ECAM space.
     let max_devs = (mapped_size / (1 << 15)).clamp(1, 32) as u8;
 
-    io::puts("[device-mgr] PCIe: scanning secondary bus ");
-    io::put_u64(abs_bus as u64);
-    io::puts(" (mapped ");
-    io::put_u64((mapped_size / 1024) as u64);
-    io::puts("KB)...\n");
+    log::info!("PCIe: scanning secondary bus {} (mapped {}KB)...", abs_bus, mapped_size / 1024);
 
     for dev in 0..max_devs {
         if dev_count >= MAX_PCIE_DEVICES {
@@ -1568,9 +1508,7 @@ pub unsafe fn enumerate_devices_at(
         };
     }
 
-    io::puts("[device-mgr] PCIe: found ");
-    io::put_u64(dev_count as u64);
-    io::puts(" device(s) on secondary bus\n");
+    log::info!("PCIe: found {} device(s) on secondary bus", dev_count);
 
     devices
 }

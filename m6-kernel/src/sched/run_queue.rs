@@ -320,41 +320,53 @@ impl RunQueue {
     }
 
     /// Check if a task is in this run queue.
+    ///
+    /// Each object-table access is a separate lock acquisition to avoid
+    /// recursive locking of the global `IrqSpinMutex<ObjectTable>`.
     pub fn contains(&self, tcb_ref: ObjectRef) -> bool {
         if !tcb_ref.is_valid() {
             return false;
         }
 
-        object_table::with_object(tcb_ref, |obj| {
+        // Quick check: is it the head or tail?
+        if tcb_ref == self.head || tcb_ref == self.tail {
+            return true;
+        }
+
+        // Check if the task has sched links set (separate lock acquisition)
+        let in_sched_queue = object_table::with_object(tcb_ref, |obj| {
             if obj.obj_type == KernelObjectType::Tcb {
                 // SAFETY: We verified the type.
-                let tcb = unsafe { &*obj.data.tcb_ptr };
-                // Check if task is in a scheduler queue by examining its links
-                // A task is in this queue if it has sched links set OR if it's the head/tail
-                if tcb.is_in_sched_queue() {
-                    // Walk the list to confirm it's in THIS queue
-                    let mut current = self.head;
-                    while current.is_valid() {
-                        if current == tcb_ref {
-                            return true;
-                        }
-                        current = object_table::with_object(current, |o| {
-                            if o.obj_type == KernelObjectType::Tcb {
-                                // SAFETY: We verified the type.
-                                unsafe { (*o.data.tcb_ptr).sched_next }
-                            } else {
-                                ObjectRef::NULL
-                            }
-                        })
-                        .unwrap_or(ObjectRef::NULL);
-                    }
-                }
-                false
+                unsafe { &*obj.data.tcb_ptr }.is_in_sched_queue()
             } else {
                 false
             }
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+
+        if !in_sched_queue {
+            return false;
+        }
+
+        // Walk the list to confirm it's in THIS queue.
+        // Each with_object call is independent (no nesting).
+        let mut current = self.head;
+        while current.is_valid() {
+            if current == tcb_ref {
+                return true;
+            }
+            current = object_table::with_object(current, |o| {
+                if o.obj_type == KernelObjectType::Tcb {
+                    // SAFETY: We verified the type.
+                    unsafe { (*o.data.tcb_ptr).sched_next }
+                } else {
+                    ObjectRef::NULL
+                }
+            })
+            .unwrap_or(ObjectRef::NULL);
+        }
+
+        false
     }
 
     /// Get the first (earliest deadline) task without removing it.

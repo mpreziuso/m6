@@ -4,10 +4,14 @@
 
 #![allow(dead_code)]
 
+use alloc::boxed::Box;
 use embedded_sdmmc::{RawDirectory, RawFile, RawVolume};
 
 /// Maximum number of open handles
 pub const MAX_HANDLES: usize = 16;
+
+/// Maximum cached directory entries per open directory
+pub const MAX_DIR_ENTRIES: usize = 32;
 
 /// Handle types
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -16,10 +20,65 @@ pub enum HandleType {
     None,
     /// Open file handle
     File,
-    /// Open directory handle
+    /// Open directory handle (raw embedded_sdmmc)
     Directory,
+    /// Cached directory handle (entries pre-loaded into memory)
+    CachedDirectory,
     /// Open volume handle
     Volume,
+}
+
+/// A single cached directory entry (8.3 short name)
+pub struct CachedDirEntry {
+    /// Short name bytes (e.g. "HELLO.TXT")
+    pub name: [u8; 13],
+    /// Valid bytes in name
+    pub name_len: u8,
+    /// File size in bytes
+    pub size: u32,
+    /// FAT attributes byte
+    pub attr: u8,
+}
+
+impl CachedDirEntry {
+    pub const fn empty() -> Self {
+        Self {
+            name: [0; 13],
+            name_len: 0,
+            size: 0,
+            attr: 0,
+        }
+    }
+}
+
+/// Pre-loaded snapshot of a directory's entries
+pub struct DirCache {
+    pub entries: [CachedDirEntry; MAX_DIR_ENTRIES],
+    pub count: usize,
+    pub cursor: usize,
+}
+
+impl DirCache {
+    pub const fn empty() -> Self {
+        // SAFETY: CachedDirEntry::empty() is const
+        const EMPTY: CachedDirEntry = CachedDirEntry::empty();
+        Self {
+            entries: [EMPTY; MAX_DIR_ENTRIES],
+            count: 0,
+            cursor: 0,
+        }
+    }
+
+    /// Return the next entry and advance the cursor, or None if exhausted.
+    pub fn next(&mut self) -> Option<&CachedDirEntry> {
+        if self.cursor < self.count {
+            let entry = &self.entries[self.cursor];
+            self.cursor += 1;
+            Some(entry)
+        } else {
+            None
+        }
+    }
 }
 
 /// Open handle state
@@ -34,6 +93,8 @@ pub struct HandleEntry {
     pub raw_dir: Option<RawDirectory>,
     /// Raw volume handle (if volume)
     pub raw_volume: Option<RawVolume>,
+    /// Cached directory snapshot (if cached directory)
+    pub dir_cache: Option<Box<DirCache>>,
 }
 
 impl HandleEntry {
@@ -45,6 +106,7 @@ impl HandleEntry {
             raw_file: None,
             raw_dir: None,
             raw_volume: None,
+            dir_cache: None,
         }
     }
 
@@ -83,6 +145,7 @@ impl HandleTable {
                 entry.raw_file = Some(raw_file);
                 entry.raw_dir = None;
                 entry.raw_volume = None;
+                entry.dir_cache = None;
                 return Some(i as u32);
             }
         }
@@ -98,6 +161,23 @@ impl HandleTable {
                 entry.raw_file = None;
                 entry.raw_dir = Some(raw_dir);
                 entry.raw_volume = None;
+                entry.dir_cache = None;
+                return Some(i as u32);
+            }
+        }
+        None
+    }
+
+    /// Allocate a cached directory handle (entries pre-loaded, no live raw dir)
+    pub fn alloc_dir_cached(&mut self, cache: Box<DirCache>, badge: u64) -> Option<u32> {
+        for (i, entry) in self.entries.iter_mut().enumerate() {
+            if !entry.is_used() {
+                entry.handle_type = HandleType::CachedDirectory;
+                entry.badge = badge;
+                entry.raw_file = None;
+                entry.raw_dir = None;
+                entry.raw_volume = None;
+                entry.dir_cache = Some(cache);
                 return Some(i as u32);
             }
         }
@@ -113,6 +193,7 @@ impl HandleTable {
                 entry.raw_file = None;
                 entry.raw_dir = None;
                 entry.raw_volume = Some(raw_volume);
+                entry.dir_cache = None;
                 return Some(i as u32);
             }
         }
@@ -135,6 +216,15 @@ impl HandleTable {
             return None;
         }
         Some(entry)
+    }
+
+    /// Get mutable reference to a cached directory's DirCache (validates badge and type)
+    pub fn get_dir_cache_mut(&mut self, handle: u32, badge: u64) -> Option<&mut DirCache> {
+        let entry = self.entries.get_mut(handle as usize)?;
+        if !entry.is_used() || entry.badge != badge || entry.handle_type != HandleType::CachedDirectory {
+            return None;
+        }
+        entry.dir_cache.as_deref_mut()
     }
 
     /// Take a file handle out of the table
@@ -167,6 +257,7 @@ impl HandleTable {
             entry.raw_file = None;
             entry.raw_dir = None;
             entry.raw_volume = None;
+            entry.dir_cache = None;
             return true;
         }
         false

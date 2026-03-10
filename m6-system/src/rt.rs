@@ -112,8 +112,20 @@ use m6_alloc::{
 };
 
 /// CNode radix for capability slots.
+///
+/// Defaults to 10 (1024 slots), which matches driver CSpaces created by
+/// `spawn_class_driver`. Device-mgr (radix 12) must call
+/// `set_cnode_radix(12)` before any heap allocation.
 #[allow(dead_code)]
-const CNODE_RADIX: u8 = 10;
+static CNODE_RADIX: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(10);
+
+/// Override the CNode radix used by the allocator.
+///
+/// Must be called before `init_allocator` or any heap allocation.
+#[allow(dead_code)]
+pub fn set_cnode_radix(radix: u8) {
+    CNODE_RADIX.store(radix, Ordering::Release);
+}
 
 /// Root CNode slot.
 #[allow(dead_code)]
@@ -236,10 +248,16 @@ struct M6VmError;
 #[allow(dead_code)]
 struct M6VmProvider;
 
-/// Convert slot number to CPtr for a CNode with CNODE_RADIX bits.
+/// Load the current CNode radix.
 #[inline]
-const fn slot_to_cptr(slot: u64) -> u64 {
-    slot << (64 - CNODE_RADIX)
+fn cnode_radix() -> u8 {
+    CNODE_RADIX.load(Ordering::Acquire)
+}
+
+/// Convert slot number to CPtr using the configured CNode radix.
+#[inline]
+fn slot_to_cptr(slot: u64) -> u64 {
+    slot << (64 - cnode_radix() as u64)
 }
 
 impl VmProvider for M6VmProvider {
@@ -259,7 +277,7 @@ impl VmProvider for M6VmProvider {
         if result.is_ok() {
             // Track the mapping for physical address lookup (used by DMA HAL)
             // Extract slot from cptr (reverse of slot_to_cptr)
-            let slot = frame_cptr >> (64 - CNODE_RADIX);
+            let slot = frame_cptr >> (64 - cnode_radix() as u64);
             track_page_mapping(vaddr as u64, slot);
             Ok(())
         } else {
@@ -341,9 +359,9 @@ impl PagePool for M6PagePool {
     fn free_pages(&self, pages: AllocatedPages) -> Result<(), Self::Error> {
         let cnode_cptr = slot_to_cptr(ROOT_CNODE);
         // Extract slot from cptr (reverse of slot_to_cptr)
-        let slot = pages.frame_cptr >> (64 - CNODE_RADIX);
+        let slot = pages.frame_cptr >> (64 - cnode_radix() as u64);
 
-        let result = m6_syscall::invoke::cap_delete(cnode_cptr, slot, CNODE_RADIX as u64);
+        let result = m6_syscall::invoke::cap_delete(cnode_cptr, slot, cnode_radix() as u64);
         if result.is_ok() {
             // Recycle freed slot(s) so they can be reused by future allocations
             for i in 0..pages.count as u64 {

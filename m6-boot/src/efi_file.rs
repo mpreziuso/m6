@@ -6,15 +6,13 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use uefi::CStr16;
-use uefi::boot::{self};
+use uefi::boot;
 use uefi::fs::FileSystem;
-use uefi::proto::media::fs::SimpleFileSystem;
 
-/// Reads a file from the EFI system partition.
+/// Reads a file from the EFI system partition (the volume the bootloader was loaded from).
 /// Returns None if the file is not found or invalid.
 pub fn read_efi_file(path: &str) -> Option<Vec<u8>> {
-    let sfs_handle = boot::get_handle_for_protocol::<SimpleFileSystem>().ok()?;
-    let sfs = boot::open_protocol_exclusive::<SimpleFileSystem>(sfs_handle).ok()?;
+    let sfs = boot::get_image_file_system(boot::image_handle()).ok()?;
     let mut fs = FileSystem::new(sfs);
     let mut path_buf = [0u16; 64];
     let cpath = CStr16::from_str_with_buf(path, &mut path_buf).ok()?;

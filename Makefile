@@ -55,11 +55,12 @@ initrd-full: system user
 	@cp target/aarch64-unknown-m6/release/cp target/initrd/
 	@cp target/aarch64-unknown-m6/release/echo target/initrd/
 	@cp target/aarch64-unknown-m6/release/mkdir target/initrd/
+	@cp target/aarch64-unknown-m6/release/mkfs-fat32 target/initrd/
 	@# Create TAR archive
 	cd target/initrd && \
 		tar --format=ustar -cf INITRD \
 		init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme drv-usb-xhci drv-usb-dwc3 drv-usb-hid svc-fat32 \
-		shell ls cat cp echo mkdir
+		shell ls cat cp echo mkdir mkfs-fat32
 	@echo "Created full initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
 	@echo "Contents:"
 	@tar -tvf target/initrd/INITRD
