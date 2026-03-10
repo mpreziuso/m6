@@ -27,6 +27,7 @@ pub mod misc_ops;
 pub mod numbers;
 pub mod tcb_ops;
 pub mod timer_ops;
+pub mod user_ptr;
 
 use m6_arch::exceptions::ExceptionContext;
 use m6_arch::registers::{esr, spsr};
@@ -155,18 +156,10 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
                 return Err(SyscallError::Range);
             }
 
-            // Probe every page in [addr, addr+len) with AT S1E0R before
-            // dereferencing.  An unmapped or non-readable page would otherwise
-            // trigger a data abort at EL1 and panic the kernel.
-            let first_page = addr & !0xFFF;
-            let last_page = (addr + len as u64 - 1) & !0xFFF;
-            let mut page = first_page;
-            while page <= last_page {
-                if !probe_user_read(page) {
-                    return Err(SyscallError::InvalidArg);
-                }
-                page = page.wrapping_add(0x1000);
-            }
+            // Probe every page in [addr, addr+len) before dereferencing.
+            // An unmapped or non-readable page would otherwise trigger a
+            // data abort at EL1 and panic the kernel.
+            user_ptr::probe_user_buffer_read(addr, len)?;
 
             // Copy userspace data to kernel stack buffer
             let mut kbuf = [0u8; 256];
@@ -188,35 +181,6 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
             Ok(0)
         }
     }
-}
-
-/// Probe a single user-space page for read accessibility from EL1.
-///
-/// Issues `AT S1E0R` which asks the hardware MMU to perform a stage-1
-/// EL0-read translation of `vaddr`.  The result is written to PAR_EL1;
-/// bit 0 (F) is set when the translation faulted (page absent, permission
-/// denied, etc.).  An ISB is required after AT to ensure PAR_EL1 is
-/// updated before we read it.
-///
-/// This is the correct way to validate user pointers in a kernel without
-/// risking a data abort at EL1 on an unmapped address.
-#[inline]
-fn probe_user_read(vaddr: u64) -> bool {
-    let par: u64;
-    // SAFETY: AT S1E0R and MRS are read-only system instructions.  They
-    // cannot cause faults themselves and do not affect memory.
-    unsafe {
-        core::arch::asm!(
-            "at s1e0r, {addr}",
-            "isb",
-            "mrs {par}, par_el1",
-            addr = in(reg) vaddr,
-            par = out(reg) par,
-            options(nostack, preserves_flags),
-        );
-    }
-    // PAR_EL1.F (bit 0) = 0 means the translation succeeded.
-    par & 1 == 0
 }
 
 // -- IPC syscall handlers

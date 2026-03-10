@@ -226,3 +226,19 @@ pub fn refresh_asid_if_needed(alloc: &AllocatedAsid) -> Option<AllocatedAsid> {
         None
     }
 }
+
+/// Atomically check if a VSpace's ASID is still valid, refreshing it if needed.
+///
+/// Returns `(asid, needs_tlb_flush)`. Holds the allocator lock for the entire
+/// check-allocate sequence so no other CPU can race on rollover.
+#[must_use]
+pub fn ensure_asid_valid(current_asid: u16, current_gen: u64) -> (AllocatedAsid, bool) {
+    let mut allocator = ASID_ALLOCATOR.lock();
+    if current_gen == allocator.generation() {
+        // ASID is still valid, no flush needed
+        (AllocatedAsid::new(current_asid, current_gen), false)
+    } else {
+        // Generation changed, need new ASID + TLB flush
+        (allocator.allocate(), true)
+    }
+}

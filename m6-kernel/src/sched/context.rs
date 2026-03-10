@@ -20,7 +20,7 @@
 use m6_arch::exceptions::ExceptionContext;
 use m6_arch::mmu::mmu;
 use m6_cap::ObjectRef;
-use m6_cap::objects::ThreadState;
+use m6_cap::objects::{Asid, ThreadState};
 
 use super::run_queue::{with_tcb, with_tcb_mut};
 use super::{PerCpuSched, eevdf};
@@ -75,8 +75,27 @@ pub fn context_switch(sched: &mut PerCpuSched, ctx: &mut ExceptionContext) {
 
     // Restore next task's context to exception frame
     // When eret executes, CPU will resume this task
-    with_tcb(next, |tcb| {
+    with_tcb_mut(next, |tcb| {
         *ctx = tcb.context.clone();
+
+        // Apply staged IPC message if pending (mirrors dispatch::restore_context)
+        if tcb.ipc_msg_pending {
+            ctx.gpr[0] = tcb.ipc_message[0];
+            ctx.gpr[1] = tcb.ipc_message[1];
+            ctx.gpr[2] = tcb.ipc_message[2];
+            ctx.gpr[3] = tcb.ipc_message[3];
+            ctx.gpr[4] = tcb.ipc_message[4];
+            ctx.gpr[6] = tcb.ipc_badge;
+
+            tcb.ipc_msg_pending = false;
+            tcb.ipc_message = [0; 5];
+            tcb.ipc_badge = 0;
+
+            log::trace!(
+                "context_switch: applied pending IPC msg for {:?}",
+                next
+            );
+        }
     });
 }
 
@@ -92,44 +111,65 @@ pub fn switch_vspace(vspace_ref: Option<ObjectRef>) {
         _ => return, // No VSpace or invalid - stay in current
     };
 
-    object_table::with_object(vspace_ref, |obj| {
+    // Read the VSpace's current ASID, generation, and root table address.
+    let vspace_info = object_table::with_object(vspace_ref, |obj| {
         if obj.obj_type == KernelObjectType::VSpace {
-            // Get TTBR0 value from VSpace
             // SAFETY: We verified the type.
             let vspace = unsafe { &*core::ptr::addr_of!(obj.data.vspace) };
-
-            // The VSpace stores the physical address of the L0 page table
-            let ttbr0 = vspace.root_table.as_u64();
-            let asid = vspace.asid.value() as u64;
-
-            // Combine ASID and table base
-            // TTBR0_EL1 format: [ASID:16][BADDR:48]
-            let ttbr0_with_asid = (asid << 48) | (ttbr0 & 0x0000_FFFF_FFFF_FFFF);
-
-            // Only invalidate TLB if the ASID has been recycled (generation is stale).
-            if !vspace.is_asid_generation_current(crate::memory::current_generation()) {
-                invalidate_tlb_by_asid(asid);
-            }
-
-            // DSB ISH (full inner-shareable) ensures all prior loads and stores
-            // are visible to the hardware page-table walker before TTBR0 is
-            // written.  The weaker ISHST (store-only) is insufficient per the
-            // ARM ARM D8.10: outstanding loads may still be in flight.
-            // SAFETY: DSB is always safe to execute.
-            unsafe {
-                core::arch::asm!("dsb ish", options(nostack, preserves_flags));
-            }
-
-            mmu().set_ttbr0(ttbr0_with_asid);
-
-            // Instruction barrier to ensure TTBR0 change is visible
-            // before any instruction fetches occur
-            // SAFETY: ISB is always safe to execute
-            unsafe {
-                core::arch::asm!("isb", options(nostack, preserves_flags));
-            }
+            Some((vspace.root_table.as_u64(), vspace.asid.value(), vspace.asid_generation))
+        } else {
+            None
         }
     });
+
+    let Some((ttbr0, old_asid, old_gen)) = vspace_info.flatten() else {
+        return;
+    };
+
+    // Atomically check the ASID generation and allocate a new one if stale.
+    // This holds the ASID allocator lock across the entire check-and-allocate
+    // sequence, preventing another CPU from exhausting ASIDs and causing a
+    // rollover between our generation check and TTBR0 write.
+    let (validated, needs_flush) = crate::memory::ensure_asid_valid(old_asid, old_gen);
+    let asid = validated.asid as u64;
+
+    // If we got a new ASID (generation was stale), update the VSpace object.
+    if needs_flush {
+        object_table::with_object_mut(vspace_ref, |obj| {
+            if obj.obj_type == KernelObjectType::VSpace {
+                // SAFETY: We verified the type.
+                let vspace = unsafe { &mut *core::ptr::addr_of_mut!(obj.data.vspace) };
+                vspace.assign_asid_with_generation(
+                    Asid::new(validated.asid),
+                    validated.generation,
+                );
+            }
+        });
+
+        invalidate_tlb_by_asid(asid);
+    }
+
+    // Combine ASID and table base
+    // TTBR0_EL1 format: [ASID:16][BADDR:48]
+    let ttbr0_with_asid = (asid << 48) | (ttbr0 & 0x0000_FFFF_FFFF_FFFF);
+
+    // DSB ISH (full inner-shareable) ensures all prior loads and stores
+    // are visible to the hardware page-table walker before TTBR0 is
+    // written.  The weaker ISHST (store-only) is insufficient per the
+    // ARM ARM D8.10: outstanding loads may still be in flight.
+    // SAFETY: DSB is always safe to execute.
+    unsafe {
+        core::arch::asm!("dsb ish", options(nostack, preserves_flags));
+    }
+
+    mmu().set_ttbr0(ttbr0_with_asid);
+
+    // Instruction barrier to ensure TTBR0 change is visible
+    // before any instruction fetches occur
+    // SAFETY: ISB is always safe to execute.
+    unsafe {
+        core::arch::asm!("isb", options(nostack, preserves_flags));
+    }
 }
 
 /// Invalidate all TLB entries for a specific ASID.

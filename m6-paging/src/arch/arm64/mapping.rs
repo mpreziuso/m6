@@ -304,5 +304,11 @@ pub unsafe fn unmap_page(l0: &mut L0Table, va: VA) -> Result<(), MapError> {
     // SAFETY: Caller guarantees the mapping is not in use
     unsafe { l3.set_desc(va, L3Descriptor::invalid()) };
 
+    // DSB to ensure the store is visible before the caller issues TLBI.
+    // SAFETY: DSB is always safe.
+    unsafe {
+        core::arch::asm!("dsb ishst", options(nostack, preserves_flags));
+    }
+
     Ok(())
 }

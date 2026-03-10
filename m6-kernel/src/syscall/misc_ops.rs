@@ -4,6 +4,7 @@
 
 use crate::syscall::SyscallArgs;
 use crate::syscall::error::{SyscallError, SyscallResult};
+use crate::syscall::user_ptr;
 
 /// Maximum buffer size for GetRandom
 const MAX_RANDOM_BYTES: usize = 256;
@@ -46,18 +47,10 @@ pub fn handle_get_random(args: &SyscallArgs) -> SyscallResult {
         return Err(SyscallError::Range);
     }
 
-    // Probe every page in [buf_addr, buf_addr+buf_len) with AT S1E0W before
-    // writing. An unmapped or non-writable page would otherwise cause a data
-    // abort at EL1 and panic the kernel.
-    let first_page = buf_addr & !0xFFF;
-    let last_page = (buf_addr + buf_len - 1) & !0xFFF;
-    let mut page = first_page;
-    while page <= last_page {
-        if !probe_user_write(page as u64) {
-            return Err(SyscallError::InvalidArg);
-        }
-        page = page.wrapping_add(0x1000);
-    }
+    // Probe every page in [buf_addr, buf_addr+buf_len) before writing.
+    // An unmapped or non-writable page would otherwise cause a data abort
+    // at EL1 and panic the kernel.
+    user_ptr::probe_user_buffer_write(buf_addr as u64, buf_len)?;
 
     // Generate random bytes
     let mut random_buf = [0u8; MAX_RANDOM_BYTES];
@@ -72,31 +65,6 @@ pub fn handle_get_random(args: &SyscallArgs) -> SyscallResult {
     }
 
     Ok(buf_len as i64)
-}
-
-/// Probe a single user-space page for write accessibility from EL1.
-///
-/// Issues `AT S1E0W` which asks the hardware MMU to perform a stage-1
-/// EL0-write translation of `vaddr`. PAR_EL1 bit 0 (F) is set when the
-/// translation faulted. An ISB is required after AT to ensure PAR_EL1 is
-/// updated before reading it.
-#[inline]
-fn probe_user_write(vaddr: u64) -> bool {
-    let par: u64;
-    // SAFETY: AT S1E0W and MRS are read-only system instructions that
-    // cannot cause faults or affect memory.
-    unsafe {
-        core::arch::asm!(
-            "at s1e0w, {addr}",
-            "isb",
-            "mrs {par}, par_el1",
-            addr = in(reg) vaddr,
-            par = out(reg) par,
-            options(nostack, preserves_flags),
-        );
-    }
-    // PAR_EL1.F (bit 0) = 0 means the translation succeeded.
-    par & 1 == 0
 }
 
 /// Fill buffer with random bytes.
