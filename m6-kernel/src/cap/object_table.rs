@@ -540,6 +540,195 @@ impl ObjectTable {
 
         Some(IpcDequeueResult::Dequeued(sender_ref))
     }
+
+    // -- IPC commit helpers
+
+    /// Get a TCB raw pointer from the object table by ObjectRef.
+    ///
+    /// Returns null if the ref is invalid or not a TCB.
+    /// Caller must hold the table lock.
+    fn tcb_ptr(&self, tcb_ref: ObjectRef) -> *mut TcbFull {
+        let idx = tcb_ref.index() as usize;
+        if idx == 0 || idx >= MAX_OBJECTS {
+            return core::ptr::null_mut();
+        }
+        let obj = &self.objects[idx];
+        if obj.is_free() || obj.obj_type != KernelObjectType::Tcb {
+            return core::ptr::null_mut();
+        }
+        // SAFETY: verified Tcb type above.
+        unsafe { obj.data.tcb_ptr }
+    }
+
+    /// Get a mutable reference to an endpoint by ObjectRef.
+    ///
+    /// Returns None if the ref is invalid or not an Endpoint.
+    fn endpoint_mut(&mut self, ep_ref: ObjectRef) -> Option<&mut EndpointObject> {
+        let idx = ep_ref.index() as usize;
+        if idx == 0 || idx >= MAX_OBJECTS {
+            return None;
+        }
+        let obj = &mut self.objects[idx];
+        if obj.is_free() || obj.obj_type != KernelObjectType::Endpoint {
+            return None;
+        }
+        // SAFETY: verified Endpoint type above.
+        Some(unsafe { &mut obj.data.endpoint })
+    }
+
+    /// Dequeue the head TCB from an endpoint queue, advancing head/tail/state.
+    ///
+    /// Returns the dequeued ref and clears its IPC links. Updates the
+    /// endpoint queue pointers. Caller must hold the table lock.
+    fn dequeue_queue_head(&mut self, ep_ref: ObjectRef) -> Option<ObjectRef> {
+        let ep = self.endpoint_mut(ep_ref)?;
+        let head = ep.queue_head;
+        if !head.is_valid() {
+            return None;
+        }
+
+        let head_ptr = self.tcb_ptr(head);
+        if head_ptr.is_null() {
+            return None;
+        }
+
+        // SAFETY: valid TCB, we hold the table lock for exclusive access.
+        let next = unsafe {
+            let tcb = &mut *head_ptr;
+            let n = tcb.ipc_next;
+            tcb.clear_ipc_links();
+            n
+        };
+
+        // Re-borrow endpoint (previous borrow ended with tcb_ptr call).
+        let ep = self.endpoint_mut(ep_ref).unwrap();
+        ep.queue_head = next;
+        if !next.is_valid() {
+            ep.queue_tail = ObjectRef::NULL;
+            ep.state = EndpointState::Idle;
+        }
+
+        // Clear ipc_prev on new head.
+        if next.is_valid() {
+            let next_ptr = self.tcb_ptr(next);
+            if !next_ptr.is_null() {
+                // SAFETY: valid TCB, we hold the table lock.
+                unsafe { (*next_ptr).ipc_prev = ObjectRef::NULL; }
+            }
+        }
+
+        Some(head)
+    }
+
+    /// Commit phase of do_recv: enqueue receiver or recover from SendQueue.
+    ///
+    /// Handles all queue manipulation and TCB field reads atomically within
+    /// a single lock acquisition. TCB state changes and scheduling happen
+    /// outside the lock.
+    fn ipc_recv_commit(
+        &mut self,
+        ep_ref: ObjectRef,
+        receiver_ref: ObjectRef,
+        old_tail: ObjectRef,
+    ) -> Option<IpcRecvCommitResult> {
+        let ep = self.endpoint_mut(ep_ref)?;
+        let state = ep.state;
+
+        match state {
+            EndpointState::Idle | EndpointState::RecvQueue => {
+                ep.state = EndpointState::RecvQueue;
+                if old_tail.is_valid() {
+                    ep.queue_tail = receiver_ref;
+                } else {
+                    ep.queue_head = receiver_ref;
+                    ep.queue_tail = receiver_ref;
+                }
+                Some(IpcRecvCommitResult::Enqueued)
+            }
+            EndpointState::SendQueue => {
+                // Clean up stale old_tail->ipc_next link written outside the lock.
+                if old_tail.is_valid() {
+                    let ptr = self.tcb_ptr(old_tail);
+                    if !ptr.is_null() {
+                        // SAFETY: valid TCB, we hold the table lock.
+                        unsafe { (*ptr).ipc_next = ObjectRef::NULL; }
+                    }
+                }
+
+                // Dequeue sender from SendQueue head.
+                let sender_ref = match self.dequeue_queue_head(ep_ref) {
+                    Some(s) => s,
+                    None => return Some(IpcRecvCommitResult::Enqueued),
+                };
+
+                // Read sender's pending message and reply_slot while we hold the lock.
+                let sender_ptr = self.tcb_ptr(sender_ref);
+                if sender_ptr.is_null() {
+                    return Some(IpcRecvCommitResult::Enqueued);
+                }
+
+                // SAFETY: valid TCB, we hold the table lock.
+                let (reply_slot, pending_msg, badge) = unsafe {
+                    let tcb = &*sender_ptr;
+                    (tcb.tcb.reply_slot, tcb.ipc_message, tcb.ipc_badge)
+                };
+
+                Some(IpcRecvCommitResult::Recovery(RecvRecoveryInfo {
+                    sender_ref,
+                    sender_reply_slot: reply_slot,
+                    pending_msg,
+                    badge,
+                }))
+            }
+        }
+    }
+
+    /// Commit phase of do_send / do_call: enqueue sender or recover from RecvQueue.
+    ///
+    /// Handles all queue manipulation atomically within a single lock
+    /// acquisition. TCB state changes and scheduling happen outside the lock.
+    fn ipc_send_commit(
+        &mut self,
+        ep_ref: ObjectRef,
+        sender_ref: ObjectRef,
+        old_tail: ObjectRef,
+    ) -> Option<IpcSendCommitResult> {
+        let ep = self.endpoint_mut(ep_ref)?;
+        let state = ep.state;
+
+        match state {
+            EndpointState::Idle | EndpointState::SendQueue => {
+                ep.state = EndpointState::SendQueue;
+                if old_tail.is_valid() {
+                    ep.queue_tail = sender_ref;
+                } else {
+                    ep.queue_head = sender_ref;
+                    ep.queue_tail = sender_ref;
+                }
+                Some(IpcSendCommitResult::Enqueued)
+            }
+            EndpointState::RecvQueue => {
+                // Clean up stale old_tail->ipc_next link written outside the lock.
+                if old_tail.is_valid() {
+                    let ptr = self.tcb_ptr(old_tail);
+                    if !ptr.is_null() {
+                        // SAFETY: valid TCB, we hold the table lock.
+                        unsafe { (*ptr).ipc_next = ObjectRef::NULL; }
+                    }
+                }
+
+                // Dequeue receiver from RecvQueue head.
+                let receiver_ref = match self.dequeue_queue_head(ep_ref) {
+                    Some(r) => r,
+                    None => return Some(IpcSendCommitResult::Enqueued),
+                };
+
+                Some(IpcSendCommitResult::Recovery(SendRecoveryInfo {
+                    receiver_ref,
+                }))
+            }
+        }
+    }
 }
 
 /// Result of an atomic IPC dequeue operation.
@@ -548,6 +737,40 @@ pub enum IpcDequeueResult {
     Dequeued(ObjectRef),
     /// No thread was queued; contains the current tail for use when enqueuing.
     NoneQueued { old_tail: ObjectRef },
+}
+
+/// Result of a recv commit operation.
+pub enum IpcRecvCommitResult {
+    /// Receiver was enqueued in RecvQueue (normal path).
+    Enqueued,
+    /// A sender was dequeued from the SendQueue (recovery path).
+    Recovery(RecvRecoveryInfo),
+}
+
+/// Information extracted from a sender during recv recovery.
+pub struct RecvRecoveryInfo {
+    /// The dequeued sender TCB reference.
+    pub sender_ref: ObjectRef,
+    /// Sender's reply_slot (valid = Call operation, NULL = Send operation).
+    pub sender_reply_slot: ObjectRef,
+    /// Pending message registers from sender's TCB.
+    pub pending_msg: [u64; 5],
+    /// Badge to deliver with the message.
+    pub badge: u64,
+}
+
+/// Result of a send/call commit operation.
+pub enum IpcSendCommitResult {
+    /// Sender was enqueued in SendQueue (normal path).
+    Enqueued,
+    /// A receiver was dequeued from the RecvQueue (recovery path).
+    Recovery(SendRecoveryInfo),
+}
+
+/// Information extracted from a receiver during send recovery.
+pub struct SendRecoveryInfo {
+    /// The dequeued receiver TCB reference.
+    pub receiver_ref: ObjectRef,
 }
 
 /// Global kernel object table.
@@ -997,6 +1220,30 @@ pub fn ipc_dequeue_recv(ep_ref: ObjectRef) -> Option<IpcDequeueResult> {
 /// and dequeue atomically, preventing SMP races in `do_recv`.
 pub fn ipc_dequeue_send(ep_ref: ObjectRef) -> Option<IpcDequeueResult> {
     get_table().lock().ipc_dequeue_send(ep_ref)
+}
+
+/// Commit phase for do_recv: enqueue receiver or recover from SendQueue.
+///
+/// Acquires the object table lock once for all queue manipulation and
+/// TCB field reads, preventing self-deadlock on SMP recovery paths.
+pub fn ipc_recv_commit(
+    ep_ref: ObjectRef,
+    receiver_ref: ObjectRef,
+    old_tail: ObjectRef,
+) -> Option<IpcRecvCommitResult> {
+    get_table().lock().ipc_recv_commit(ep_ref, receiver_ref, old_tail)
+}
+
+/// Commit phase for do_send / do_call: enqueue sender or recover from RecvQueue.
+///
+/// Acquires the object table lock once for all queue manipulation,
+/// preventing self-deadlock on SMP recovery paths.
+pub fn ipc_send_commit(
+    ep_ref: ObjectRef,
+    sender_ref: ObjectRef,
+    old_tail: ObjectRef,
+) -> Option<IpcSendCommitResult> {
+    get_table().lock().ipc_send_commit(ep_ref, sender_ref, old_tail)
 }
 
 /// Access a PageTable with a closure (read-only).

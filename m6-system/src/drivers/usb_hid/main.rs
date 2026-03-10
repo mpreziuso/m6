@@ -37,6 +37,8 @@ mod ipc;
 
 #[path = "../../io.rs"]
 mod io;
+#[path = "../../logger.rs"]
+mod logger;
 
 use alloc::vec::Vec;
 
@@ -320,15 +322,11 @@ impl HidDriver {
             Ok(r) => {
                 let code = r.label & 0xFFFF;
                 if code != 0 {
-                    io::puts("[drv-usb-hid] START_INT err=");
-                    io::put_u64(code);
-                    io::newline();
+                    log::error!("START_INT err={}", code);
                 }
             }
             Err(e) => {
-                io::puts("[drv-usb-hid] START_INT IPC err=");
-                io::put_u64(e as u64);
-                io::newline();
+                log::error!("START_INT IPC err={}", e as u64);
             }
         }
     }
@@ -373,9 +371,7 @@ impl HidDriver {
                     // SAFETY: Single-threaded
                     let log_count = unsafe { DATA_LOG_COUNT };
                     if log_count < 3 {
-                        io::puts("[drv-usb-hid] GET_INT_DATA err=");
-                        io::put_u64(response_code);
-                        io::newline();
+                        log::warn!("GET_INT_DATA err={}", response_code);
                         unsafe { DATA_LOG_COUNT += 1; }
                     }
                 }
@@ -490,6 +486,8 @@ impl HidDriver {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start() -> ! {
+    logger::init("drv-usb-hid");
+
     // Initialise heap allocator before any heap allocations
     rt::init_allocator();
 
@@ -603,9 +601,7 @@ fn handle_subscribe(driver: &mut HidDriver, device_mask: u64) -> u64 {
     // Lazily discover HID devices on first subscription
     if driver.devices.device_count() == 0 && !driver.usb_available && driver.check_usb_host() {
         let count = driver.enumerate_devices();
-        io::puts("[drv-usb-hid] ");
-        io::put_u64(count as u64);
-        io::puts(" HID device(s)\n");
+        log::info!("{} HID device(s)", count);
         for i in 0..count {
             driver.start_device_polling(i);
         }
@@ -627,29 +623,23 @@ fn handle_unsubscribe(driver: &mut HidDriver, sub_id: u16) -> u64 {
 }
 
 /// Handle GET_EVENTS request
-fn handle_get_events(driver: &mut HidDriver, sub_id: u16, max_events: usize) -> IpcResponse {
-    match driver.get_events(sub_id, max_events.min(2)) {
-        Some(events) => {
-            let count = events.len();
-            let mut msg = [0u64; 4];
-
-            // Pack up to 2 events into the message (each event = 2 u64 words)
-            if count >= 1 {
-                let (w0, w1) = events[0].pack();
-                msg[0] = w0;
-                msg[1] = w1;
-            }
-            if count >= 2 {
-                let (w0, w1) = events[1].pack();
-                msg[2] = w0;
-                msg[3] = w1;
-            }
-
+fn handle_get_events(driver: &mut HidDriver, sub_id: u16, _max_events: usize) -> IpcResponse {
+    // IPC ABI carries at most 3 data words (x2/x3/x4 = msg[0..2]).
+    // Each event needs 2 words (timestamp + packed type/code/value),
+    // so we can only return 1 event per call. The client must drain
+    // in a loop using POLL_EVENTS to check for more.
+    match driver.get_events(sub_id, 1) {
+        Some(events) if !events.is_empty() => {
+            let (w0, w1) = events[0].pack();
             IpcResponse {
-                label: ipc::response::OK | ((count as u64) << 16),
-                msg,
+                label: ipc::response::OK | (1 << 16),
+                msg: [w0, w1, 0, 0],
             }
         }
+        Some(_) => IpcResponse {
+            label: ipc::response::OK,
+            msg: [0; 4],
+        },
         None => IpcResponse::simple(ipc::response::ERR_INVALID_SUB),
     }
 }

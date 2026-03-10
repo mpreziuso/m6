@@ -609,10 +609,10 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         log::debug!("Installed {} control capabilities", cap_count);
 
         // Create untyped capability (using table-aware version to avoid deadlock)
-        log::debug!(
-            "Creating untyped capability at slot {}...",
-            BootSlot::FirstUntyped as usize
-        );
+        // log::debug!(
+        //     "Creating untyped capability at slot {}...",
+        //     BootSlot::FirstUntyped as usize
+        // );
         let untyped_ref = create_untyped_cap_with_table(
             table,
             cnode,
@@ -623,7 +623,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         )?;
         cap_count += 1;
         untyped_count = 1;
-        log::debug!("Created untyped cap: {:?}", untyped_ref);
+        //log::debug!("Created untyped cap: {:?}", untyped_ref);
 
         // Create device untyped capabilities for MMIO regions from DTB
         for i in 0..boot_info.device_region_count as usize {
@@ -632,13 +632,13 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
                 continue;
             }
             let slot = BootSlot::FirstUntyped as usize + untyped_count as usize;
-            log::debug!(
-                "Creating device untyped at slot {} for {:#x} ({} bytes, type {:?})",
-                slot,
-                region.phys_base.as_u64(),
-                1u64 << region.size_bits,
-                region.device_type
-            );
+            // log::debug!(
+            //     "Creating device untyped at slot {} for {:#x} ({} bytes, type {:?})",
+            //     slot,
+            //     region.phys_base.as_u64(),
+            //     1u64 << region.size_bits,
+            //     region.device_type
+            // );
             let _device_ref = create_untyped_cap_with_table(
                 table,
                 cnode,
@@ -649,11 +649,11 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
             )?;
             cap_count += 1;
             untyped_count += 1;
-            log::debug!(
-                "Created device untyped cap {} at {:#x}",
-                i,
-                region.phys_base.as_u64()
-            );
+            // log::debug!(
+            //     "Created device untyped cap {} at {:#x}",
+            //     i,
+            //     region.phys_base.as_u64()
+            // );
         }
 
         Ok(())
@@ -870,20 +870,20 @@ fn update_user_boot_info_all_untyped(
         1,
         idx - 1
     );
-    let mut valid_idx = 0;
-    for i in 0..device_count {
-        let region = &boot_info.device_regions[i];
-        if region.is_valid() {
-            log::debug!(
-                "  Device untyped {}: {:?} at {:#x} ({} bytes)",
-                valid_idx,
-                region.device_type,
-                region.phys_base.as_u64(),
-                1u64 << region.size_bits
-            );
-            valid_idx += 1;
-        }
-    }
+    //let mut valid_idx = 0;
+    // for i in 0..device_count {
+    //     let region = &boot_info.device_regions[i];
+    //     if region.is_valid() {
+    //         log::debug!(
+    //             "  Device untyped {}: {:?} at {:#x} ({} bytes)",
+    //             valid_idx,
+    //             region.device_type,
+    //             region.phys_base.as_u64(),
+    //             1u64 << region.size_bits
+    //         );
+    //         valid_idx += 1;
+    //     }
+    // }
 }
 
 /// Configure a TCB for EL0 (userspace) execution.

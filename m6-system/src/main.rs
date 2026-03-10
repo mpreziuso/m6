@@ -11,6 +11,7 @@ extern crate alloc;
 
 mod elf;
 mod io;
+mod logger;
 pub mod process;
 mod rt;
 
@@ -35,45 +36,47 @@ const FIRST_FREE_SLOT: u64 = Slot::FirstUntyped as u64 + MAX_UNTYPED_REGIONS as 
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start() -> ! {
+    logger::init("init");
+
     // The kernel passes UserBootInfo address in x0
     // We use a fixed address since the kernel maps it there
     let boot_info = unsafe { &*(USER_BOOT_INFO_ADDR as *const UserBootInfo) };
 
     // Validate boot info
     if boot_info.magic != USER_BOOT_INFO_MAGIC {
-        io::puts("[init] ERROR: Invalid boot info magic!\n");
+        log::error!("Invalid boot info magic!");
         loop {
             sched_yield();
         }
     }
 
     if boot_info.version != USER_BOOT_INFO_VERSION {
-        io::puts("[init] ERROR: Boot info version mismatch!\n");
+        log::error!("Boot info version mismatch!");
         loop {
             sched_yield();
         }
     }
 
-    io::puts("[init] M6 ");
-    match boot_info.platform_id {
-        1 => io::puts("QEMU"),
-        2 => io::puts("RK3588"),
-        _ => io::puts("unknown"),
-    }
-    io::puts(", ");
-    io::put_u64(boot_info.free_memory / (1024 * 1024));
-    io::puts(" MiB, ");
-    io::put_u64(boot_info.cpu_count as u64);
-    io::puts(" CPUs\n");
+    let platform = match boot_info.platform_id {
+        1 => "QEMU",
+        2 => "RK3588",
+        _ => "unknown",
+    };
+    log::info!(
+        "M6 {}, {} MiB, {} CPUs",
+        platform,
+        boot_info.free_memory / (1024 * 1024),
+        boot_info.cpu_count
+    );
 
     // Spawn device-mgr
     if boot_info.has_initrd() && boot_info.untyped_count > 0 {
         spawn_device_mgr(boot_info);
     } else {
-        io::puts("[init] Cannot spawn device-mgr: missing initrd or untyped memory\n");
+        log::warn!("Cannot spawn device-mgr: missing initrd or untyped memory");
     }
 
-    io::puts("[init] Complete\n");
+    log::info!("Complete");
 
     // Init has nothing more to do
     // In a real system, init would block on a notification waiting for shutdown/reboot signals
@@ -138,13 +141,13 @@ struct DevMgrBootInfoLayout {
 
 /// Spawn the device manager process.
 fn spawn_device_mgr(boot_info: &UserBootInfo) {
-    io::puts("[init] Spawning device-mgr...\n");
+    log::info!("Spawning device-mgr...");
 
     // Find device-mgr binary
     let elf_data = match find_in_initrd(boot_info, "device-mgr") {
         Some(data) => data,
         None => {
-            io::puts("[init] ERROR: device-mgr not found in initrd\n");
+            log::error!("device-mgr not found in initrd");
             return;
         }
     };
@@ -178,9 +181,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         registry_ep_slot,
         1, // count - create one endpoint
     ) {
-        io::puts("[init] ERROR: Failed to create registry endpoint: ");
-        io::put_hex(e as u64);
-        io::newline();
+        log::error!("Failed to create registry endpoint: {:#x}", e as u64);
         return;
     }
 
@@ -256,9 +257,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     let result = match process::spawn_process(&config) {
         Ok(r) => r,
         Err(e) => {
-            io::puts("[init] \x1b[31mFailed to spawn device-mgr: ");
-            print_spawn_error(e);
-            io::puts("\x1b[0m\n");
+            log::error!("Failed to spawn device-mgr: {}", spawn_error_str(e));
             return;
         }
     };
@@ -280,7 +279,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     )
     .is_err()
     {
-        io::puts("[init] ERROR: Failed to create page tables for boot info region\n");
+        log::error!("Failed to create page tables for boot info region");
         return;
     }
 
@@ -297,7 +296,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         )
         .is_err()
     {
-        io::puts("[init] ERROR: Failed to create page tables for initrd region\n");
+        log::error!("Failed to create page tables for initrd region");
         return;
     }
 
@@ -343,7 +342,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     )
     .is_err()
     {
-        io::puts("[init] ERROR: Failed to map boot info\n");
+        log::error!("Failed to map boot info");
         return;
     }
 
@@ -366,7 +365,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         )
         .is_err()
         {
-            io::puts("[init] ERROR: Failed to map DTB\n");
+            log::error!("Failed to map DTB");
             return;
         }
     }
@@ -390,20 +389,18 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         )
         .is_err()
         {
-            io::puts("[init] ERROR: Failed to map initrd\n");
+            log::error!("Failed to map initrd");
             return;
         }
     }
 
     // Resume device-mgr TCB
     if let Err(e) = m6_syscall::invoke::tcb_resume(cptr(result.tcb_slot)) {
-        io::puts("[init] ERROR: Failed to resume device-mgr: ");
-        io::put_hex(e as u64);
-        io::newline();
+        log::error!("Failed to resume device-mgr: {:#x}", e as u64);
         return;
     }
 
-    io::puts("[init] device-mgr spawned\n");
+    log::info!("device-mgr spawned");
 
     // Request UART driver via ENSURE
     // This triggers device-mgr to spawn the PL011 driver
@@ -419,7 +416,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
 /// service endpoint capability via IPC. Once received, initialises the console
 /// to use IPC for output.
 fn request_uart_driver(registry_ep: u64, radix: u8, next_slot: &mut u64) {
-    io::puts("[init] Requesting UART driver from device-mgr...\n");
+    log::info!("Requesting UART driver from device-mgr...");
 
     // Allocate slot for receiving UART endpoint
     let uart_ep_slot = *next_slot;
@@ -451,18 +448,14 @@ fn request_uart_driver(registry_ep: u64, radix: u8, next_slot: &mut u64) {
                     // may be connected to a different UART than the kernel console.
                     // TODO: Pass UART address from device-mgr to spawn correct driver.
                 } else {
-                    io::puts("[init] Warning: No endpoint received from device-mgr\n");
+                    log::warn!("No endpoint received from device-mgr");
                 }
             } else {
-                io::puts("[init] ENSURE failed with code: ");
-                io::put_u64(result.label);
-                io::newline();
+                log::error!("ENSURE failed with code: {}", result.label);
             }
         }
         Err(e) => {
-            io::puts("[init] Call to device-mgr failed: ");
-            io::put_u64(e as u64);
-            io::newline();
+            log::error!("Call to device-mgr failed: {}", e as u64);
         }
     }
 }
@@ -511,23 +504,23 @@ fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64, registry_slot: u64
     *next_slot = result.next_free_slot;
     let _ = m6_syscall::invoke::tcb_resume(cptr(result.tcb_slot));
 
-    io::puts("[init] Shell spawned with registry endpoint at slot 10\n");
+    log::info!("Shell spawned with registry endpoint at slot 10");
 }
 
-fn print_spawn_error(e: process::SpawnError) {
+fn spawn_error_str(e: process::SpawnError) -> &'static str {
     match e {
-        process::SpawnError::InvalidElf(_) => io::puts("invalid ELF"),
-        process::SpawnError::OutOfMemory => io::puts("out of memory"),
-        process::SpawnError::RetypeFailed(_) => io::puts("retype failed"),
-        process::SpawnError::AsidAssignFailed(_) => io::puts("ASID assign failed"),
-        process::SpawnError::TcbConfigureFailed(_) => io::puts("TCB config failed"),
-        process::SpawnError::TcbWriteRegistersFailed(_) => io::puts("TCB write regs failed"),
-        process::SpawnError::TcbResumeFailed(_) => io::puts("TCB resume failed"),
-        process::SpawnError::FrameMapFailed(_) => io::puts("frame map failed"),
-        process::SpawnError::PageTableMapFailed(_) => io::puts("page table map failed"),
-        process::SpawnError::CapCopyFailed(_) => io::puts("cap copy failed"),
-        process::SpawnError::InvalidAddress => io::puts("invalid address"),
-        process::SpawnError::NoSlots => io::puts("no slots"),
+        process::SpawnError::InvalidElf(_) => "invalid ELF",
+        process::SpawnError::OutOfMemory => "out of memory",
+        process::SpawnError::RetypeFailed(_) => "retype failed",
+        process::SpawnError::AsidAssignFailed(_) => "ASID assign failed",
+        process::SpawnError::TcbConfigureFailed(_) => "TCB config failed",
+        process::SpawnError::TcbWriteRegistersFailed(_) => "TCB write regs failed",
+        process::SpawnError::TcbResumeFailed(_) => "TCB resume failed",
+        process::SpawnError::FrameMapFailed(_) => "frame map failed",
+        process::SpawnError::PageTableMapFailed(_) => "page table map failed",
+        process::SpawnError::CapCopyFailed(_) => "cap copy failed",
+        process::SpawnError::InvalidAddress => "invalid address",
+        process::SpawnError::NoSlots => "no slots",
     }
 }
 

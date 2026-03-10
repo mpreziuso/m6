@@ -32,6 +32,9 @@ mod queue;
 #[path = "../../io.rs"]
 mod io;
 
+#[path = "../../logger.rs"]
+mod logger;
+
 use command::{NvmeCommand, NvmeCompletion};
 use controller::{IdentifyController, IdentifyNamespace, NvmeController};
 use ipc::{DeviceInfo, request, response, status};
@@ -331,11 +334,11 @@ fn map_dma_buffers() -> Result<DmaBuffers, &'static str> {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
+    logger::init("drv-nvme");
+
     // Map the DeviceFrame (BAR0 page 0) to our address space
     if let Err(e) = map_frame(ROOT_VSPACE, DEVICE_FRAME, NVME_MMIO_VADDR, 0b011, 0) {
-        io::puts("[drv-nvme] ERROR: Failed to map MMIO: ");
-        io::put_u64(e as u64);
-        io::newline();
+        log::error!("failed to map MMIO: {}", e as u64);
         halt();
     }
 
@@ -358,9 +361,7 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     let dma = match map_dma_buffers() {
         Ok(dma) => dma,
         Err(e) => {
-            io::puts("[drv-nvme] ERROR: DMA setup: ");
-            io::puts(e);
-            io::newline();
+            log::error!("DMA setup: {}", e);
             halt();
         }
     };
@@ -369,7 +370,7 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     // notification cap with a distinct badge so fault signals can be
     // distinguished from IRQ completions.
     if let Err(_) = iospace_set_fault_handler(IOSPACE, 0, msix_notif(0), DMA_FAULT_BADGE) {
-        io::puts("[drv-nvme] WARN: DMA fault handler not available\n");
+        log::warn!("DMA fault handler not available");
     }
 
     // Create controller instance
@@ -378,11 +379,7 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
 
     // Initialise controller with admin queues (includes NSSR if supported)
     if let Err(e) = ctrl.init(dma.admin_sq_iova(), dma.admin_cq_iova(), QUEUE_DEPTH) {
-        io::puts("[drv-nvme] ERROR: Controller init failed: ");
-        io::puts(e);
-        io::puts(" CSTS=");
-        io::put_hex(ctrl.status() as u64);
-        io::newline();
+        log::error!("controller init failed: {} CSTS={:#x}", e, ctrl.status());
         halt();
     }
 
@@ -400,7 +397,7 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
         core::ptr::read_volatile((ctrl.base() + 0x1000) as *const u32)
     };
 
-    io::puts("[drv-nvme] controller ready\n");
+    log::info!("controller ready");
 
     // Create admin queues
     // SAFETY: DMA buffers are properly mapped
@@ -420,25 +417,19 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     let identify_ctrl = match identify_controller(&ctrl, &mut admin_sq, &mut admin_cq, &dma) {
         Some(id) => id,
         None => {
-            io::puts("[drv-nvme] ERROR: Identify Controller failed\n");
+            log::error!("Identify Controller failed");
             halt();
         }
     };
 
-    io::puts("[drv-nvme] Model: ");
-    io::puts(identify_ctrl.model_number());
-    io::puts(", Serial: ");
-    io::puts(identify_ctrl.serial_number());
-    io::puts(", FW: ");
-    io::puts(identify_ctrl.firmware_revision());
-    io::newline();
+    log::info!("Model: {}, Serial: {}, FW: {}", identify_ctrl.model_number(), identify_ctrl.serial_number(), identify_ctrl.firmware_revision());
 
     // Identify first namespace (NSID=1)
     let nsid = 1u32;
     let identify_ns = match identify_namespace(&ctrl, &mut admin_sq, &mut admin_cq, &dma, nsid) {
         Some(id) => id,
         None => {
-            io::puts("[drv-nvme] ERROR: Identify Namespace failed\n");
+            log::error!("Identify Namespace failed");
             halt();
         }
     };
@@ -447,13 +438,7 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     let capacity_blocks = identify_ns.size_blocks();
     let capacity_mb = (capacity_blocks * block_size as u64) / (1024 * 1024);
 
-    io::puts("[drv-nvme] Namespace 1: ");
-    io::put_u64(capacity_blocks);
-    io::puts(" blocks (");
-    io::put_u64(capacity_mb);
-    io::puts(" MiB), block size ");
-    io::put_u64(block_size as u64);
-    io::puts(" bytes\n");
+    log::info!("Namespace 1: {} blocks ({} MiB), block size {} bytes", capacity_blocks, capacity_mb, block_size);
 
     // Build device info
     let info = DeviceInfo {
@@ -478,7 +463,7 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     let (io_sq, io_cq) = match create_io_queues(&ctrl, &mut admin_sq, &mut admin_cq, &dma, &irq_config) {
         Some(queues) => queues,
         None => {
-            io::puts("[drv-nvme] ERROR: Failed to create I/O queues\n");
+            log::error!("failed to create I/O queues");
             halt();
         }
     };
@@ -540,11 +525,7 @@ fn submit_admin_cmd(
                 if completion.is_success() {
                     return Some(completion);
                 } else {
-                    io::puts("[drv-nvme] Admin command failed: SCT=");
-                    io::put_u64(completion.status_code_type() as u64);
-                    io::puts(" SC=");
-                    io::put_u64(completion.status_code() as u64);
-                    io::newline();
+                    log::warn!("admin command failed: SCT={} SC={}", completion.status_code_type(), completion.status_code());
                     return None;
                 }
             }
@@ -552,11 +533,7 @@ fn submit_admin_cmd(
 
         // Sparse progress: print at i=0 and 10K intervals to confirm polling
         if i == 0 || (i > 0 && i % 10_000 == 0) {
-            io::puts("[drv-nvme] poll i=");
-            io::put_u64(i as u64);
-            io::puts(" CSTS=");
-            io::put_hex(ctrl.status() as u64);
-            io::newline();
+            log::trace!("poll i={} CSTS={:#x}", i, ctrl.status());
         }
 
         if i % YIELD_INTERVAL == 0 && i > 0 {
@@ -564,19 +541,13 @@ fn submit_admin_cmd(
         }
     }
 
-    io::puts("[drv-nvme] Admin command timeout (CID=");
-    io::put_u64(cid as u64);
-    io::puts(") CSTS=");
-    io::put_hex(ctrl.status() as u64);
-    io::newline();
+    log::warn!("admin command timeout (CID={}) CSTS={:#x}", cid, ctrl.status());
 
     // Check for DMA fault notification
     if let Ok(badge) = m6_syscall::invoke::poll(msix_notif(0)) {
         let badge = badge as u64;
         if badge & DMA_FAULT_BADGE != 0 {
-            io::puts("[drv-nvme] DMA FAULT detected (badge=");
-            io::put_hex(badge);
-            io::puts(")\n");
+            log::error!("DMA FAULT detected (badge={:#x})", badge);
         }
     }
 
@@ -651,15 +622,11 @@ fn set_num_queues(
         Some(cqe) => {
             let nsqa = (cqe.result & 0xFFFF) as u16;
             let ncqa = (cqe.result >> 16) as u16;
-            io::puts("[drv-nvme] Set Features OK: NSQA=");
-            io::put_u64(nsqa as u64 + 1);
-            io::puts(" NCQA=");
-            io::put_u64(ncqa as u64 + 1);
-            io::newline();
+            log::info!("Set Features OK: NSQA={} NCQA={}", nsqa as u64 + 1, ncqa as u64 + 1);
             true
         }
         None => {
-            io::puts("[drv-nvme] ERROR: Set Features (Number of Queues) failed\n");
+            log::error!("Set Features (Number of Queues) failed");
             false
         }
     }
@@ -693,12 +660,12 @@ fn probe_admin_cq(
     let cmd = NvmeCommand::abort(0, 0, 0xFFFF);
     match submit_admin_cmd(ctrl, admin_sq, admin_cq, cmd) {
         Some(_) => {
-            io::puts("[drv-nvme] Admin CQ DMA OK (Abort CQE received)\n");
+            log::info!("Admin CQ DMA OK (Abort CQE received)");
             true
         }
         None => {
-            io::puts("[drv-nvme] ERROR: Admin CQ DMA FAILED — no CQE for Abort command\n");
-            io::puts("[drv-nvme] Likely cause: SMMU translation fault or inbound PCIe DMA broken\n");
+            log::error!("Admin CQ DMA FAILED -- no CQE for Abort command");
+            log::error!("Likely cause: SMMU translation fault or inbound PCIe DMA broken");
             false
         }
     }
@@ -801,9 +768,7 @@ fn setup_irq() -> IrqConfig {
                 }
             }
 
-            io::puts("[drv-nvme] MSI-X: ");
-            io::put_u64(msix_vectors as u64);
-            io::puts(" vectors detected\n");
+            log::info!("MSI-X: {} vectors detected", msix_vectors);
 
             return IrqConfig {
                 enabled: true,
@@ -813,7 +778,7 @@ fn setup_irq() -> IrqConfig {
             };
         }
         Err(_) => {
-            io::puts("[drv-nvme] MSI-X: not available, trying legacy IRQ\n");
+            log::info!("MSI-X: not available, trying legacy IRQ");
         }
     }
 
@@ -921,11 +886,7 @@ fn submit_io_cmd(device: &mut NvmeDevice, cmd: NvmeCommand) -> Option<NvmeComple
                 if completion.is_success() {
                     return Some(completion);
                 } else {
-                    io::puts("[drv-nvme] I/O command failed: SCT=");
-                    io::put_u64(completion.status_code_type() as u64);
-                    io::puts(" SC=");
-                    io::put_u64(completion.status_code() as u64);
-                    io::newline();
+                    log::warn!("I/O command failed: SCT={} SC={}", completion.status_code_type(), completion.status_code());
                     return None;
                 }
             }
@@ -936,9 +897,7 @@ fn submit_io_cmd(device: &mut NvmeDevice, cmd: NvmeCommand) -> Option<NvmeComple
         }
     }
 
-    io::puts("[drv-nvme] I/O command timeout (CID=");
-    io::put_u64(cid as u64);
-    io::puts(")\n");
+    log::warn!("I/O command timeout (CID={})", cid);
     None
 }
 
@@ -964,7 +923,7 @@ fn handle_read_sector(
 
     // Check we have I/O queues
     if device.io_sq.is_none() || device.io_cq.is_none() {
-        io::puts("[drv-nvme] ERROR: I/O queues not initialised\n");
+        log::error!("I/O queues not initialised");
         return IpcResponse::simple(response::ERR_IO);
     }
 
@@ -1037,7 +996,7 @@ fn handle_write_sector(
 
     // Check we have I/O queues
     if device.io_sq.is_none() || device.io_cq.is_none() {
-        io::puts("[drv-nvme] ERROR: I/O queues not initialised\n");
+        log::error!("I/O queues not initialised");
         return IpcResponse::simple(response::ERR_IO);
     }
 
@@ -1094,7 +1053,7 @@ fn handle_write_sector(
 fn handle_flush(device: &mut NvmeDevice) -> IpcResponse {
     // Check we have I/O queues
     if device.io_sq.is_none() || device.io_cq.is_none() {
-        io::puts("[drv-nvme] ERROR: I/O queues not initialised\n");
+        log::error!("I/O queues not initialised");
         return IpcResponse::simple(response::ERR_IO);
     }
 

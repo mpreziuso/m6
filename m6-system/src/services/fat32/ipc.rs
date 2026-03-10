@@ -100,6 +100,12 @@ pub mod request {
     /// msg[1]: new_path_len
     /// Requires frame capability with both paths (old path followed by new path).
     pub const RENAME: u64 = 0x0401;
+
+    // -- Volume operations
+
+    /// Format the volume as FAT32. No arguments.
+    /// Response: OK on success, ERR_IO on failure.
+    pub const FORMAT: u64 = 0x0500;
 }
 
 /// Response codes (in IPC reply x0)

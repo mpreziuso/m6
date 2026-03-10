@@ -28,6 +28,9 @@ mod virtqueue;
 #[path = "../../io.rs"]
 mod io;
 
+#[path = "../../logger.rs"]
+mod logger;
+
 use m6_syscall::invoke::{
     dma_pool_alloc, iospace_map_frame, iospace_unmap_frame, ipc_get_recv_caps, ipc_set_recv_slots,
     irq_set_handler, map_frame, recv, reply_recv, sched_yield,
@@ -119,19 +122,17 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     // before the UART driver, so there's no console endpoint available.
     // The io module will fall back to debug_putc() for output.
 
-    io::puts("\n\x1b[36m[drv-virtio-blk] Starting VirtIO block driver\x1b[0m\n");
+    logger::init("drv-virtio-blk");
+
+    log::info!("Starting VirtIO block driver");
 
     // Map the DeviceFrame to our address space
     match map_frame(ROOT_VSPACE, DEVICE_FRAME, VIRTIO_MMIO_VADDR, 0b011, 0) {
         Ok(_) => {
-            io::puts("[drv-virtio-blk] Mapped MMIO at ");
-            io::put_hex(VIRTIO_MMIO_VADDR);
-            io::newline();
+            log::debug!("Mapped MMIO at {:#x}", VIRTIO_MMIO_VADDR);
         }
         Err(e) => {
-            io::puts("[drv-virtio-blk] ERROR: Failed to map MMIO: ");
-            io::put_u64(e as u64);
-            io::newline();
+            log::error!("Failed to map MMIO: {}", e as u64);
             loop {
                 sched_yield();
             }
@@ -140,17 +141,11 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
 
     // Calculate actual device address (page base + offset within page)
     let device_addr = VIRTIO_MMIO_VADDR + device_offset;
-    io::puts("[drv-virtio-blk] Device at ");
-    io::put_hex(device_addr);
-    io::puts(" (offset ");
-    io::put_hex(device_offset);
-    io::puts(")\n");
+    log::debug!("Device at {:#x} (offset {:#x})", device_addr, device_offset);
 
     // Get DMA buffer base address (already mapped by device-mgr)
     let dma_base = get_dma_buffers();
-    io::puts("[drv-virtio-blk] DMA buffers at ");
-    io::put_hex(dma_base);
-    io::newline();
+    log::debug!("DMA buffers at {:#x}", dma_base);
 
     // Create device instance
     // SAFETY: We just mapped the device frame and calculated the correct offset
@@ -160,26 +155,20 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     // SAFETY: MMIO region is valid
     let dev_mmio = unsafe { virtio::VirtioMmio::new(device_addr as usize) };
     if !dev_mmio.is_valid() {
-        io::puts("[drv-virtio-blk] ERROR: Invalid VirtIO device\n");
+        log::error!("Invalid VirtIO device");
         loop {
             sched_yield();
         }
     }
 
     if !dev_mmio.is_block_device() {
-        io::puts("[drv-virtio-blk] ERROR: Not a block device (ID=");
-        io::put_u64(dev_mmio.device_id() as u64);
-        io::puts(")\n");
+        log::error!("Not a block device (ID={})", dev_mmio.device_id());
         loop {
             sched_yield();
         }
     }
 
-    io::puts("[drv-virtio-blk] Found VirtIO block device (vendor=");
-    io::put_hex(dev_mmio.vendor_id() as u64);
-    io::puts(", version=");
-    io::put_u64(dev_mmio.version() as u64);
-    io::puts(")\n");
+    log::info!("Found VirtIO block device (vendor={:#x}, version={})", dev_mmio.vendor_id(), dev_mmio.version());
 
     // Initialise device with DMA buffers
     // Use first 4KB for virtqueue structures, rest for data
@@ -189,9 +178,7 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     match unsafe { device.init(vq_mem, vq_phys) } {
         Ok(_) => {}
         Err(e) => {
-            io::puts("[drv-virtio-blk] ERROR: Device init failed: ");
-            io::puts(e);
-            io::newline();
+            log::error!("Device init failed: {}", e);
             loop {
                 sched_yield();
             }
@@ -200,24 +187,20 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
 
     // Report device info
     let config = device.config();
-    io::puts("[drv-virtio-blk] Capacity: ");
-    io::put_u64(config.capacity);
-    io::puts(" sectors (");
-    io::put_u64(config.capacity_bytes() / (1024 * 1024));
-    io::puts(" MiB)\n");
+    log::info!("Capacity: {} sectors ({} MiB)", config.capacity, config.capacity_bytes() / (1024 * 1024));
 
     if device.is_read_only() {
-        io::puts("[drv-virtio-blk] Device is read-only\n");
+        log::info!("Device is read-only");
     }
 
     // Set up IRQ handling
     let irq_enabled = setup_irq();
 
     if irq_enabled {
-        io::puts("[drv-virtio-blk] IRQ handler configured\n");
+        log::info!("IRQ handler configured");
     }
 
-    io::puts("[drv-virtio-blk] Initialised, entering service loop\n");
+    log::info!("Initialised, entering service loop");
 
     // Enter the service loop
     service_loop(&mut device);
@@ -237,9 +220,7 @@ fn setup_irq() -> bool {
     match irq_set_handler(IRQ_HANDLER, IRQ_NOTIF, IRQ_BADGE) {
         Ok(_) => true,
         Err(e) => {
-            io::puts("[drv-virtio-blk] irq_set_handler failed: ");
-            io::put_u64(e as u64);
-            io::newline();
+            log::error!("irq_set_handler failed: {}", e as u64);
             false
         }
     }
@@ -275,9 +256,7 @@ fn service_loop(device: &mut VirtioBlkDevice) -> ! {
                 result = reply_recv(SERVICE_EP, response, 0, 0, 0);
             }
             Err(err) => {
-                io::puts("[drv-virtio-blk] IPC error: ");
-                io::put_u64(err as u64);
-                io::newline();
+                log::error!("IPC error: {}", err as u64);
                 sched_yield();
                 result = recv(SERVICE_EP);
             }
@@ -530,7 +509,7 @@ fn handle_flush(device: &mut VirtioBlkDevice) -> u64 {
         return ipc::response::ERR_UNSUPPORTED;
     }
 
-    io::puts("[drv-virtio-blk] FLUSH (not fully implemented)\n");
+    log::debug!("FLUSH (not fully implemented)");
 
     ipc::response::OK
 }

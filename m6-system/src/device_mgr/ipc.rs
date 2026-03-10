@@ -12,6 +12,8 @@
 pub mod class {
     /// USB HID driver (keyboard/mouse input)
     pub const USB_HID: u64 = 0x1001;
+    /// FAT32 filesystem service
+    pub const FAT32: u64 = 0x2001;
 }
 
 // -- Request labels (client -> device-mgr)

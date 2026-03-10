@@ -12,7 +12,6 @@ use m6_pal::timer;
 
 use super::run_queue::{with_tcb, with_tcb_mut};
 use super::{PerCpuSched, VCLOCK_EPSILON, VT_FIXED_SHIFT};
-use crate::cap::object_table::{self, KernelObjectType};
 use crate::cap::tcb_storage::TcbFull;
 use crate::task::{DEFAULT_TIME_SLICE_MS, priority_to_weight};
 
@@ -60,23 +59,22 @@ pub fn is_eligible(tcb: &TcbFull, vclock: u128) -> bool {
 }
 
 /// Check if a task has available SchedContext budget.
+///
+/// Note: this function is called from within a `with_tcb` closure (which
+/// holds the global object-table lock). It must NOT call `with_object` or
+/// any other function that re-acquires the same lock, as `IrqSpinMutex` is
+/// non-reentrant and would deadlock.
 pub fn has_budget(tcb: &TcbFull) -> bool {
     let sched_ctx_ref = tcb.tcb.sched_context;
     if !sched_ctx_ref.is_valid() {
-        // No SchedContext - assume unlimited budget (for idle task, etc.)
+        // No SchedContext — assume unlimited budget (for idle task, etc.)
         return true;
     }
 
-    object_table::with_object(sched_ctx_ref, |obj| {
-        if obj.obj_type == KernelObjectType::SchedContext {
-            // Access SchedContext - it's stored inline in the object
-            // For now, return true as SchedContext storage isn't fully implemented
-            true
-        } else {
-            true
-        }
-    })
-    .unwrap_or(true)
+    // TODO: Check SchedContext budget when storage is fully implemented.
+    // The check must read the budget from the TcbFull or from a field
+    // accessible without re-acquiring the object-table lock.
+    true
 }
 
 /// Check if a task's state allows it to be scheduled.

@@ -35,6 +35,10 @@ path = "src/bin/echo.rs"
 name = "mkdir"
 path = "src/bin/mkdir.rs"
 
+[[bin]]
+name = "mkfs-fat32"
+path = "src/bin/mkfs_fat32.rs"
+
 [dependencies]
 # std comes from the custom sysroot
 m6-cap = { path = "../m6-cap" }

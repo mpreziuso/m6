@@ -32,6 +32,8 @@ mod rt;
 
 #[path = "../../io.rs"]
 mod io;
+#[path = "../../logger.rs"]
+mod logger;
 #[path = "../usb_xhci/ipc.rs"]
 mod ipc;
 #[path = "../usb_xhci/xhci.rs"]
@@ -247,6 +249,8 @@ fn map_extended_mmio_frames(layout: &VaddrLayout) -> usize {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
+    logger::init("drv-usb-dwc3");
+
     // Initialise heap allocator
     rt::init_allocator();
 
@@ -492,11 +496,7 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
     // Check for DMA buffers pre-mapped by device-mgr
     let dma = check_dma_buffers(controller_idx);
 
-    io::puts("[drv-usb-dwc3] ports=");
-    io::put_u64(connected_count as u64);
-    io::puts(" dma=");
-    io::puts(if dma.is_some() { "yes" } else { "no" });
-    io::newline();
+    log::info!("ports={} dma={}", connected_count, if dma.is_some() { "yes" } else { "no" });
 
     let mut device = Dwc3Device {
         xhci_ctrl,
@@ -510,11 +510,9 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
     // If we have DMA buffers and connected devices, try to initialize xHCI
     if device.dma.is_some() && connected_count > 0 {
         match try_initialize_xhci(&mut device) {
-            Ok(()) => io::puts("[drv-usb-dwc3] xHCI init OK\n"),
+            Ok(()) => log::info!("xHCI init OK"),
             Err(e) => {
-                io::puts("[drv-usb-dwc3] xHCI init FAILED: ");
-                io::puts(e);
-                io::newline();
+                log::error!("xHCI init FAILED: {}", e);
             }
         }
     }
@@ -925,9 +923,7 @@ fn ensure_enumerated(device: &mut Dwc3Device) {
                     device.devices.push(dev_info);
                 }
                 Err(e) => {
-                    io::puts("[drv-usb-dwc3] enumerate FAIL: ");
-                    io::puts(e);
-                    io::newline();
+                    log::error!("enumerate FAIL: {}", e);
                     // Add placeholder for unenumerated device
                     device.devices.push(UsbDeviceInfo {
                         slot_id: 0,
@@ -953,9 +949,7 @@ fn ensure_enumerated(device: &mut Dwc3Device) {
     // Clear any pending status bits from enumeration
     device.xhci_ctrl.clear_all_status();
 
-    io::puts("[drv-usb-dwc3] enumerated ");
-    io::put_u64(device.devices.len() as u64);
-    io::puts(" dev(s)\n");
+    log::info!("enumerated {} dev(s)", device.devices.len());
 
     device.devices_enumerated = true;
 }

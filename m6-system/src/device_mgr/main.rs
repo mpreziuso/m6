@@ -35,7 +35,10 @@ mod spawn;
 #[path = "../io.rs"]
 mod io;
 
-use m6_syscall::invoke::{call, ipc_set_send_caps, recv, reply_recv, sched_yield, signal};
+#[path = "../logger.rs"]
+mod logger;
+
+use m6_syscall::invoke::{ipc_set_send_caps, recv, reply_recv, sched_yield, signal};
 use m6_syscall::slot_to_cptr;
 
 use boot_info::DevMgrBootInfo;
@@ -68,7 +71,8 @@ pub unsafe fn get_boot_info() -> &'static DevMgrBootInfo {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
-    io::puts("[device-mgr] Starting\n");
+    logger::init("device-mgr");
+    log::info!("Starting");
 
     // Store boot info pointer
     BOOT_INFO.store(boot_info_addr as *mut DevMgrBootInfo, core::sync::atomic::Ordering::Relaxed);
@@ -77,7 +81,7 @@ pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
     // SAFETY: The pointer was just stored from init's valid boot_info_addr.
     let boot_info = unsafe { get_boot_info() };
     if !boot_info.is_valid() {
-        io::puts("[device-mgr] ERROR: Invalid boot info!\n");
+        log::error!("Invalid boot info!");
         loop {
             sched_yield();
         }
@@ -90,14 +94,14 @@ pub unsafe extern "C" fn _start(boot_info_addr: u64) -> ! {
     match init_dtb(&mut registry, boot_info) {
         Ok(_count) => {}
         Err(e) => {
-            io::puts("[device-mgr] ERROR: Failed to parse DTB: ");
-            io::puts(e);
-            io::newline();
+            log::error!("Failed to parse DTB: {}", e);
         }
     }
 
     // Spawn platform drivers proactively
     spawn_platform_drivers(&mut registry);
+
+    log::info!("spawn_platform_drivers done, entering service_loop");
 
     // Enter main service loop
     service_loop(&mut registry);
@@ -290,21 +294,14 @@ fn enumerate_pcie_devices(registry: &mut Registry, dtb_data: &[u8]) {
         }
 
         // Log host details for diagnostics
-        io::puts("[device-mgr] PCIe host: config=");
-        io::put_hex(host.config_base);
-        io::puts(" mem32=[");
-        io::put_hex(host.mem32_pci);
-        io::puts("->"); io::put_hex(host.mem32_cpu);
-        io::puts(" sz="); io::put_hex(host.mem32_size);
-        io::puts("] mem64=[");
-        io::put_hex(host.mem64_pci);
-        io::puts("->"); io::put_hex(host.mem64_cpu);
-        io::puts(" sz="); io::put_hex(host.mem64_size);
-        io::puts("] iommu=");
-        io::put_hex(host.iommu_phandle as u64);
-        io::puts(" sid_base=");
-        io::put_hex(host.iommu_stream_base as u64);
-        io::newline();
+        log::debug!(
+            "PCIe host: config={:#x} mem32=[{:#x}->{:#x} sz={:#x}] mem64=[{:#x}->{:#x} sz={:#x}] iommu={:#x} sid_base={:#x}",
+            host.config_base,
+            host.mem32_pci, host.mem32_cpu, host.mem32_size,
+            host.mem64_pci, host.mem64_cpu, host.mem64_size,
+            host.iommu_phandle as u64,
+            host.iommu_stream_base as u64,
+        );
 
         // Map config space for enumeration
         // For large config spaces (256MB), we only map enough for scanning
@@ -350,13 +347,11 @@ fn enumerate_pcie_devices(registry: &mut Registry, dtb_data: &[u8]) {
                 // Unmap config space
                 // Note: We keep individual device frames for later driver spawning
                 if let Err(e) = unmap_frame(cptr(slots::ROOT_VSPACE), config_vaddr as u64) {
-                    io::puts("[device-mgr] WARN: unmap config frame failed: ");
-                    io::puts(e.name());
-                    io::puts("\n");
+                    log::warn!("unmap config frame failed: {}", e.name());
                 }
             }
             None => {
-                io::puts("[device-mgr] PCIe: failed to map config space\n");
+                log::debug!("PCIe: failed to map config space");
             }
         }
     }
@@ -472,22 +467,16 @@ fn check_rk3588_link_status(
     let raw_status =
         unsafe { core::ptr::read_volatile(ltssm_vaddr as *const u32) };
 
-    io::puts("[device-mgr] APBDBG ");
-    io::put_hex(apbdbg_base);
-    io::puts(" LTSSM=");
-    io::put_hex(raw_status as u64);
-    match link_result {
-        Some(true) => io::puts(" LINK_UP"),
-        Some(false) => io::puts(" LINK_DOWN"),
-        None => io::puts(" UNKNOWN(clk?)"),
-    }
-    io::newline();
+    let link_str = match link_result {
+        Some(true) => "LINK_UP",
+        Some(false) => "LINK_DOWN",
+        None => "UNKNOWN(clk?)",
+    };
+    log::debug!("APBDBG {:#x} LTSSM={:#x} {}", apbdbg_base, raw_status as u64, link_str);
 
     // Unmap
     if let Err(e) = unmap_frame(cptr(slots::ROOT_VSPACE), APBDBG_VADDR) {
-        io::puts("[device-mgr] WARN: unmap APBDBG frame failed: ");
-        io::puts(e.name());
-        io::puts("\n");
+        log::warn!("unmap APBDBG frame failed: {}", e.name());
     }
 
     // Return: Some(true) = link up, Some(false) = link confirmed down,
@@ -703,22 +692,18 @@ fn scan_dwc_secondary_bus(
     };
 
     let Some(dbi_base) = dbi_base else {
-        io::puts("[device-mgr] PCIe: no usable DBI base for secondary scan\n");
+        log::debug!("PCIe: no usable DBI base for secondary scan");
         return;
     };
 
-    io::puts("[device-mgr] PCIe: DBI base=");
-    io::put_hex(dbi_base);
-    io::newline();
+    log::debug!("PCIe: DBI base={:#x}", dbi_base);
 
     // Map DBI config page (offset 0 = root port's PCIe config header)
     let dbi_config_vaddr = pcie_probe_vaddr + 0x3000;
     let Some(_dbi_config_slot) =
         map_pcie_page(dbi_base, dbi_config_vaddr, registry, boot_info, cptr)
     else {
-        io::puts("[device-mgr] PCIe: failed to map DBI config page at ");
-        io::put_hex(dbi_base);
-        io::newline();
+        log::debug!("PCIe: failed to map DBI config page at {:#x}", dbi_base);
         return;
     };
 
@@ -732,23 +717,29 @@ fn scan_dwc_secondary_bus(
 
     let Some(bridge) = bridge else {
         let _ = unmap_frame(cptr(slots::ROOT_VSPACE), dbi_config_vaddr);
-        io::puts("[device-mgr] PCIe: DBI header is not a bridge\n");
+        log::debug!("PCIe: DBI header is not a bridge");
         return;
     };
 
-    if bridge.secondary_bus == 0 || bridge.secondary_bus == 0xFF {
-        let _ = unmap_frame(cptr(slots::ROOT_VSPACE), dbi_config_vaddr);
-        io::puts("[device-mgr] PCIe: no secondary bus assigned (sec=");
-        io::put_u64(bridge.secondary_bus as u64);
-        io::puts(")\n");
-        return;
-    }
+    let secondary_bus = if bridge.secondary_bus == 0 || bridge.secondary_bus == 0xFF {
+        // Firmware didn't assign bus numbers. Programme them ourselves:
+        // primary = bus_start, secondary = bus_start + 1, subordinate = bus_start + 1
+        let (bus_start, _) = host.bus_range;
+        let pri = bus_start;
+        let sec = bus_start.wrapping_add(1);
+        let sub = sec;
+        let bus_reg = (pri as u32) | ((sec as u32) << 8) | ((sub as u32) << 16);
+        // SAFETY: DBI config page is mapped at dbi_config_vaddr
+        unsafe {
+            pcie::cfg_write32(dbi_config_vaddr as usize, 0, 0, 0, 0x18, bus_reg);
+        }
+        log::debug!("PCIe: assigned bus numbers pri={} sec={} sub={}", pri, sec, sub);
+        sec
+    } else {
+        bridge.secondary_bus
+    };
 
-    let secondary_bus = bridge.secondary_bus;
-
-    io::puts("[device-mgr] PCIe: root port bridge -> secondary bus ");
-    io::put_u64(secondary_bus as u64);
-    io::newline();
+    log::debug!("PCIe: root port bridge -> secondary bus {}", secondary_bus);
 
     // Enable Memory Space and Bus Master on the root port via DBI.
     // Without BME, the root complex drops inbound DMA TLPs from downstream
@@ -762,7 +753,7 @@ fn scan_dwc_secondary_bus(
     let iatu_vaddr = pcie_probe_vaddr + 0x2000;
     let Some(_iatu_slot) = map_pcie_page(iatu_phys, iatu_vaddr, registry, boot_info, cptr) else {
         let _ = unmap_frame(cptr(slots::ROOT_VSPACE), dbi_config_vaddr);
-        io::puts("[device-mgr] PCIe: failed to map iATU registers\n");
+        log::debug!("PCIe: failed to map iATU registers");
         return;
     };
 
@@ -798,7 +789,7 @@ fn scan_dwc_secondary_bus(
         match map_pcie_page(sec_config_phys, sec_config_vaddr, registry, boot_info, cptr) {
             Some(slot) => slot,
             None => {
-                io::puts("[device-mgr] PCIe: failed to map secondary bus config\n");
+                log::debug!("PCIe: failed to map secondary bus config");
                 let _ = unmap_frame(cptr(slots::ROOT_VSPACE), iatu_vaddr);
                 let _ = unmap_frame(cptr(slots::ROOT_VSPACE), dbi_config_vaddr);
                 return;
@@ -837,13 +828,10 @@ fn scan_dwc_secondary_bus(
 
                 let readback = core::ptr::read_volatile(msg_ctrl_addr as *const u16);
                 if readback & (1 << 15) == 0 {
-                    io::puts("[device-mgr] PCIe: WARN MSI-X enable failed for BDF ");
-                    io::put_hex(device.bdf.0 as u64);
-                    io::puts(":");
-                    io::put_hex(device.bdf.1 as u64);
-                    io::puts(".");
-                    io::put_hex(device.bdf.2 as u64);
-                    io::newline();
+                    log::warn!(
+                        "PCIe: MSI-X enable failed for BDF {:02x}:{:02x}.{:x}",
+                        device.bdf.0, device.bdf.1, device.bdf.2,
+                    );
                 }
             }
         }
@@ -957,7 +945,7 @@ fn add_pcie_device_to_registry(
     entry.state = registry::DeviceState::Unbound;
 
     if registry.add_device(entry).is_none() {
-        io::puts("[device-mgr] PCIe: registry full, cannot add device\n");
+        log::debug!("PCIe: registry full, cannot add device");
     }
 }
 
@@ -1004,7 +992,7 @@ fn probe_virtio_devices(registry: &mut Registry) {
             None => {
                 // VirtIO devices in DTB but no device untyped - this shouldn't happen
                 // on a properly configured system, but handle gracefully.
-                io::puts("[device-mgr] WARN: VirtIO devices in DTB but no device untyped\n");
+                log::warn!("VirtIO devices in DTB but no device untyped");
                 return;
             }
         };
@@ -1030,7 +1018,7 @@ fn probe_virtio_devices(registry: &mut Registry) {
     )
     .is_err()
     {
-        io::puts("[device-mgr] ERROR: VirtIO probe L1 retype failed\n");
+        log::error!("VirtIO probe L1 retype failed");
         return;
     }
     let l1_base = PROBE_VADDR & !(512 * 1024 * 1024 * 1024 - 1);
@@ -1047,7 +1035,7 @@ fn probe_virtio_devices(registry: &mut Registry) {
     )
     .is_err()
     {
-        io::puts("[device-mgr] ERROR: VirtIO probe L2 retype failed\n");
+        log::error!("VirtIO probe L2 retype failed");
         return;
     }
     let l2_base = PROBE_VADDR & !(1024 * 1024 * 1024 - 1);
@@ -1064,7 +1052,7 @@ fn probe_virtio_devices(registry: &mut Registry) {
     )
     .is_err()
     {
-        io::puts("[device-mgr] ERROR: VirtIO probe L3 retype failed\n");
+        log::error!("VirtIO probe L3 retype failed");
         return;
     }
     let l3_base = PROBE_VADDR & !(2 * 1024 * 1024 - 1);
@@ -1081,7 +1069,7 @@ fn probe_virtio_devices(registry: &mut Registry) {
     )
     .is_err()
     {
-        io::puts("[device-mgr] ERROR: VirtIO probe device retype failed\n");
+        log::error!("VirtIO probe device retype failed");
         return;
     }
 
@@ -1133,9 +1121,7 @@ fn probe_virtio_devices(registry: &mut Registry) {
     for (i, &_slot) in frame_slots.iter().enumerate() {
         let vaddr = PROBE_VADDR + (i * 4096) as u64;
         if let Err(e) = unmap_frame(cptr(slots::ROOT_VSPACE), vaddr) {
-            io::puts("[device-mgr] WARN: unmap VirtIO frame failed: ");
-            io::puts(e.name());
-            io::puts("\n");
+            log::warn!("unmap VirtIO frame failed: {}", e.name());
         }
     }
 
@@ -1170,6 +1156,8 @@ fn service_loop(registry: &mut Registry) -> ! {
 
     let registry_cptr = cptr(slots::REGISTRY_EP);
 
+    log::info!("Entering service loop, registry_cptr={:#x}", registry_cptr);
+
     // Wait for the first request
     let mut last_response: u64 = 0;
     let mut first_message = true;
@@ -1190,10 +1178,15 @@ fn service_loop(registry: &mut Registry) -> ! {
                 let label = ipc_result.label;
                 let msg = &ipc_result.msg;
 
+                log::debug!("MSG label={:#x} msg0={:#x}", label, msg[0]);
+
                 // Handle the request and store response for next reply_recv
                 last_response = handle_request(registry, sender_badge, label, msg);
+
+                log::debug!("REPLY resp={:#x}", last_response);
             }
-            Err(_) => {
+            Err(e) => {
+                log::error!("Service loop error: {:?}", e);
                 sched_yield();
                 first_message = true; // Reset to recv mode
             }
@@ -1297,10 +1290,9 @@ fn handle_ensure(registry: &mut Registry, _badge: u64, msg: &[u64; 4]) -> u64 {
 fn handle_class_ensure(registry: &mut Registry, class_id: u64) -> u64 {
     match class_id {
         ipc::class::USB_HID => handle_usb_hid_ensure(registry),
+        ipc::class::FAT32 => handle_fat32_ensure(registry),
         _ => {
-            io::puts("[device-mgr] Unknown class ID: ");
-            io::put_hex(class_id);
-            io::newline();
+            log::warn!("Unknown class ID: {:#x}", class_id);
             ipc::response::ERR_DEVICE_NOT_FOUND
         }
     }
@@ -1313,6 +1305,8 @@ fn handle_class_ensure(registry: &mut Registry, class_id: u64) -> u64 {
 /// - USB host driver endpoint (to communicate with USB devices)
 /// - Its own service endpoint (for clients like the shell)
 fn handle_usb_hid_ensure(registry: &mut Registry) -> u64 {
+    log::debug!("Handling USB HID ENSURE request");
+
     // Check if HID driver is already running
     if let Some(endpoint_slot) = registry.hid_driver_endpoint {
         // SAFETY: _start has initialised BOOT_INFO
@@ -1330,10 +1324,11 @@ fn handle_usb_hid_ensure(registry: &mut Registry) -> u64 {
     // Find USB host driver (xHCI or DWC3)
     let usb_host_endpoint = find_usb_host_driver(registry);
     if usb_host_endpoint.is_none() {
-        io::puts("[device-mgr] No USB host driver available for HID\n");
+        log::debug!("USB HID ENSURE: no USB host driver available");
         return ipc::response::ERR_NO_DRIVER;
     }
     let usb_host_ep_slot = usb_host_endpoint.unwrap();
+    log::debug!("USB HID ENSURE: found USB host, spawning HID driver");
 
     // Spawn HID driver
     match spawn_hid_driver(registry, usb_host_ep_slot) {
@@ -1349,33 +1344,27 @@ fn handle_usb_hid_ensure(registry: &mut Registry) -> u64 {
                 ipc_set_send_caps(&[endpoint_cptr]);
             }
 
+            log::debug!("USB HID ENSURE: success, endpoint at slot {}", endpoint_slot);
             ipc::response::OK
         }
         Err(e) => {
-            io::puts("[device-mgr] Failed to spawn HID driver: ");
-            io::puts(e);
-            io::newline();
+            log::error!("USB HID ENSURE: spawn failed: {}", e);
             ipc::response::ERR_SPAWN_FAILED
         }
     }
 }
 
-/// Find a running USB host driver (xHCI or DWC3) that has connected devices.
+/// Find a running USB host driver (xHCI or DWC3).
 ///
-/// On platforms with multiple USB controllers (e.g. RK3588 with three DWC3),
-/// the keyboard may be on any of them. We query each running USB host via
-/// LIST_DEVICES IPC and return the first one that reports connected devices.
-/// Falls back to the first running USB host if none report devices yet.
+/// Returns the first running USB host driver's endpoint slot. We avoid making
+/// blocking IPC calls to query drivers here because the device-mgr is
+/// single-threaded — a blocking call to a driver that is still initialising
+/// (or busy servicing bound notifications from IRQs) would deadlock the
+/// entire device-mgr, preventing it from processing any other requests.
+///
+/// The HID driver probes connected devices lazily on first SUBSCRIBE, so
+/// returning any running USB host is sufficient.
 fn find_usb_host_driver(registry: &Registry) -> Option<u64> {
-    // SAFETY: _start has initialised BOOT_INFO
-    let boot_info = unsafe { get_boot_info() };
-    let cptr = |slot: u64| slot_to_cptr(slot, boot_info.cnode_radix);
-
-    // USB host IPC label for LIST_DEVICES
-    const LIST_DEVICES: u64 = 0x0020;
-
-    let mut fallback_slot: Option<u64> = None;
-
     for i in 0..registry.device_count {
         if registry.devices[i].state != DeviceState::Running {
             continue;
@@ -1391,23 +1380,10 @@ fn find_usb_host_driver(registry: &Registry) -> Option<u64> {
             continue;
         }
 
-        let ep_slot = registry.drivers[driver_idx].endpoint_slot;
-
-        // Remember the first USB host as fallback
-        if fallback_slot.is_none() {
-            fallback_slot = Some(ep_slot);
-        }
-
-        // Query this USB host for connected device count
-        if let Ok(result) = call(cptr(ep_slot), LIST_DEVICES, 0, 0, 0) {
-            let device_count = (result.label >> 16) & 0xFFFF;
-            if device_count > 0 {
-                return Some(ep_slot);
-            }
-        }
+        return Some(registry.drivers[driver_idx].endpoint_slot);
     }
 
-    fallback_slot
+    None
 }
 
 /// Spawn the USB HID driver.
@@ -1425,6 +1401,80 @@ fn spawn_hid_driver(registry: &mut Registry, usb_host_ep_slot: u64) -> Result<u6
     // Spawn the HID driver as a class driver (no specific device)
     let result = spawn::spawn_class_driver(registry, elf_data, usb_host_ep_slot)?;
 
+    Ok(result.endpoint_slot)
+}
+
+/// Handle FAT32 filesystem service ENSURE request.
+fn handle_fat32_ensure(registry: &mut Registry) -> u64 {
+    if let Some(endpoint_slot) = registry.fat32_ep_slot {
+        // SAFETY: _start has initialised BOOT_INFO
+        let boot_info = unsafe { get_boot_info() };
+        let endpoint_cptr = slot_to_cptr(endpoint_slot, boot_info.cnode_radix);
+        // SAFETY: IPC buffer is mapped at the fixed ABI address
+        unsafe {
+            ipc_set_send_caps(&[endpoint_cptr]);
+        }
+        return ipc::response::OK;
+    }
+
+    let nvme_ep_slot = match find_nvme_driver(registry) {
+        Some(slot) => slot,
+        None => {
+            log::info!("No NVMe driver available for FAT32");
+            return ipc::response::ERR_NO_DRIVER;
+        }
+    };
+
+    match spawn_fat32_from_nvme(registry, nvme_ep_slot) {
+        Ok(endpoint_slot) => {
+            registry.fat32_ep_slot = Some(endpoint_slot);
+            // SAFETY: _start has initialised BOOT_INFO
+            let boot_info = unsafe { get_boot_info() };
+            let endpoint_cptr = slot_to_cptr(endpoint_slot, boot_info.cnode_radix);
+            // SAFETY: IPC buffer is mapped at the fixed ABI address
+            unsafe {
+                ipc_set_send_caps(&[endpoint_cptr]);
+            }
+            ipc::response::OK
+        }
+        Err(e) => {
+            log::error!("Failed to spawn FAT32 service: {}", e);
+            ipc::response::ERR_SPAWN_FAILED
+        }
+    }
+}
+
+/// Find a running NVMe driver and return its endpoint slot.
+fn find_nvme_driver(registry: &Registry) -> Option<u64> {
+    for i in 0..registry.device_count {
+        if registry.devices[i].state != DeviceState::Running {
+            continue;
+        }
+        let compat = registry.devices[i].compatible_str();
+        if !(compat.contains("nvme") || compat.contains("010802")) {
+            continue;
+        }
+        let driver_idx = registry.devices[i].driver_idx;
+        if driver_idx >= registry.driver_count {
+            continue;
+        }
+        return Some(registry.drivers[driver_idx].endpoint_slot);
+    }
+    None
+}
+
+/// Spawn the FAT32 service and return its endpoint slot.
+fn spawn_fat32_from_nvme(registry: &mut Registry, nvme_ep_slot: u64) -> Result<u64, &'static str> {
+    let initrd = get_initrd().ok_or("No initrd available")?;
+    let archive = tar_no_std::TarArchiveRef::new(initrd).map_err(|_| "Failed to parse initrd")?;
+
+    let elf_data = archive
+        .entries()
+        .find(|e| e.filename().as_str() == Ok("svc-fat32"))
+        .map(|e| e.data())
+        .ok_or("svc-fat32 binary not found")?;
+
+    let result = spawn::spawn_fat32_service(registry, elf_data, nvme_ep_slot)?;
     Ok(result.endpoint_slot)
 }
 
@@ -1485,9 +1535,7 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
     let manifest_entry = match manifest::find_driver(compat, virtio_id) {
         Some(m) => m,
         None => {
-            io::puts("[device-mgr] No driver for: ");
-            io::puts(compat);
-            io::newline();
+            log::debug!("No driver for: {}", compat);
             return ipc::response::ERR_NO_DRIVER;
         }
     };
@@ -1496,14 +1544,14 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
     let initrd = match get_initrd() {
         Some(data) => data,
         None => {
-            io::puts("[device-mgr] No initrd available\n");
+            log::error!("No initrd available");
             return ipc::response::ERR_NO_DRIVER;
         }
     };
     let archive = match tar_no_std::TarArchiveRef::new(initrd) {
         Ok(a) => a,
         Err(_) => {
-            io::puts("[device-mgr] Failed to parse initrd TAR\n");
+            log::error!("Failed to parse initrd TAR");
             return ipc::response::ERR_NO_DRIVER;
         }
     };
@@ -1514,9 +1562,7 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
     {
         Some(entry) => entry.data(),
         None => {
-            io::puts("[device-mgr] Driver binary not found: ");
-            io::puts(manifest_entry.binary_name);
-            io::newline();
+            log::error!("Driver binary not found: {}", manifest_entry.binary_name);
             return ipc::response::ERR_NO_DRIVER;
         }
     };
@@ -1544,9 +1590,7 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
             registry.devices[device_idx].state = DeviceState::Running;
             registry.devices[device_idx].driver_idx = result.driver_idx;
 
-            io::puts("[device-mgr] Spawned driver for: ");
-            io::puts(compat);
-            io::newline();
+            log::info!("Spawned driver for: {}", compat);
 
             // If this is a UART driver, store its endpoint as the console
             // so subsequent drivers can use IPC-based console output
@@ -1570,61 +1614,28 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
             // Reset device state
             registry.devices[device_idx].state = DeviceState::Unbound;
 
-            io::puts("[device-mgr] Failed to spawn driver: ");
-            match e {
-                spawn::SpawnError::InvalidElf(_) => io::puts("invalid ELF"),
-                spawn::SpawnError::OutOfMemory => io::puts("out of memory"),
-                spawn::SpawnError::RetypeFailed(err) => {
-                    io::puts("retype failed: ");
-                    io::puts(err.name());
-                }
-                spawn::SpawnError::AsidAssignFailed(err) => {
-                    io::puts("ASID assign failed: ");
-                    io::puts(err.name());
-                }
-                spawn::SpawnError::TcbConfigureFailed(err) => {
-                    io::puts("TCB config failed: ");
-                    io::puts(err.name());
-                }
-                spawn::SpawnError::TcbWriteRegistersFailed(err) => {
-                    io::puts("TCB write regs failed: ");
-                    io::puts(err.name());
-                }
-                spawn::SpawnError::TcbResumeFailed(err) => {
-                    io::puts("TCB resume failed: ");
-                    io::puts(err.name());
-                }
-                spawn::SpawnError::FrameMapFailed(err) => {
-                    io::puts("frame map failed: ");
-                    io::puts(err.name());
-                }
-                spawn::SpawnError::CapCopyFailed(err) => {
-                    io::puts("cap copy failed: ");
-                    io::puts(err.name());
-                }
-                spawn::SpawnError::IrqClaimFailed(err) => {
-                    io::puts("IRQ claim failed: ");
-                    io::puts(err.name());
-                }
-                spawn::SpawnError::NoSlots => io::puts("no slots"),
-                spawn::SpawnError::DriverNotFound => io::puts("driver not found"),
-                spawn::SpawnError::TooManyDrivers => io::puts("too many drivers"),
-                spawn::SpawnError::DeviceUntypedNotFound => io::puts("device untyped not found"),
-                spawn::SpawnError::IommuRequired => io::puts("IOMMU required but not available"),
-                spawn::SpawnError::MsiAllocateFailed(err) => {
-                    io::puts("MSI allocate failed: ");
-                    io::puts(err.name());
-                }
-                spawn::SpawnError::MsixSetupFailed => io::puts("MSI-X setup failed"),
-                spawn::SpawnError::InvalidDeviceConfig => {
-                    io::puts("invalid device config (no MMIO address)")
-                }
-                spawn::SpawnError::IOSpaceOpFailed(err) => {
-                    io::puts("IOSpace operation failed: ");
-                    io::puts(err.name());
-                }
-            }
-            io::newline();
+            let reason: &str = match e {
+                spawn::SpawnError::InvalidElf(_) => "invalid ELF",
+                spawn::SpawnError::OutOfMemory => "out of memory",
+                spawn::SpawnError::RetypeFailed(err) => err.name(),
+                spawn::SpawnError::AsidAssignFailed(err) => err.name(),
+                spawn::SpawnError::TcbConfigureFailed(err) => err.name(),
+                spawn::SpawnError::TcbWriteRegistersFailed(err) => err.name(),
+                spawn::SpawnError::TcbResumeFailed(err) => err.name(),
+                spawn::SpawnError::FrameMapFailed(err) => err.name(),
+                spawn::SpawnError::CapCopyFailed(err) => err.name(),
+                spawn::SpawnError::IrqClaimFailed(err) => err.name(),
+                spawn::SpawnError::NoSlots => "no slots",
+                spawn::SpawnError::DriverNotFound => "driver not found",
+                spawn::SpawnError::TooManyDrivers => "too many drivers",
+                spawn::SpawnError::DeviceUntypedNotFound => "device untyped not found",
+                spawn::SpawnError::IommuRequired => "IOMMU required but not available",
+                spawn::SpawnError::MsiAllocateFailed(err) => err.name(),
+                spawn::SpawnError::MsixSetupFailed => "MSI-X setup failed",
+                spawn::SpawnError::InvalidDeviceConfig => "invalid device config (no MMIO address)",
+                spawn::SpawnError::IOSpaceOpFailed(err) => err.name(),
+            };
+            log::error!("Failed to spawn driver: {}", reason);
 
             ipc::response::ERR_SPAWN_FAILED
         }
@@ -1779,9 +1790,7 @@ fn handle_driver_death(registry: &mut Registry, fault_badge: u64) {
         return;
     }
 
-    io::puts("[device-mgr] Driver died: index ");
-    io::put_u64(driver_idx as u64);
-    io::newline();
+    log::error!("Driver died: index {}", driver_idx);
 
     // Mark driver as dead
     registry.mark_driver_dead(driver_idx);

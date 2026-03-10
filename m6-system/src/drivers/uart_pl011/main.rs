@@ -24,6 +24,8 @@ mod pl011;
 // Re-use io module from parent crate (for early debug output)
 #[path = "../../io.rs"]
 mod io;
+#[path = "../../logger.rs"]
+mod logger;
 use m6_syscall::invoke::{irq_ack, irq_set_handler, map_frame, recv, reply_recv, sched_yield};
 
 use pl011::Pl011;
@@ -133,20 +135,17 @@ impl RxBuffer {
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start() -> ! {
-    io::puts("\n\x1b[35m[drv-uart] Starting PL011 UART driver\x1b[0m\n");
+    logger::init("drv-uart");
+    log::info!("Starting PL011 UART driver");
 
     // Map the DeviceFrame to our address space
     // Rights: RW (0b011), no executable
     match map_frame(ROOT_VSPACE, DEVICE_FRAME, UART_MMIO_VADDR, 0b011, 0) {
         Ok(_) => {
-            io::puts("[drv-uart] Mapped MMIO at ");
-            io::put_hex(UART_MMIO_VADDR);
-            io::newline();
+            log::info!("Mapped MMIO at {:#x}", UART_MMIO_VADDR);
         }
         Err(e) => {
-            io::puts("[drv-uart] ERROR: Failed to map MMIO: ");
-            io::put_u64(e as u64);
-            io::newline();
+            log::error!("Failed to map MMIO: {}", e as u64);
             loop {
                 sched_yield();
             }
@@ -162,9 +161,9 @@ pub unsafe extern "C" fn _start() -> ! {
     let irq_enabled = setup_irq(&uart);
 
     if irq_enabled {
-        io::puts("[drv-uart] PL011 initialised with IRQ support, entering service loop\n");
+        log::info!("PL011 initialised with IRQ support, entering service loop");
     } else {
-        io::puts("[drv-uart] PL011 initialised (polling mode), entering service loop\n");
+        log::info!("PL011 initialised (polling mode), entering service loop");
     }
 
     // Enter the service loop with IRQ support
@@ -179,9 +178,7 @@ fn setup_irq(uart: &Pl011) -> bool {
     match irq_set_handler(IRQ_HANDLER, IRQ_NOTIF, IRQ_BADGE_RX) {
         Ok(_) => {}
         Err(e) => {
-            io::puts("[drv-uart] irq_set_handler failed: ");
-            io::put_u64(e as u64);
-            io::newline();
+            log::error!("irq_set_handler failed: {}", e as u64);
             return false;
         }
     }
@@ -192,9 +189,7 @@ fn setup_irq(uart: &Pl011) -> bool {
     // Enable RX interrupt
     uart.enable_rx_interrupt();
 
-    io::puts("[drv-uart] IRQ handler configured (badge=");
-    io::put_u64(IRQ_BADGE_RX);
-    io::puts(")\n");
+    log::info!("IRQ handler configured (badge={})", IRQ_BADGE_RX);
 
     true
 }
@@ -216,7 +211,7 @@ fn handle_irq(uart: &Pl011, rx_buffer: &mut RxBuffer) {
         for &byte in tmp.iter().take(count) {
             if !rx_buffer.push(byte) {
                 // Buffer full - drop remaining data
-                io::puts("[drv-uart] RX buffer overflow\n");
+                log::warn!("RX buffer overflow");
                 break;
             }
         }
@@ -227,9 +222,7 @@ fn handle_irq(uart: &Pl011, rx_buffer: &mut RxBuffer) {
 
     // Acknowledge IRQ to re-enable
     if let Err(e) = irq_ack(IRQ_HANDLER) {
-        io::puts("[drv-uart] irq_ack failed: ");
-        io::put_u64(e as u64);
-        io::newline();
+        log::error!("irq_ack failed: {}", e as u64);
     }
 }
 
@@ -266,9 +259,7 @@ fn service_loop(uart: &Pl011, irq_enabled: bool) -> ! {
                 last_response = handle_request(uart, &mut rx_buffer, badge, label, &ipc_result.msg);
             }
             Err(err) => {
-                io::puts("[drv-uart] recv/reply_recv error: ");
-                io::put_u64(err as u64);
-                io::newline();
+                log::error!("recv/reply_recv error: {}", err as u64);
                 sched_yield();
                 first_message = true; // Reset to recv mode
             }
