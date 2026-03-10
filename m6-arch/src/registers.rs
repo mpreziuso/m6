@@ -16,11 +16,18 @@ pub fn read_vbar_el1() -> u64 {
 
 /// Write VBAR_EL1 (Vector Base Address Register)
 ///
+/// Includes a mandatory ISB after the write to ensure the new vector base
+/// address takes effect before any subsequent exception can be taken
+/// (ARM ARM D1.7.1).
+///
 /// # Safety
 /// The address must point to a valid exception vector table.
 #[inline]
 pub fn write_vbar_el1(value: u64) {
     VBAR_EL1.set(value);
+    // ISB required: without it, an exception taken immediately after the MSR
+    // may still dispatch through the old (or undefined) vector table.
+    crate::cpu::isb();
 }
 
 /// Read SP_EL0

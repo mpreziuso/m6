@@ -14,8 +14,8 @@ use crate::kernel_loader::LoadedKernel;
 use core::ptr;
 use m6_paging::arch::arm64::{L0Table, PgTable, map_range};
 use m6_paging::{
-    MapAttributes, MemoryType, PAGE_SIZE, PageAllocator, PhysMemoryRegion, PtePermissions, TPA,
-    VirtMemoryRegion,
+    MapAttributes, MemoryType, NoOpInvalidator, PAGE_SIZE, PageAllocator, PhysMemoryRegion,
+    PtePermissions, TPA, VirtMemoryRegion,
 };
 
 /// Result of page table setup containing both TTBR0 and TTBR1 addresses
@@ -178,6 +178,7 @@ fn map_kernel_segments(
             ttbr1_l0,
             MapAttributes::new(phys_region, virt_region, MemoryType::Normal, perms),
             allocator,
+            &NoOpInvalidator,
         ) {
             log::error!("Failed to map kernel segment {}: {:?}", i, e);
             return None;
@@ -220,6 +221,7 @@ fn map_kernel_stack(
             PtePermissions::rw(false), // Kernel-only, RW (no execute for stack)
         ),
         allocator,
+        &NoOpInvalidator,
     ) {
         log::error!("Failed to map kernel stack: {:?}", e);
         return None;
@@ -256,6 +258,7 @@ fn map_mmio_regions(
             PtePermissions::rw(false), // Kernel-only, RW, no execute
         ),
         allocator,
+        &NoOpInvalidator,
     ) {
         log::error!("Failed to map GIC: {:?}", e);
         return None;
@@ -281,6 +284,7 @@ fn map_mmio_regions(
             PtePermissions::rw(false), // Kernel-only, RW, no execute
         ),
         allocator,
+        &NoOpInvalidator,
     ) {
         log::error!("Failed to map UART: {:?}", e);
         return None;
@@ -351,6 +355,7 @@ pub fn map_framebuffer(
             PtePermissions::rw(false),      // Kernel-only, RW, no execute
         ),
         allocator,
+        &NoOpInvalidator,
     ) {
         log::error!("Failed to map framebuffer: {:?}", e);
         return None;
@@ -433,6 +438,7 @@ fn map_direct_physmap(
                         PtePermissions::rw(false),
                     ),
                     allocator,
+                    &NoOpInvalidator,
                 ) {
                     log::error!(
                         "Failed to map Direct PhysMap block at {:#x}: {:?}",
@@ -471,6 +477,7 @@ fn map_direct_physmap(
                     PtePermissions::rw(false),
                 ),
                 allocator,
+                &NoOpInvalidator,
             ) {
                 log::error!("Failed to map Direct PhysMap chunk {}: {:?}", chunk, e);
                 return None;
@@ -539,6 +546,7 @@ fn setup_ttbr0_identity(
                     &mut ttbr0_l0,
                     MapAttributes::new(phys_region, virt_region, mem_type, perms),
                     allocator,
+                    &NoOpInvalidator,
                 ) {
                     log::error!("Failed to map TTBR0 block at {:#x}: {:?}", block_phys, e);
                     return None;
@@ -567,6 +575,7 @@ fn setup_ttbr0_identity(
                 &mut ttbr0_l0,
                 MapAttributes::new(phys_region, virt_region, mem_type, perms),
                 allocator,
+                &NoOpInvalidator,
             ) {
                 log::error!("Failed to map TTBR0 chunk {}: {:?}", chunk, e);
                 return None;

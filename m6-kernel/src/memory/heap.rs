@@ -9,8 +9,8 @@ use m6_common::memory::page;
 use m6_paging::arch::arm64::mapping::map_page;
 use m6_paging::arch::arm64::tables::{L0Table, PgTable};
 use m6_paging::{
-    MapAttributes, MemoryType, PA, PageAllocator, PhysMemoryRegion, PtePermissions, TPA, VA,
-    VirtMemoryRegion,
+    MapAttributes, MemoryType, NoOpInvalidator, PA, PageAllocator, PhysMemoryRegion,
+    PtePermissions, TPA, VA, VirtMemoryRegion,
 };
 
 use super::frame::{alloc_frame_zeroed, free_frame};
@@ -151,12 +151,16 @@ impl KernelHeap {
             );
 
             // Map the page
+            // NoOpInvalidator: these are fresh mappings into empty PTE slots
+            // within the live kernel page tables. The manual TLBI below ensures
+            // the new mapping is visible before use.
             if let Err(_e) = map_page(
                 &mut l0,
                 PA::new(phys),
                 VA::new(virt),
                 &attrs,
                 &mut allocator,
+                &NoOpInvalidator,
             ) {
                 // Failed to map - free the frame we just allocated
                 free_frame(phys);

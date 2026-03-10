@@ -41,7 +41,7 @@ pub mod arch;
 pub use address::{Address, MemKind, PA, Physical, TPA, TVA, VA, Virtual};
 pub use permissions::{MemoryType, PtePermissions};
 pub use region::{MemoryRegion, PhysMemoryRegion, VirtMemoryRegion};
-pub use traits::{MapAttributes, MapError, PageAllocator};
+pub use traits::{MapAttributes, MapError, NoOpInvalidator, PageAllocator, TLBInvalidator};
 
 /// Page size constant (4KB)
 pub const PAGE_SIZE: usize = 4096;
