@@ -32,8 +32,8 @@ pub mod translate;
 
 // Re-export public API
 pub use asid::{
-    AllocatedAsid, allocate_asid, current_generation, init_asid_allocator, is_asid_valid,
-    refresh_asid_if_needed,
+    AllocatedAsid, allocate_asid, current_generation, ensure_asid_valid, init_asid_allocator,
+    is_asid_valid, refresh_asid_if_needed,
 };
 pub use frame::{
     alloc_frame, alloc_frame_zeroed, alloc_frames, alloc_frames_aligned, alloc_frames_zeroed,

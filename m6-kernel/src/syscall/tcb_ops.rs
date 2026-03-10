@@ -20,6 +20,7 @@ use crate::sched;
 
 use super::SyscallArgs;
 use super::error::{SyscallError, SyscallResult};
+use super::user_ptr;
 
 // -- User address space boundary
 const USER_SPACE_MAX: u64 = 0x0000_FFFF_FFFF_FFFF;
@@ -167,12 +168,15 @@ pub fn handle_tcb_write_registers(args: &SyscallArgs, _ctx: &ExceptionContext) -
         return Err(SyscallError::Range);
     }
 
+    // Probe user buffer for read accessibility before dereferencing.
+    // An unmapped page would otherwise trigger a data abort at EL1.
+    user_ptr::probe_user_buffer_read(buffer_addr, (count as usize) * size_of::<u64>())?;
+
     // Look up TCB capability with WRITE right
     let tcb_cap = ipc::lookup_cap(tcb_cptr, ObjectType::TCB, CapRights::WRITE)?;
 
-    // Read register values from user buffer
-    // SAFETY: We've validated the buffer is in user space. Page faults will be
-    // handled by the exception system.
+    // SAFETY: All pages in the user buffer were verified mapped and
+    // readable by AT S1E0R above.
     let buffer = buffer_addr as *const u64;
 
     // Check TCB state first (must be Inactive or Suspended to write registers)
@@ -184,7 +188,7 @@ pub fn handle_tcb_write_registers(args: &SyscallArgs, _ctx: &ExceptionContext) -
 
     // Validate PC value if we're going to write it (register index 32)
     if count > 32 {
-        // SAFETY: Buffer address validated above, within user space.
+        // SAFETY: All pages in user buffer verified readable above.
         let pc_value = unsafe { buffer.add(32).read_volatile() };
         if pc_value > USER_SPACE_MAX {
             return Err(SyscallError::Range);
@@ -195,7 +199,7 @@ pub fn handle_tcb_write_registers(args: &SyscallArgs, _ctx: &ExceptionContext) -
     let _: () = object_table::with_tcb_mut(tcb_cap.obj_ref, |tcb_full| {
         // Copy registers from user buffer
         for i in 0..count as usize {
-            // SAFETY: Buffer address validated above, within user space.
+            // SAFETY: All pages in user buffer verified readable above.
             let value = unsafe { buffer.add(i).read_volatile() };
 
             if i < 31 {
@@ -253,6 +257,10 @@ pub fn handle_tcb_read_registers(args: &SyscallArgs, _ctx: &ExceptionContext) ->
         return Err(SyscallError::Range);
     }
 
+    // Probe user buffer for write accessibility before dereferencing.
+    // An unmapped page would otherwise trigger a data abort at EL1.
+    user_ptr::probe_user_buffer_write(buffer_addr, (count as usize) * size_of::<u64>())?;
+
     // Look up TCB capability with READ right
     let tcb_cap = ipc::lookup_cap(tcb_cptr, ObjectType::TCB, CapRights::READ)?;
 
@@ -281,7 +289,7 @@ pub fn handle_tcb_read_registers(args: &SyscallArgs, _ctx: &ExceptionContext) ->
                 0
             };
 
-            // SAFETY: Buffer address validated above, within user space.
+            // SAFETY: All pages in user buffer verified writable above.
             unsafe { buffer.add(i).write_volatile(value) };
         }
     });

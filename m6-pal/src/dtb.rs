@@ -31,7 +31,7 @@ pub enum DtbError {
 }
 
 /// Storage for parsed DTB (kept after parsing for device manager access)
-static PARSED_DTB: OnceCell<&'static Fdt<'static>> = OnceCell::new();
+static PARSED_DTB: OnceCell<Fdt<'static>> = OnceCell::new();
 
 /// Storage for platform name (copied from DTB due to lifetime constraints)
 static DTB_PLATFORM_NAME: OnceCell<[u8; 128]> = OnceCell::new();
@@ -59,23 +59,24 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
     // Parse DTB with fdt crate
     let fdt = Fdt::new(dtb_slice).map_err(|_| DtbError::InvalidDtb)?;
 
-    // Store parsed FDT for later access (e.g., by device manager)
-    // SAFETY: We're storing a reference to the FDT which lives in the bootloader's
-    // memory that is never deallocated. The 'static lifetime is appropriate here.
-    let _ = unsafe {
-        let fdt_static: &'static Fdt<'static> = core::mem::transmute(&fdt);
-        PARSED_DTB.set(fdt_static)
-    };
+    // Store parsed FDT value for later access (e.g., by device manager).
+    // SAFETY: The DTB data lives in the kernel's direct physical map which is
+    // never deallocated, so the underlying &[u8] is genuinely 'static.
+    let fdt_static: Fdt<'static> = unsafe { core::mem::transmute(fdt) };
+    let _ = PARSED_DTB.set(fdt_static);
+
+    // Get a reference back from static storage for the remainder of this function
+    let fdt = PARSED_DTB.get().unwrap();
 
     // Extract configuration from DTB
-    let (gic_dist, gic_cpu, gic_redist, gic_version) = parse_gic(&fdt)?;
-    let (uart_base, uart_type) = parse_uart(&fdt)?;
-    let (ram_base, ram_size) = parse_memory(&fdt);
-    let timer_irq = parse_timer(&fdt)?;
-    let name = parse_platform_name(&fdt)?;
-    let (smmus, smmu_count) = parse_smmus(&fdt);
-    let cpu_count = parse_cpu_count(&fdt);
-    let psci_method = parse_psci_method(&fdt);
+    let (gic_dist, gic_cpu, gic_redist, gic_version) = parse_gic(fdt)?;
+    let (uart_base, uart_type) = parse_uart(fdt)?;
+    let (ram_base, ram_size) = parse_memory(fdt);
+    let timer_irq = parse_timer(fdt)?;
+    let name = parse_platform_name(fdt)?;
+    let (smmus, smmu_count) = parse_smmus(fdt);
+    let cpu_count = parse_cpu_count(fdt);
+    let psci_method = parse_psci_method(fdt);
 
     Ok(DtbPlatform {
         name,
@@ -97,7 +98,7 @@ pub fn parse_dtb(boot_info: &'static BootInfo) -> Result<DtbPlatform, DtbError> 
 
 /// Get the parsed DTB for later use (e.g., by device manager)
 pub fn get_parsed_dtb() -> Option<&'static Fdt<'static>> {
-    PARSED_DTB.get().copied()
+    PARSED_DTB.get()
 }
 
 /// Parse GIC distributor address from FDT

@@ -415,18 +415,13 @@ pub fn handle_unmap_frame(args: &SyscallArgs) -> SyscallResult {
     }
 
     // Get VSpace info
-    let (root_table, asid, is_active) = object_table::with_vspace(vspace_cap.obj_ref, |vspace| {
-        (vspace.root_table, vspace.asid, vspace.is_active)
+    let (root_table, asid) = object_table::with_vspace(vspace_cap.obj_ref, |vspace| {
+        (vspace.root_table, vspace.asid)
     })
     .ok_or(SyscallError::InvalidCap)?;
 
-    // Walk page tables and clear mapping
-    clear_mapping(root_table, vaddr)?;
-
-    // Issue TLB invalidation if VSpace is active
-    if is_active {
-        invalidate_tlb_entry(vaddr, asid.value());
-    }
+    // Walk page tables and clear mapping (includes BBM + TLBI)
+    clear_mapping(root_table, vaddr, asid.value())?;
 
     // Update VSpace mapped frames count
     object_table::with_vspace_mut(vspace_cap.obj_ref, |vspace| {
@@ -699,13 +694,17 @@ fn install_mapping(
 
 /// Clear a memory mapping from the page tables.
 ///
-/// Walks the page table hierarchy and clears the mapping.
+/// Implements the Break-Before-Make sequence required by the ARMv8
+/// architecture: invalidate the descriptor, DSB, TLBI, DSB, ISB.
+/// TLBI is issued unconditionally (even for inactive VSpaces) to
+/// prevent stale entries on other CPUs.
 ///
 /// # Arguments
 ///
 /// * `root_table` - Physical address of the L0 (root) page table
 /// * `vaddr` - Virtual address to unmap
-fn clear_mapping(root_table: PhysAddr, vaddr: u64) -> Result<(), SyscallError> {
+/// * `asid` - ASID of the address space (needed for targeted TLBI)
+fn clear_mapping(root_table: PhysAddr, vaddr: u64, asid: u16) -> Result<(), SyscallError> {
     let va = VA::new(vaddr);
 
     // Get L0 table from root physical address
@@ -753,9 +752,10 @@ fn clear_mapping(root_table: PhysAddr, vaddr: u64) -> Result<(), SyscallError> {
         log::debug!("UnmapFrame: cleared 4KB page at va={:#x}", vaddr);
     }
 
-    // Memory barriers to ensure visibility
+    // Break-Before-Make: after invalidating the descriptor, ensure the
+    // store is visible then flush the stale TLB entry on all CPUs.
     m6_arch::cpu::dsb_sy();
-    m6_arch::cpu::isb();
+    invalidate_tlb_entry(vaddr, asid);
 
     Ok(())
 }
@@ -912,6 +912,10 @@ pub fn handle_frame_write(args: &SyscallArgs) -> SyscallResult {
         return Err(SyscallError::Range);
     }
 
+    // Probe user source buffer for read accessibility before copying.
+    // An unmapped page would otherwise trigger a data abort at EL1.
+    super::user_ptr::probe_user_buffer_read(src_addr, len)?;
+
     // Look up frame capability with WRITE right
     let frame_cap = ipc::lookup_cap(frame_cptr, ObjectType::Frame, CapRights::WRITE)?;
 
@@ -938,8 +942,9 @@ pub fn handle_frame_write(args: &SyscallArgs) -> SyscallResult {
     let dest_ptr = (kernel_va + offset as u64) as *mut u8;
 
     // Copy from userspace
-    // SAFETY: We've validated the source is in user space and the destination
-    // is within a valid frame. The kernel has all physical memory mapped.
+    // SAFETY: All pages in [src_addr, src_addr+len) were verified mapped and
+    // readable by AT S1E0R above. The destination is within a valid frame and
+    // the kernel has all physical memory mapped.
     unsafe {
         let src_ptr = src_addr as *const u8;
         core::ptr::copy_nonoverlapping(src_ptr, dest_ptr, len);

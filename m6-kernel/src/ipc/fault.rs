@@ -169,53 +169,25 @@ pub fn deliver_fault(
     // This allows the handler to identify which thread faulted
     let badge = tcb_ref.index() as u64;
 
-    // -- Phase 1: Determine action inside endpoint lock (no TCB access)
-    use m6_cap::objects::EndpointState;
-
+    // -- Phase 1: Atomic dequeue (same pattern as endpoint.rs)
     enum Action {
         DeliverTo(ObjectRef),
-        QueueInSendQueue,
+        BlockInSendQueue { old_tail: ObjectRef },
     }
 
-    let action = object_table::with_endpoint_mut(fault_ep, |endpoint| match endpoint.state {
-        EndpointState::RecvQueue => {
-            // Handler is waiting — grab the head reference only.
-            // Actual dequeue (TCB link updates) happens outside the lock.
-            let handler_ref = endpoint.queue_head;
-            debug_assert!(handler_ref.is_valid(), "RecvQueue but empty queue");
-            Action::DeliverTo(handler_ref)
+    let action = match object_table::ipc_dequeue_recv(fault_ep)
+        .unwrap_or(object_table::IpcDequeueResult::NoneQueued { old_tail: ObjectRef::NULL })
+    {
+        object_table::IpcDequeueResult::Dequeued(handler_ref) => Action::DeliverTo(handler_ref),
+        object_table::IpcDequeueResult::NoneQueued { old_tail } => {
+            Action::BlockInSendQueue { old_tail }
         }
-        EndpointState::Idle | EndpointState::SendQueue => Action::QueueInSendQueue,
-    })
-    .unwrap_or(Action::QueueInSendQueue);
+    };
 
-    // -- Phase 2: Execute action OUTSIDE the endpoint lock
+    // -- Phase 2: Execute action outside the endpoint lock
     match action {
         Action::DeliverTo(handler_ref) => {
-            // Manual dequeue: get next from handler TCB, clear links
-            let next_in_queue: ObjectRef = object_table::with_tcb_mut(handler_ref, |tcb| {
-                let next = tcb.ipc_next;
-                tcb.clear_ipc_links();
-                next
-            });
-
-            // Update endpoint queue state (brief re-acquisition)
-            object_table::with_endpoint_mut(fault_ep, |endpoint| {
-                endpoint.queue_head = next_in_queue;
-                if !next_in_queue.is_valid() {
-                    endpoint.queue_tail = ObjectRef::NULL;
-                    endpoint.state = EndpointState::Idle;
-                }
-            });
-
-            // Clear prev link of new head
-            if next_in_queue.is_valid() {
-                let _: () = object_table::with_tcb_mut(next_in_queue, |new_head| {
-                    new_head.ipc_prev = ObjectRef::NULL;
-                });
-            }
-
-            // Transfer fault message to handler
+            // Handler was atomically dequeued — deliver directly
             transfer_fault_message(handler_ref, &ipc_msg, badge);
 
             // Give handler the reply capability
@@ -228,16 +200,14 @@ pub fn deliver_fault(
                 tcb.tcb.state = ThreadState::BlockedOnReply;
                 tcb.ipc_blocked_on = ObjectRef::NULL;
             });
-
-            // Remove faulting thread from run queue
             crate::sched::remove_task(tcb_ref);
 
             // Wake handler
             wake_handler(handler_ref);
         }
 
-        Action::QueueInSendQueue => {
-            // Store message in faulting thread's TCB
+        Action::BlockInSendQueue { old_tail } => {
+            // Store message and block faulting thread
             let _: () = object_table::with_tcb_mut(tcb_ref, |tcb| {
                 tcb.ipc_message = ipc_msg.regs;
                 tcb.ipc_badge = badge;
@@ -245,11 +215,7 @@ pub fn deliver_fault(
                 tcb.ipc_blocked_on = fault_ep;
             });
 
-            // Inline ipc_enqueue: each step is a separate lock acquisition
-            let old_tail =
-                object_table::with_endpoint_mut(fault_ep, |endpoint| endpoint.queue_tail)
-                    .unwrap_or(ObjectRef::NULL);
-
+            // Set up TCB queue links using old_tail captured atomically
             let _: () = object_table::with_tcb_mut(tcb_ref, |tcb| {
                 tcb.ipc_prev = old_tail;
                 tcb.ipc_next = ObjectRef::NULL;
@@ -261,16 +227,29 @@ pub fn deliver_fault(
                 });
             }
 
-            object_table::with_endpoint_mut(fault_ep, |endpoint| {
-                if !old_tail.is_valid() {
-                    endpoint.queue_head = tcb_ref;
-                }
-                endpoint.queue_tail = tcb_ref;
-                endpoint.state = EndpointState::SendQueue;
-            });
+            // Atomic commit with recovery (handles concurrent receiver arrival)
+            let commit = object_table::ipc_send_commit(fault_ep, tcb_ref, old_tail);
 
-            // Remove from run queue
-            crate::sched::remove_task(tcb_ref);
+            if let Some(object_table::IpcSendCommitResult::Recovery(info)) = commit {
+                // A handler arrived concurrently — deliver directly
+                transfer_fault_message(info.receiver_ref, &ipc_msg, badge);
+
+                let _: () = object_table::with_tcb_mut(info.receiver_ref, |tcb| {
+                    tcb.tcb.caller = reply_ref;
+                });
+
+                // Transition faulting thread from BlockedOnSend to BlockedOnReply
+                let _: () = object_table::with_tcb_mut(tcb_ref, |tcb| {
+                    tcb.tcb.state = ThreadState::BlockedOnReply;
+                    tcb.ipc_blocked_on = ObjectRef::NULL;
+                    tcb.clear_ipc_state();
+                });
+
+                wake_handler(info.receiver_ref);
+            } else {
+                // Successfully enqueued — remove from run queue
+                crate::sched::remove_task(tcb_ref);
+            }
         }
     }
 
