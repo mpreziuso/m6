@@ -73,6 +73,19 @@ pub struct TcbFull {
 
     /// Async work context (signal_work, kernel_work futures).
     pub task_ctx: TaskContext,
+
+    // -- Restricted mode (Starnix)
+
+    /// Physical address of the restricted state frame (0 = not bound).
+    pub restricted_state_phys: u64,
+    /// Whether this thread is currently executing in restricted mode.
+    pub restricted_mode: bool,
+    /// Saved normal-mode VSpace ref (restored on restricted exit).
+    pub restricted_normal_vspace: ObjectRef,
+    /// Saved normal-mode context (Starnix registers, saved on restricted enter).
+    pub restricted_normal_ctx: ExceptionContext,
+    /// Kick-pending flag: set by another thread to force restricted exit.
+    pub restricted_kick_pending: bool,
 }
 
 impl TcbFull {
@@ -104,6 +117,13 @@ impl TcbFull {
             ipc_msg_pending: false,
             // Async work context
             task_ctx: TaskContext::new(),
+            // Restricted mode (all zeroed = not bound, not active)
+            restricted_state_phys: 0,
+            restricted_mode: false,
+            restricted_normal_vspace: ObjectRef::NULL,
+            // SAFETY: ExceptionContext is repr(C) with only integer fields.
+            restricted_normal_ctx: unsafe { core::mem::zeroed() },
+            restricted_kick_pending: false,
         }
     }
 
@@ -144,6 +164,12 @@ impl TcbFull {
             (*tcb).ipc_msg_pending = false;
             // Async work context
             (*tcb).task_ctx = TaskContext::new();
+            // Restricted mode (already zeroed, but be explicit for non-zero defaults)
+            (*tcb).restricted_state_phys = 0;
+            (*tcb).restricted_mode = false;
+            (*tcb).restricted_normal_vspace = ObjectRef::NULL;
+            // restricted_normal_ctx: already zeroed by alloc_zeroed
+            (*tcb).restricted_kick_pending = false;
         }
 
         NonNull::new(tcb)

@@ -26,7 +26,7 @@ use crate::cap::tcb_storage::TcbFull;
 use crate::task::TaskId;
 
 pub mod balance;
-mod context;
+pub(crate) mod context;
 pub mod dispatch;
 pub mod eevdf;
 pub mod idle;
