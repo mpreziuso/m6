@@ -14,8 +14,8 @@ use std::{String, Vec, print, println, thread};
 
 use m6_cap::ObjectType;
 use m6_system::{invoke, slot_to_cptr};
-use m6_system::process::{MapRights, SpawnConfig, ensure_child_page_tables, map_data_to_child,
-                          spawn_process};
+use m6_system::process::{MapRights, SpawnConfig, ensure_child_page_tables,
+                          map_data_to_child, spawn_process};
 
 // -- Constants
 
@@ -669,6 +669,7 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
 
     // 5. Map argv page into child's VSpace
     if !argv_data.is_empty() {
+        let mut pt_tracker = result.page_table_tracker;
         let _ = ensure_child_page_tables(
             0,
             CNODE_RADIX,
@@ -677,6 +678,7 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
             &mut ctx.next_slot,
             ARGS_PAGE_ADDR,
             ARGS_PAGE_ADDR + 4096,
+            &mut pt_tracker,
         );
         let _ = map_data_to_child(
             0,

@@ -38,8 +38,8 @@ mod io;
 #[path = "../logger.rs"]
 mod logger;
 
-use m6_syscall::invoke::{ipc_set_send_caps, recv, reply_recv, sched_yield, signal};
-use m6_syscall::slot_to_cptr;
+use m6_syscall::invoke::{cap_delete, cap_mint, ipc_set_send_caps, recv, reply_recv, sched_yield, signal};
+use m6_syscall::{MintArgs, slot_to_cptr};
 
 use boot_info::DevMgrBootInfo;
 use registry::{DeviceState, Registry};
@@ -1422,42 +1422,65 @@ fn spawn_hid_driver(registry: &mut Registry, usb_host_ep_slot: u64) -> Result<u6
 
 /// Handle FAT32 filesystem service ENSURE request.
 fn handle_fat32_ensure(registry: &mut Registry) -> u64 {
-    if let Some(endpoint_slot) = registry.fat32_ep_slot {
-        // SAFETY: _start has initialised BOOT_INFO
-        let boot_info = unsafe { get_boot_info() };
-        let endpoint_cptr = slot_to_cptr(endpoint_slot, boot_info.cnode_radix);
-        // SAFETY: IPC buffer is mapped at the fixed ABI address
-        unsafe {
-            ipc_set_send_caps(&[endpoint_cptr]);
-        }
-        return ipc::response::OK;
-    }
+    // SAFETY: _start has initialised BOOT_INFO
+    let boot_info = unsafe { get_boot_info() };
+    let cnode_radix = boot_info.cnode_radix;
 
-    let nvme_ep_slot = match find_nvme_driver(registry) {
-        Some(slot) => slot,
-        None => {
-            log::info!("No NVMe driver available for FAT32");
-            return ipc::response::ERR_NO_DRIVER;
+    let fat32_ep_slot = if let Some(slot) = registry.fat32_ep_slot {
+        slot
+    } else {
+        let nvme_ep_slot = match find_nvme_driver(registry) {
+            Some(slot) => slot,
+            None => {
+                log::info!("No NVMe driver available for FAT32");
+                return ipc::response::ERR_NO_DRIVER;
+            }
+        };
+        match spawn_fat32_from_nvme(registry, nvme_ep_slot) {
+            Ok(slot) => {
+                registry.fat32_ep_slot = Some(slot);
+                slot
+            }
+            Err(e) => {
+                log::error!("Failed to spawn FAT32 service: {}", e);
+                return ipc::response::ERR_SPAWN_FAILED;
+            }
         }
     };
 
-    match spawn_fat32_from_nvme(registry, nvme_ep_slot) {
-        Ok(endpoint_slot) => {
-            registry.fat32_ep_slot = Some(endpoint_slot);
-            // SAFETY: _start has initialised BOOT_INFO
-            let boot_info = unsafe { get_boot_info() };
-            let endpoint_cptr = slot_to_cptr(endpoint_slot, boot_info.cnode_radix);
-            // SAFETY: IPC buffer is mapped at the fixed ABI address
-            unsafe {
-                ipc_set_send_caps(&[endpoint_cptr]);
-            }
-            ipc::response::OK
-        }
-        Err(e) => {
-            log::error!("Failed to spawn FAT32 service: {}", e);
-            ipc::response::ERR_SPAWN_FAILED
-        }
+    // Release the previous temp slot so we can reuse it (client's copy remains valid).
+    if let Some(prev_slot) = registry.fat32_mint_slot.take() {
+        let root_cnode_cptr = slot_to_cptr(slots::ROOT_CNODE, cnode_radix);
+        let _ = cap_delete(root_cnode_cptr, prev_slot, 0);
     }
+
+    // Allocate a temp slot and mint a badged copy of the FAT32 endpoint into it.
+    let mint_slot = registry.alloc_slot();
+    let badge = registry.fat32_client_badge;
+    registry.fat32_client_badge += 1;
+
+    let root_cnode_cptr = slot_to_cptr(slots::ROOT_CNODE, cnode_radix);
+
+    // SAFETY: IPC buffer is mapped at the fixed ABI address; no concurrent access.
+    unsafe {
+        let ipc_buf = m6_syscall::IpcBuffer::get_mut();
+        ipc_buf.mint_args = MintArgs::new(0, 0, 0xFF, Some(badge));
+    }
+
+    if cap_mint(root_cnode_cptr, mint_slot, root_cnode_cptr, fat32_ep_slot).is_err() {
+        log::error!("cap_mint failed for FAT32 endpoint badge {}", badge);
+        return ipc::response::ERR_SPAWN_FAILED;
+    }
+
+    registry.fat32_mint_slot = Some(mint_slot);
+    let mint_cptr = slot_to_cptr(mint_slot, cnode_radix);
+
+    // SAFETY: IPC buffer is mapped at the fixed ABI address.
+    unsafe {
+        ipc_set_send_caps(&[mint_cptr]);
+    }
+
+    ipc::response::OK
 }
 
 /// Find a running NVMe driver and return its endpoint slot.

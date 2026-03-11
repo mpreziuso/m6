@@ -334,6 +334,8 @@ fn spawn_device_mgr(boot_info: &UserBootInfo, mem_ep_slot: u64, next_slot: &mut 
     *next_slot = result.next_free_slot;
 
     // Ensure page tables exist for our mapping regions
+    let mut pt_tracker = result.page_table_tracker;
+
     // Boot info region (at 256MB)
     if process::ensure_child_page_tables(
         Slot::RootCNode as u64,
@@ -343,6 +345,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo, mem_ep_slot: u64, next_slot: &mut 
         next_slot,
         DEVMGR_BOOT_INFO_ADDR,
         DEVMGR_DTB_ADDR + boot_info.dtb_size,
+        &mut pt_tracker,
     )
     .is_err()
     {
@@ -360,6 +363,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo, mem_ep_slot: u64, next_slot: &mut 
             next_slot,
             DEVMGR_INITRD_ADDR,
             DEVMGR_INITRD_ADDR + boot_info.initrd_size,
+            &mut pt_tracker,
         )
         .is_err()
     {
@@ -581,6 +585,7 @@ fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64, registry_slot: u64
     *next_slot = result.next_free_slot;
 
     // Ensure page tables for the initrd region in shell's VSpace
+    let mut pt_tracker = result.page_table_tracker;
     if process::ensure_child_page_tables(
         Slot::RootCNode as u64,
         radix,
@@ -589,6 +594,7 @@ fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64, registry_slot: u64
         next_slot,
         m6_system::SHELL_INITRD_ADDR,
         m6_system::SHELL_INITRD_ADDR + boot_info.initrd_size,
+        &mut pt_tracker,
     )
     .is_err()
     {

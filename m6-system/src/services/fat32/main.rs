@@ -397,7 +397,7 @@ fn handle_read(
     // Read into buffer
     let read_len = max_bytes.min(4096);
     let buf = unsafe {
-        let ptr = PATH_VADDR as *mut u8;
+        let ptr = DATA_VADDR as *mut u8;
         core::slice::from_raw_parts_mut(ptr, read_len)
     };
 
@@ -431,7 +431,7 @@ fn handle_write(
     // Read data from buffer
     let write_len = byte_count.min(4096);
     let buf = unsafe {
-        let ptr = PATH_VADDR as *const u8;
+        let ptr = DATA_VADDR as *const u8;
         core::slice::from_raw_parts(ptr, write_len)
     };
 

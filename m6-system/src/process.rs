@@ -136,6 +136,8 @@ pub struct SpawnResult {
     pub asid: u64,
     /// Next free slot after allocation
     pub next_free_slot: u64,
+    /// Page tables already installed by the ELF loader for this VSpace
+    pub page_table_tracker: PageTableTracker,
 }
 
 /// VSpace manager for building page tables and mapping frames
@@ -216,6 +218,18 @@ impl VSpaceBuilder {
             self.l3_regions[self.l3_count] = addr;
             self.l3_count += 1;
         }
+    }
+
+    /// Export installed page-table regions into a PageTableTracker.
+    fn to_tracker(&self) -> PageTableTracker {
+        let mut t = PageTableTracker::new();
+        t.l1_regions[..self.l1_count].copy_from_slice(&self.l1_regions[..self.l1_count]);
+        t.l1_count = self.l1_count;
+        t.l2_regions[..self.l2_count].copy_from_slice(&self.l2_regions[..self.l2_count]);
+        t.l2_count = self.l2_count;
+        t.l3_regions[..self.l3_count].copy_from_slice(&self.l3_regions[..self.l3_count]);
+        t.l3_count = self.l3_count;
+        t
     }
 
     /// Convert a slot index to a CPtr
@@ -552,7 +566,75 @@ pub fn map_data_to_child(
     Ok(())
 }
 
+/// Tracks which page tables have already been installed in a VSpace, preventing
+/// duplicate retype/map calls across multiple `ensure_child_page_tables` invocations
+/// for the same VSpace.
+pub struct PageTableTracker {
+    l1_regions: [u64; 4],
+    l1_count: usize,
+    l2_regions: [u64; 8],
+    l2_count: usize,
+    l3_regions: [u64; 32],
+    l3_count: usize,
+}
+
+impl PageTableTracker {
+    pub const fn new() -> Self {
+        Self {
+            l1_regions: [u64::MAX; 4],
+            l1_count: 0,
+            l2_regions: [u64::MAX; 8],
+            l2_count: 0,
+            l3_regions: [u64::MAX; 32],
+            l3_count: 0,
+        }
+    }
+
+    fn has_l1(&self, base: u64) -> bool {
+        self.l1_regions[..self.l1_count].contains(&base)
+    }
+
+    fn has_l2(&self, base: u64) -> bool {
+        self.l2_regions[..self.l2_count].contains(&base)
+    }
+
+    fn has_l3(&self, base: u64) -> bool {
+        self.l3_regions[..self.l3_count].contains(&base)
+    }
+
+    fn add_l1(&mut self, base: u64) {
+        if self.l1_count < self.l1_regions.len() {
+            self.l1_regions[self.l1_count] = base;
+            self.l1_count += 1;
+        }
+    }
+
+    fn add_l2(&mut self, base: u64) {
+        if self.l2_count < self.l2_regions.len() {
+            self.l2_regions[self.l2_count] = base;
+            self.l2_count += 1;
+        }
+    }
+
+    fn add_l3(&mut self, base: u64) {
+        if self.l3_count < self.l3_regions.len() {
+            self.l3_regions[self.l3_count] = base;
+            self.l3_count += 1;
+        }
+    }
+}
+
+impl Default for PageTableTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Ensure page tables exist for an address range in a child's VSpace.
+///
+/// The `tracker` must be shared across all calls for the same VSpace to avoid
+/// retying already-installed tables (which would waste untyped memory and CNode slots).
+#[allow(clippy::too_many_arguments)]
 pub fn ensure_child_page_tables(
     root_cnode: u64,
     cnode_radix: u8,
@@ -561,9 +643,8 @@ pub fn ensure_child_page_tables(
     next_free_slot: &mut u64,
     vaddr_start: u64,
     vaddr_end: u64,
+    tracker: &mut PageTableTracker,
 ) -> Result<(), SpawnError> {
-    // This is a simplified version - we create page tables for each level
-    // In a real implementation, we'd track which tables already exist
     let cptr = |slot: u64| slot_to_cptr(slot, cnode_radix);
 
     const L1_SIZE: u64 = 512 * 1024 * 1024 * 1024; // 512GB
@@ -574,35 +655,46 @@ pub fn ensure_child_page_tables(
     let l2_base = vaddr_start & !(L2_SIZE - 1);
     let l3_base = vaddr_start & !(L3_SIZE - 1);
 
-    // Create L1 table
-    let l1_slot = *next_free_slot;
-    *next_free_slot += 1;
-    retype(cptr(ram_untyped), 5, 0, cptr(root_cnode), l1_slot, 1)
-        .map_err(SpawnError::RetypeFailed)?;
-    let _ = map_page_table(cptr(vspace_slot), cptr(l1_slot), l1_base, 1);
+    if !tracker.has_l1(l1_base) {
+        let slot = *next_free_slot;
+        *next_free_slot += 1;
+        retype(cptr(ram_untyped), 5, 0, cptr(root_cnode), slot, 1)
+            .map_err(SpawnError::RetypeFailed)?;
+        map_page_table(cptr(vspace_slot), cptr(slot), l1_base, 1)
+            .map_err(SpawnError::PageTableMapFailed)?;
+        tracker.add_l1(l1_base);
+    }
 
-    // Create L2 table
-    let l2_slot = *next_free_slot;
-    *next_free_slot += 1;
-    retype(cptr(ram_untyped), 6, 0, cptr(root_cnode), l2_slot, 1)
-        .map_err(SpawnError::RetypeFailed)?;
-    let _ = map_page_table(cptr(vspace_slot), cptr(l2_slot), l2_base, 2);
+    if !tracker.has_l2(l2_base) {
+        let slot = *next_free_slot;
+        *next_free_slot += 1;
+        retype(cptr(ram_untyped), 6, 0, cptr(root_cnode), slot, 1)
+            .map_err(SpawnError::RetypeFailed)?;
+        map_page_table(cptr(vspace_slot), cptr(slot), l2_base, 2)
+            .map_err(SpawnError::PageTableMapFailed)?;
+        tracker.add_l2(l2_base);
+    }
 
-    // Create L3 table
-    let l3_slot = *next_free_slot;
-    *next_free_slot += 1;
-    retype(cptr(ram_untyped), 7, 0, cptr(root_cnode), l3_slot, 1)
-        .map_err(SpawnError::RetypeFailed)?;
-    let _ = map_page_table(cptr(vspace_slot), cptr(l3_slot), l3_base, 3);
+    if !tracker.has_l3(l3_base) {
+        let slot = *next_free_slot;
+        *next_free_slot += 1;
+        retype(cptr(ram_untyped), 7, 0, cptr(root_cnode), slot, 1)
+            .map_err(SpawnError::RetypeFailed)?;
+        map_page_table(cptr(vspace_slot), cptr(slot), l3_base, 3)
+            .map_err(SpawnError::PageTableMapFailed)?;
+        tracker.add_l3(l3_base);
+    }
 
     // Handle case where end address is in a different L3 region
     let l3_end_base = (vaddr_end - 1) & !(L3_SIZE - 1);
-    if l3_end_base != l3_base {
-        let l3_slot2 = *next_free_slot;
+    if l3_end_base != l3_base && !tracker.has_l3(l3_end_base) {
+        let slot = *next_free_slot;
         *next_free_slot += 1;
-        retype(cptr(ram_untyped), 7, 0, cptr(root_cnode), l3_slot2, 1)
+        retype(cptr(ram_untyped), 7, 0, cptr(root_cnode), slot, 1)
             .map_err(SpawnError::RetypeFailed)?;
-        let _ = map_page_table(cptr(vspace_slot), cptr(l3_slot2), l3_end_base, 3);
+        map_page_table(cptr(vspace_slot), cptr(slot), l3_end_base, 3)
+            .map_err(SpawnError::PageTableMapFailed)?;
+        tracker.add_l3(l3_end_base);
     }
 
     Ok(())
@@ -742,6 +834,9 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
     const HEAP_BASE: u64 = 0x4000_0000;
     vspace_builder.ensure_page_tables(HEAP_BASE, HEAP_BASE + 0x1000)?;
 
+    // Capture installed page-table state before consuming the builder
+    let page_table_tracker = vspace_builder.to_tracker();
+
     // Update next free slot
     next_slot = vspace_builder.next_free_slot;
 
@@ -813,5 +908,6 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
         cspace_slot,
         asid,
         next_free_slot: next_slot,
+        page_table_tracker,
     })
 }
