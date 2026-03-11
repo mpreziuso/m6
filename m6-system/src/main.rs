@@ -19,13 +19,17 @@ use m6_cap::root_slots::Slot;
 use m6_common::boot::{MAX_DEVICE_REGIONS, MAX_UNTYPED_REGIONS};
 use m6_syscall::{
     IpcBuffer, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION, UserBootInfo,
-    invoke::{ipc_get_recv_caps, ipc_set_recv_slots, sched_yield},
+    invoke::{ipc_get_recv_caps, ipc_set_recv_slots, ipc_set_send_caps, recv, reply_recv,
+             sched_yield},
 };
 use process::{InitialCap, SpawnConfig};
 
 /// First free slot for dynamic allocation.
-/// Must be after all untyped slots: FirstUntyped (9) + MAX_UNTYPED_REGIONS.
+/// Must be after all untyped slots: FirstUntyped (12) + MAX_UNTYPED_REGIONS.
 const FIRST_FREE_SLOT: u64 = Slot::FirstUntyped as u64 + MAX_UNTYPED_REGIONS as u64 + 1;
+
+/// Memory server endpoint — receives requests from child processes that need more RAM.
+const MEM_SERVER_EP_SLOT: u64 = FIRST_FREE_SLOT;
 
 /// Entry point - called by kernel with UserBootInfo address in x0.
 ///
@@ -69,21 +73,35 @@ pub unsafe extern "C" fn _start() -> ! {
         boot_info.cpu_count
     );
 
-    // Spawn device-mgr
+    let radix = boot_info.cnode_radix as u8;
+    let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
+
+    // Create memory server endpoint first — child processes use it to request more RAM.
+    if let Err(e) = m6_syscall::invoke::retype(
+        cptr(Slot::FirstUntyped as u64),
+        m6_cap::ObjectType::Endpoint as u64,
+        0,
+        cptr(Slot::RootCNode as u64),
+        MEM_SERVER_EP_SLOT,
+        1,
+    ) {
+        log::error!("Failed to create memory server endpoint: {:#x}", e as u64);
+        loop {
+            sched_yield();
+        }
+    }
+
+    let mut next_slot = MEM_SERVER_EP_SLOT + 1;
+
     if boot_info.has_initrd() && boot_info.untyped_count > 0 {
-        spawn_device_mgr(boot_info);
+        spawn_device_mgr(boot_info, MEM_SERVER_EP_SLOT, &mut next_slot);
     } else {
         log::warn!("Cannot spawn device-mgr: missing initrd or untyped memory");
     }
 
     log::info!("Complete");
 
-    // Init has nothing more to do
-    // In a real system, init would block on a notification waiting for shutdown/reboot signals
-    // For now, we just yield forever to let the idle task run
-    loop {
-        sched_yield();
-    }
+    serve_memory_requests(boot_info, radix, next_slot)
 }
 
 /// Find a file in the initrd and return its data.
@@ -139,8 +157,53 @@ struct DevMgrBootInfoLayout {
     device_untyped_size_bits: [u8; MAX_DEVICE_UNTYPED],
 }
 
+/// Memory server: distributes fresh RAM untyped caps to requesting child processes.
+///
+/// Runs forever. Child processes Call() this endpoint when their current untyped
+/// is exhausted; init replies by transferring a copy of the next available untyped.
+fn serve_memory_requests(boot_info: &UserBootInfo, radix: u8, _next_slot: u64) -> ! {
+    let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
+    // Start distributing from the second untyped (index 1); index 0 was already
+    // shared with children via initial_caps at spawn time.
+    let mut next_ut_idx = 1usize;
+    let mut first = true;
+
+    loop {
+        let result = if first {
+            first = false;
+            recv(cptr(MEM_SERVER_EP_SLOT))
+        } else {
+            // Find the next RAM (non-device) untyped to hand out.
+            let ut_cptr = loop {
+                if next_ut_idx >= boot_info.untyped_count as usize {
+                    break None;
+                }
+                let i = next_ut_idx;
+                next_ut_idx += 1;
+                if !boot_info.untyped_is_device(i) {
+                    break Some(cptr(Slot::FirstUntyped as u64 + i as u64));
+                }
+            };
+
+            if let Some(ut) = ut_cptr {
+                // SAFETY: IPC buffer is always mapped for init.
+                unsafe { ipc_set_send_caps(&[ut]); }
+                reply_recv(cptr(MEM_SERVER_EP_SLOT), 0, 0, 0, 0)
+            } else {
+                log::warn!("Memory server: all RAM untypeds exhausted");
+                reply_recv(cptr(MEM_SERVER_EP_SLOT), 1, 0, 0, 0)
+            }
+        };
+
+        if result.is_err() {
+            first = true;
+            sched_yield();
+        }
+    }
+}
+
 /// Spawn the device manager process.
-fn spawn_device_mgr(boot_info: &UserBootInfo) {
+fn spawn_device_mgr(boot_info: &UserBootInfo, mem_ep_slot: u64, next_slot: &mut u64) {
     log::info!("Spawning device-mgr...");
 
     // Find device-mgr binary
@@ -169,7 +232,8 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
     }
 
     // Create registry endpoint for device-mgr
-    let registry_ep_slot = FIRST_FREE_SLOT;
+    let registry_ep_slot = *next_slot;
+    *next_slot += 1;
     let radix = boot_info.cnode_radix as u8;
     let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
 
@@ -215,6 +279,11 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         dst_slot: 16,
     };
     cap_idx += 1;
+    initial_caps_storage[cap_idx] = InitialCap {
+        src_slot: mem_ep_slot,
+        dst_slot: 17, // slots::MEM_SERVER_EP
+    };
+    cap_idx += 1;
 
     // Copy all available SMMU control capabilities (only as many as exist)
     let smmu_count = boot_info.smmu_count.min(4) as usize;
@@ -248,7 +317,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         cnode_radix: boot_info.cnode_radix as u8,
         ram_untyped: Slot::FirstUntyped as u64,
         asid_pool: Slot::AsidPool as u64,
-        next_free_slot: FIRST_FREE_SLOT + 1, // +1 for the endpoint we just created
+        next_free_slot: *next_slot,
         initial_caps,
         x0: DEVMGR_BOOT_INFO_ADDR, // Will point to boot info
         resume: false,             // Don't resume yet
@@ -262,9 +331,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         }
     };
 
-    let radix = boot_info.cnode_radix as u8;
-    let mut next_slot = result.next_free_slot;
-    let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
+    *next_slot = result.next_free_slot;
 
     // Ensure page tables exist for our mapping regions
     // Boot info region (at 256MB)
@@ -273,7 +340,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         radix,
         result.vspace_slot,
         Slot::FirstUntyped as u64,
-        &mut next_slot,
+        next_slot,
         DEVMGR_BOOT_INFO_ADDR,
         DEVMGR_DTB_ADDR + boot_info.dtb_size,
     )
@@ -290,7 +357,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             radix,
             result.vspace_slot,
             Slot::FirstUntyped as u64,
-            &mut next_slot,
+            next_slot,
             DEVMGR_INITRD_ADDR,
             DEVMGR_INITRD_ADDR + boot_info.initrd_size,
         )
@@ -335,7 +402,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
         radix,
         result.vspace_slot,
         Slot::FirstUntyped as u64,
-        &mut next_slot,
+        next_slot,
         DEVMGR_BOOT_INFO_ADDR,
         boot_info_bytes,
         process::MapRights::R,
@@ -358,7 +425,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             radix,
             result.vspace_slot,
             Slot::FirstUntyped as u64,
-            &mut next_slot,
+            next_slot,
             DEVMGR_DTB_ADDR,
             dtb_data,
             process::MapRights::R,
@@ -382,7 +449,7 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
             radix,
             result.vspace_slot,
             Slot::FirstUntyped as u64,
-            &mut next_slot,
+            next_slot,
             DEVMGR_INITRD_ADDR,
             initrd_data,
             process::MapRights::R,
@@ -404,10 +471,10 @@ fn spawn_device_mgr(boot_info: &UserBootInfo) {
 
     // Request UART driver via ENSURE
     // This triggers device-mgr to spawn the PL011 driver
-    request_uart_driver(registry_ep_slot, radix, &mut next_slot);
+    request_uart_driver(registry_ep_slot, radix, next_slot);
 
     // Spawn the shell with registry endpoint for HID access
-    spawn_shell(boot_info, &mut next_slot, registry_ep_slot);
+    spawn_shell(boot_info, next_slot, registry_ep_slot, mem_ep_slot);
 }
 
 /// Request the UART driver from device-mgr.
@@ -461,7 +528,7 @@ fn request_uart_driver(registry_ep: u64, radix: u8, next_slot: &mut u64) {
 }
 
 /// Spawn the shell with registry endpoint for HID access.
-fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64, registry_slot: u64) {
+fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64, registry_slot: u64, mem_ep_slot: u64) {
     let elf_data = match find_in_initrd(boot_info, "shell") {
         Some(data) => data,
         None => return,
@@ -472,11 +539,21 @@ fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64, registry_slot: u64
 
     // Shell's capability slots:
     // Slot 10: device-mgr registry endpoint (for ENSURE requests)
+    // Slot 13: AsidPool (for spawning child processes)
+    // Slot 14: memory server endpoint (for requesting additional RAM)
     // Slot 15: RAM untyped for heap allocation (m6-std expects untyped at slot 15)
     let initial_caps = [
         InitialCap {
             src_slot: registry_slot,
             dst_slot: 10,
+        },
+        InitialCap {
+            src_slot: Slot::AsidPool as u64,
+            dst_slot: 13,
+        },
+        InitialCap {
+            src_slot: mem_ep_slot,
+            dst_slot: 14,
         },
         InitialCap {
             src_slot: Slot::FirstUntyped as u64,
@@ -492,7 +569,7 @@ fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64, registry_slot: u64
         asid_pool: Slot::AsidPool as u64,
         next_free_slot: *next_slot,
         initial_caps: &initial_caps,
-        x0: radix as u64, // Pass CNode radix to shell
+        x0: boot_info.initrd_size, // shell reads initrd size from x0
         resume: false,
     };
 
@@ -502,9 +579,53 @@ fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64, registry_slot: u64
     };
 
     *next_slot = result.next_free_slot;
+
+    // Ensure page tables for the initrd region in shell's VSpace
+    if process::ensure_child_page_tables(
+        Slot::RootCNode as u64,
+        radix,
+        result.vspace_slot,
+        Slot::FirstUntyped as u64,
+        next_slot,
+        m6_system::SHELL_INITRD_ADDR,
+        m6_system::SHELL_INITRD_ADDR + boot_info.initrd_size,
+    )
+    .is_err()
+    {
+        log::error!("Failed to create page tables for shell initrd region");
+        return;
+    }
+
+    // SAFETY: kernel guarantees initrd is mapped at initrd_vaddr in init's VSpace
+    let initrd = unsafe {
+        core::slice::from_raw_parts(
+            boot_info.initrd_vaddr as *const u8,
+            boot_info.initrd_size as usize,
+        )
+    };
+
+    if process::map_data_to_child(
+        Slot::RootCNode as u64,
+        radix,
+        result.vspace_slot,
+        Slot::FirstUntyped as u64,
+        next_slot,
+        m6_system::SHELL_INITRD_ADDR,
+        initrd,
+        process::MapRights::R,
+    )
+    .is_err()
+    {
+        log::error!("Failed to map initrd into shell VSpace");
+        return;
+    }
+
     let _ = m6_syscall::invoke::tcb_resume(cptr(result.tcb_slot));
 
-    log::info!("Shell spawned with registry endpoint at slot 10");
+    log::info!(
+        "Shell spawned: registry=10, asid=13, mem_ep=14, initrd={:#x}",
+        m6_system::SHELL_INITRD_ADDR
+    );
 }
 
 fn spawn_error_str(e: process::SpawnError) -> &'static str {

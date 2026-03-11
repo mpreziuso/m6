@@ -866,15 +866,24 @@ pub fn free_frame(phys_addr: u64) {
     }
 }
 
-/// Drain all free physical frames as maximally-aligned power-of-2 chunks.
+/// Frames kept in the kernel's own pool after handing memory to userspace.
+/// The kernel uses these for SMMU context descriptor tables, IO page-table
+/// intermediate tables, kernel heap growth, and similar internal allocations
+/// that happen after bootstrap.  256 frames (1 MiB) is more than enough.
+const KERNEL_FRAME_RESERVE: usize = 256;
+
+/// Drain free physical frames as maximally-aligned power-of-2 chunks.
 ///
 /// Scans the bitmap for free regions and decomposes each contiguous run into
 /// the largest power-of-2 aligned chunks possible (buddy decomposition). Each
-/// chunk is immediately marked allocated so the kernel will not reuse it.
+/// drained chunk is immediately marked allocated so the kernel will not reuse it.
+///
+/// `KERNEL_FRAME_RESERVE` frames are intentionally left free so the kernel
+/// can still call `alloc_frame` after bootstrap (e.g. for SMMU tables).
 ///
 /// Call this exactly once, after all kernel boot allocations are complete.
 /// The returned `(phys_base, size_bits)` pairs become RAM Untyped capabilities
-/// for the root task, giving userspace authority over all remaining memory.
+/// for the root task, giving userspace authority over the remaining memory.
 ///
 /// The number of output chunks is bounded by `max_chunks` and is at most
 /// `2 * ceil(log2(total_frames))` per contiguous free run in practice.
@@ -887,22 +896,28 @@ pub fn drain_free_aligned_chunks(max_chunks: usize) -> alloc::vec::Vec<(u64, u8)
         return chunks;
     };
 
+    // How many frames are we allowed to drain? Leave KERNEL_FRAME_RESERVE behind.
+    let total_free = alloc.free_count();
+    let to_drain = total_free.saturating_sub(KERNEL_FRAME_RESERVE);
+    let mut drained = 0usize;
+
     let first_frame = alloc.first_frame();
     let total_frames = alloc.total_count();
     let mut rel = 0usize; // relative frame index into the bitmap
 
-    'outer: while rel < total_frames {
+    'outer: while rel < total_frames && drained < to_drain {
         if !alloc.is_frame_free(rel) {
             rel += 1;
             continue;
         }
 
-        // Find the end of this contiguous free run.
+        // Find the end of this contiguous free run, but cap it so we don't
+        // drain more than our budget.
         let run_start = rel;
         while rel < total_frames && alloc.is_frame_free(rel) {
             rel += 1;
         }
-        let run_end = rel;
+        let run_end = rel.min(run_start + (to_drain - drained));
 
         // Decompose [run_start, run_end) into maximally-aligned power-of-2 chunks.
         let mut pos = run_start;
@@ -933,9 +948,17 @@ pub fn drain_free_aligned_chunks(max_chunks: usize) -> alloc::vec::Vec<(u64, u8)
 
             let phys_base = abs_pos as u64 * page::SIZE_4K as u64;
             chunks.push((phys_base, size_bits));
+            drained += chunk_frames;
             pos += chunk_frames;
         }
     }
+
+    let remaining_free = alloc.free_count();
+    log::debug!(
+        "Drained {} frames to userspace, {} frames kept for kernel",
+        drained,
+        remaining_free,
+    );
 
     chunks
 }

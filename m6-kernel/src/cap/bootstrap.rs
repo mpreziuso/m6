@@ -553,11 +553,20 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
         return Err(BootstrapError::OutOfMemory);
     }
 
-    // Sort largest first: init always allocates from Slot::FirstUntyped (slot 12).
-    // Without sorting the first chunk may be as small as 1 page (if the first free
-    // frame has an odd absolute frame number), causing the initial VSpace retype to
-    // fail with NoMemory immediately after the Endpoint has been allocated from it.
-    ram_chunks.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    // Sort so that init's first untyped (Slot::FirstUntyped) is usable for DMA.
+    // Devices without IOMMU (e.g. DWC3 USB on RK3588) can only DMA to the low
+    // 4 GB, so chunks below 4 GB must come first. Within each region, sort
+    // largest first so the first chunk is big enough for init's early allocations.
+    const LOW_4G: u64 = 0x1_0000_0000;
+    ram_chunks.sort_unstable_by(|a, b| {
+        let a_low = a.0 < LOW_4G;
+        let b_low = b.0 < LOW_4G;
+        match (a_low, b_low) {
+            (true, false) => core::cmp::Ordering::Less,
+            (false, true) => core::cmp::Ordering::Greater,
+            _ => b.1.cmp(&a.1), // same region: largest first
+        }
+    });
 
     {
         let total_bytes: u64 = ram_chunks

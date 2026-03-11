@@ -298,12 +298,47 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
         halt();
     }
 
-    // Configure GCTL for host mode operation (matching Linux dwc3_core_setup_global_control).
-    // We do NOT perform CORESOFTRESET — UEFI has already initialised the controller
-    // and the USB link is established. A core reset would kill the link and require
-    // PHY re-negotiation (100+ ms), causing device enumeration to fail.
-    // The xHCI HCRST in try_initialize_xhci() is sufficient to reset xHCI state
-    // while preserving port connections.
+    // DWC3 Core Soft Reset — required to put the DMA engine and internal state
+    // into a known-good configuration. UEFI may have left the controller with
+    // stale DMA pointers or partial event buffer state. Without this, the xHCI
+    // wrapper cannot deliver events via DMA, leading to command timeouts.
+    // Linux's dwc3_core_soft_reset() always performs this during probe.
+    {
+        const DCTL_OFFSET: u64 = 0xC704;
+        const DCTL_CSFTRST: u32 = 1 << 30;
+
+        let dctl = unsafe { core::ptr::read_volatile((ctrl_addr + DCTL_OFFSET) as *const u32) };
+        unsafe {
+            core::ptr::write_volatile(
+                (ctrl_addr + DCTL_OFFSET) as *mut u32,
+                (dctl | DCTL_CSFTRST) & !(1u32 << 31), // set CSFTRST, clear RUN_STOP if set
+            );
+        }
+
+        // Wait for CSFTRST to self-clear (typically <1ms, allow up to 1s)
+        let mut reset_ok = false;
+        for _ in 0..1_000_000u32 {
+            let val =
+                unsafe { core::ptr::read_volatile((ctrl_addr + DCTL_OFFSET) as *const u32) };
+            if (val & DCTL_CSFTRST) == 0 {
+                reset_ok = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        if !reset_ok {
+            log::warn!("DWC3 core soft reset timeout — continuing anyway");
+        }
+
+        // Post-reset stabilisation delay (~1ms, matching Linux)
+        for _ in 0..100_000u32 {
+            core::hint::spin_loop();
+        }
+    }
+
+    // Configure GCTL for host mode (matching Linux dwc3_core_setup_global_control).
+    // After CSFTRST all DWC3 registers are at their defaults.
     const GCTL_OFFSET: u64 = 0xC110;
     let gctl = unsafe { core::ptr::read_volatile((ctrl_addr + GCTL_OFFSET) as *const u32) };
 

@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "M6 system components: init, device-mgr, drivers, and services"
 
+[lib]
+name = "m6_system"
+path = "src/lib.rs"
+
 [[bin]]
 name = "init"
 path = "src/main.rs"

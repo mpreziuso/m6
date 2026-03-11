@@ -29,8 +29,8 @@ pub const IRQ_CONTROL: u64 = 14;
 pub const RAM_UNTYPED: u64 = 15;
 /// ASID pool for driver VSpaces
 pub const ASID_POOL: u64 = 16;
-/// Notification bound to this TCB for driver fault delivery
-pub const FAULT_NOTIF: u64 = 17;
+/// Memory server endpoint — used to request additional RAM untyped caps from init.
+pub const MEM_SERVER_EP: u64 = 17;
 /// First SMMU control capability (optional, only if SMMU present)
 /// Additional SMMUs use consecutive slots (18, 19, 20, 21 for up to 4 SMMUs)
 pub const SMMU_CONTROL_0: u64 = 18;

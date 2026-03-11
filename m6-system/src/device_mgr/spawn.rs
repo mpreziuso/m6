@@ -3,12 +3,44 @@
 //! This module handles creating driver processes with the appropriate
 //! capabilities for their device (MMIO access, IRQ, IOSpace for DMA).
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use m6_cap::ObjectType;
 use m6_syscall::{error::SyscallError, invoke::*, slot_to_cptr};
 
 use crate::manifest::DriverManifest;
 use crate::registry::{DeviceEntry, DriverEntry, Registry};
 use crate::slots;
+
+// -- RAM untyped tracking
+
+/// Current RAM untyped capability slot used for kernel object allocation.
+///
+/// Starts at the cap given by init at spawn time; updated when init provides
+/// a fresh untyped via the memory server.
+static RAM_UNTYPED_SLOT: AtomicU64 = AtomicU64::new(slots::RAM_UNTYPED);
+
+pub fn get_ram_untyped() -> u64 {
+    RAM_UNTYPED_SLOT.load(Ordering::Relaxed)
+}
+
+pub fn set_ram_untyped(slot: u64) {
+    RAM_UNTYPED_SLOT.store(slot, Ordering::Relaxed);
+}
+
+/// Request a fresh RAM untyped cap from init's memory server.
+///
+/// The received cap is placed at `recv_slot` in device-mgr's CSpace.
+/// Returns true on success (the slot now holds a new untyped cap).
+pub fn request_memory_from_init(cnode_radix: u8, recv_slot: u64) -> bool {
+    let cptr = |s| slot_to_cptr(s, cnode_radix);
+    // SAFETY: device-mgr is single-threaded; IPC buffer is always mapped.
+    unsafe { ipc_set_recv_slots(&[recv_slot]); }
+    matches!(
+        call(cptr(slots::MEM_SERVER_EP), 0, 0, 0, 0),
+        Ok(r) if r.label == 0
+    )
+}
 
 // Re-use ELF parser from parent
 #[path = "../elf.rs"]
@@ -317,7 +349,7 @@ pub fn spawn_driver(
 
     // Create VSpace (page table root)
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::VSpace as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -331,7 +363,7 @@ pub fn spawn_driver(
 
     // Create CSpace (radix 10 = 1024 slots for drivers)
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::CNode as u64,
         10, // radix
         cptr(slots::ROOT_CNODE),
@@ -342,7 +374,7 @@ pub fn spawn_driver(
 
     // Create TCB
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::TCB as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -353,7 +385,7 @@ pub fn spawn_driver(
 
     // Create IPC buffer frame
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Frame as u64,
         12, // 4KB
         cptr(slots::ROOT_CNODE),
@@ -364,7 +396,7 @@ pub fn spawn_driver(
 
     // Create driver's service endpoint
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Endpoint as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -375,7 +407,7 @@ pub fn spawn_driver(
 
     // Create fault endpoint for death detection
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Endpoint as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -423,7 +455,7 @@ pub fn spawn_driver(
     // Create notification for IRQ delivery if needed
     if let Some(notif_slot) = irq_notif_slot {
         retype(
-            cptr(slots::RAM_UNTYPED),
+            cptr(get_ram_untyped()),
             ObjectType::Notification as u64,
             0,
             cptr(slots::ROOT_CNODE),
@@ -469,7 +501,7 @@ pub fn spawn_driver(
     if let Some(ref dma_slots) = dma_buffer_slots {
         for &slot in dma_slots {
             retype(
-                cptr(slots::RAM_UNTYPED),
+                cptr(get_ram_untyped()),
                 ObjectType::Frame as u64,
                 12, // 4KB
                 cptr(slots::ROOT_CNODE),
@@ -639,7 +671,7 @@ pub fn spawn_driver(
 
         // Create Frame for instance info
         retype(
-            cptr(slots::RAM_UNTYPED),
+            cptr(get_ram_untyped()),
             ObjectType::Frame as u64,
             12, // 4KB
             cptr(slots::ROOT_CNODE),
@@ -1135,7 +1167,7 @@ fn create_iospace(
     for attempt in 0..MAX_RETRIES {
         create_result = iospace_create(
             cptr(smmu_slot),
-            cptr(slots::RAM_UNTYPED),
+            cptr(get_ram_untyped()),
             cptr(slots::ROOT_CNODE),
             slot,
             0, // depth = 0 (auto)
@@ -1236,7 +1268,7 @@ fn ensure_page_tables(
     // Create L1 table (level 1)
     let l1_slot = registry.alloc_slot();
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         5,
         0,
         cptr(slots::ROOT_CNODE),
@@ -1249,7 +1281,7 @@ fn ensure_page_tables(
     // Create L2 table (level 2)
     let l2_slot = registry.alloc_slot();
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         6,
         0,
         cptr(slots::ROOT_CNODE),
@@ -1262,7 +1294,7 @@ fn ensure_page_tables(
     // Create L3 table (level 3)
     let l3_slot = registry.alloc_slot();
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         7,
         0,
         cptr(slots::ROOT_CNODE),
@@ -1277,7 +1309,7 @@ fn ensure_page_tables(
     if l3_end_base != l3_base {
         let l3_slot2 = registry.alloc_slot();
         retype(
-            cptr(slots::RAM_UNTYPED),
+            cptr(get_ram_untyped()),
             7,
             0,
             cptr(slots::ROOT_CNODE),
@@ -1463,7 +1495,7 @@ fn map_segment(
 fn alloc_frame(registry: &mut Registry, cptr: &impl Fn(u64) -> u64) -> Result<u64, SpawnError> {
     let slot = registry.alloc_slot();
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Frame as u64,
         12, // 4KB
         cptr(slots::ROOT_CNODE),
@@ -1641,7 +1673,7 @@ fn install_driver_caps(
         slots::driver::RAM_UNTYPED,
         0,
         src_cnode_cptr,
-        slots::RAM_UNTYPED,
+        get_ram_untyped(),
         0,
     )
     .map_err(SpawnError::CapCopyFailed)?;
@@ -1781,7 +1813,7 @@ pub fn setup_msix(
 
         // Create notification for this vector
         retype(
-            cptr(slots::RAM_UNTYPED),
+            cptr(get_ram_untyped()),
             ObjectType::Notification as u64,
             0,
             cptr(slots::ROOT_CNODE),
@@ -2308,7 +2340,7 @@ pub fn spawn_class_driver(
 
     // Create VSpace (page table root)
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::VSpace as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -2322,7 +2354,7 @@ pub fn spawn_class_driver(
 
     // Create CSpace (radix 10 = 1024 slots for drivers)
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::CNode as u64,
         10,
         cptr(slots::ROOT_CNODE),
@@ -2333,7 +2365,7 @@ pub fn spawn_class_driver(
 
     // Create TCB
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::TCB as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -2344,7 +2376,7 @@ pub fn spawn_class_driver(
 
     // Create IPC buffer frame
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Frame as u64,
         12,
         cptr(slots::ROOT_CNODE),
@@ -2355,7 +2387,7 @@ pub fn spawn_class_driver(
 
     // Create driver's service endpoint
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Endpoint as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -2366,7 +2398,7 @@ pub fn spawn_class_driver(
 
     // Create notification for interrupt-driven wakeup
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Notification as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -2537,7 +2569,7 @@ fn install_class_driver_caps(
         slots::driver::RAM_UNTYPED,
         0,
         src_cnode_cptr,
-        slots::RAM_UNTYPED,
+        get_ram_untyped(),
         0,
     )
     .map_err(SpawnError::CapCopyFailed)?;
@@ -2591,7 +2623,7 @@ pub fn spawn_fat32_service(
 
     // Create VSpace
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::VSpace as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -2605,7 +2637,7 @@ pub fn spawn_fat32_service(
 
     // Create CSpace (radix 10 = 1024 slots)
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::CNode as u64,
         10,
         cptr(slots::ROOT_CNODE),
@@ -2616,7 +2648,7 @@ pub fn spawn_fat32_service(
 
     // Create TCB
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::TCB as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -2627,7 +2659,7 @@ pub fn spawn_fat32_service(
 
     // Create IPC buffer frame
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Frame as u64,
         12,
         cptr(slots::ROOT_CNODE),
@@ -2638,7 +2670,7 @@ pub fn spawn_fat32_service(
 
     // Create service endpoint
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Endpoint as u64,
         0,
         cptr(slots::ROOT_CNODE),
@@ -2649,7 +2681,7 @@ pub fn spawn_fat32_service(
 
     // Create data frame for block I/O DMA
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Frame as u64,
         12,
         cptr(slots::ROOT_CNODE),
@@ -2660,7 +2692,7 @@ pub fn spawn_fat32_service(
 
     // Create path/data buffer frame
     retype(
-        cptr(slots::RAM_UNTYPED),
+        cptr(get_ram_untyped()),
         ObjectType::Frame as u64,
         12,
         cptr(slots::ROOT_CNODE),
@@ -2812,7 +2844,7 @@ pub fn spawn_fat32_service(
         slots::driver::RAM_UNTYPED,
         0,
         src_cnode_cptr,
-        slots::RAM_UNTYPED,
+        get_ram_untyped(),
         0,
     )
     .map_err(SpawnError::CapCopyFailed)
