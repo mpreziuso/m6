@@ -768,6 +768,14 @@ impl XhciController {
 
         let cap_regs = self.read_cap_regs();
 
+        // Verify 64-bit addressing capability if DMA region is above 4GB.
+        // AC64=0 means the controller only supports 32-bit data structure pointers;
+        // writing addresses above 4GB would silently truncate, causing DMA to the
+        // wrong physical location.
+        if !cap_regs.ac64() && dma.iova >= 0x1_0000_0000 {
+            return Err("DMA above 4GB but controller lacks 64-bit addressing (AC64=0)");
+        }
+
         // Walk xHCI Extended Capabilities to claim USB Legacy Support ownership.
         // USBLEGSUP survives HCRST; if the firmware set BIOS_SEM the
         // controller may inhibit the periodic scheduler.

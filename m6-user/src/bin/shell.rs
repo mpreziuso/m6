@@ -1,7 +1,7 @@
 //! M6 Shell
 //!
-//! Interactive command shell for M6 userspace with keyboard input
-//! via the HID driver.
+//! Interactive command shell with quoted argument tokenisation and
+//! external binary spawning from the initrd.
 
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -10,33 +10,47 @@ extern crate std;
 
 use core::time::Duration;
 use std::ipc::{Endpoint, IpcBuffer, Notification, ipc_set_recv_slots, ipc_set_send_caps};
-use std::time::Instant;
 use std::{String, Vec, print, println, thread};
 
-/// Yield-based delay using hardware counter (CNTPCT_EL0).
-/// Does not depend on kernel timer interrupts (tcb_sleep is broken).
-fn yield_delay(duration: Duration) {
-    let start = Instant::now();
-    while start.elapsed() < duration {
-        thread::yield_now();
-    }
+use m6_cap::ObjectType;
+use m6_system::{invoke, slot_to_cptr};
+use m6_system::process::{MapRights, SpawnConfig, ensure_child_page_tables, map_data_to_child,
+                          spawn_process};
+
+// -- Constants
+
+const CNODE_RADIX: u8 = 12;
+
+const REGISTRY_EP_SLOT: u64 = 10;
+const HID_EP_SLOT: u64 = 11;
+const FAT32_EP_SLOT: u64 = 12;
+const ASID_POOL_SLOT: u64 = 13;
+const MEM_SERVER_SLOT: u64 = 14;
+const UNTYPED_SLOT: u64 = 15;
+const FIRST_FREE_SLOT: u64 = 16;
+
+const SHELL_INITRD_ADDR: u64 = m6_system::SHELL_INITRD_ADDR;
+const ARGS_PAGE_ADDR: u64 = 0x3FFF_E000;
+
+fn cptr(slot: u64) -> u64 {
+    slot_to_cptr(slot, CNODE_RADIX)
 }
 
-// -- Capability slots passed by init
+// -- Shell context
 
-/// Device-mgr registry endpoint slot (passed by init)
-const REGISTRY_EP_SLOT: u64 = 10;
+struct ShellContext {
+    next_slot: u64,
+    ram_untyped: u64,
+    initrd: &'static [u8],
+    fat32_ep: Option<Endpoint>,
+}
 
 // -- Device-mgr IPC protocol
 
 mod devmgr_ipc {
-    /// Ensure a device/service driver is running
     pub const ENSURE: u64 = 0x0001;
-    /// Class ID for USB HID driver
     pub const CLASS_USB_HID: u64 = 0x1001;
-    /// Class ID for FAT32 filesystem service
     pub const CLASS_FAT32: u64 = 0x2001;
-    /// Response: success
     pub const OK: u64 = 0;
 }
 
@@ -49,7 +63,6 @@ mod fat32_ipc {
     pub const CLOSEDIR: u64 = 0x0304;
     pub const OK: u64 = 0;
     pub const ERR_END_OF_DIR: u64 = 13;
-    /// Directory attribute bit
     pub const ATTR_DIR: u8 = 0x10;
 }
 
@@ -59,7 +72,6 @@ mod hid_ipc {
     pub const SUBSCRIBE: u64 = 0x0001;
     pub const GET_EVENTS: u64 = 0x0003;
     pub const POLL_EVENTS: u64 = 0x0004;
-
     pub const OK: u64 = 0;
 
     pub mod device_type {
@@ -137,7 +149,6 @@ struct InputEvent {
 }
 
 impl InputEvent {
-    /// Unpack from two u64 values (packed in IPC message)
     fn unpack(word0: u64, word1: u64) -> Self {
         Self {
             timestamp_ns: word0,
@@ -162,17 +173,13 @@ struct KeyboardState {
 
 impl KeyboardState {
     fn new() -> Self {
-        Self {
-            shift_held: false,
-            caps_lock: false,
-        }
+        Self { shift_held: false, caps_lock: false }
     }
 
     fn update(&mut self, code: u16, pressed: bool) {
         if code == key::KEY_LEFTSHIFT || code == key::KEY_RIGHTSHIFT {
             self.shift_held = pressed;
         }
-        // Note: caps lock toggle would go here at code 58
     }
 
     fn shift_active(&self) -> bool {
@@ -180,7 +187,6 @@ impl KeyboardState {
     }
 }
 
-/// Convert key code to character based on keyboard state
 fn keycode_to_char(code: u16, kb_state: &KeyboardState) -> Option<char> {
     let shift = kb_state.shift_active();
 
@@ -244,38 +250,108 @@ fn keycode_to_char(code: u16, kb_state: &KeyboardState) -> Option<char> {
     }
 }
 
-/// Helper to create CPtr from slot
-fn slot_to_cptr(slot: u64, radix: u8) -> u64 {
-    slot << (64 - radix as u64)
+// -- Yield-based delay
+
+fn yield_delay(duration: Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < duration {
+        thread::yield_now();
+    }
 }
 
-/// Slot to receive the HID endpoint capability
-const HID_EP_SLOT: u64 = 11;
-/// Slot to receive the FAT32 service endpoint capability
-const FAT32_EP_SLOT: u64 = 12;
+// -- Tokeniser
 
-/// Try to get HID driver endpoint via device-mgr ENSURE
-fn try_get_hid_endpoint(cnode_radix: u8) -> Option<Endpoint> {
-    let cptr = |slot: u64| slot_to_cptr(slot, cnode_radix);
-    let registry_ep = Endpoint::from_cptr(cptr(REGISTRY_EP_SLOT));
+mod tokenizer {
+    use core::prelude::rust_2024::derive;
+    use std::{String, Vec};
 
-    // Set up receive slot for capability transfer
-    // Note: ipc_set_recv_slots expects slot NUMBERS, not CPtrs
-    // SAFETY: IPC buffer is mapped at the standard userspace address
-    unsafe {
-        ipc_set_recv_slots(&[HID_EP_SLOT]);
+    #[derive(Debug, PartialEq)]
+    pub enum TokenError {
+        UnclosedQuote,
+        UnclosedEscape,
     }
 
-    // Send ENSURE request for USB HID class
-    // The device-mgr will spawn the HID driver if not running
-    // and return its endpoint via capability transfer
+    enum State {
+        Normal,
+        Escape,
+        SingleQuote,
+        DoubleQuote,
+        DoubleEscape,
+    }
+
+    pub fn tokenize(input: &str) -> Result<Vec<String>, TokenError> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut state = State::Normal;
+
+        for ch in input.chars() {
+            match state {
+                State::Normal => match ch {
+                    '\\' => state = State::Escape,
+                    '\'' => state = State::SingleQuote,
+                    '"' => state = State::DoubleQuote,
+                    c if c.is_whitespace() => {
+                        if !current.is_empty() {
+                            tokens.push(core::mem::take(&mut current));
+                        }
+                    }
+                    c => current.push(c),
+                },
+                State::Escape => {
+                    current.push(ch);
+                    state = State::Normal;
+                }
+                State::SingleQuote => match ch {
+                    '\'' => state = State::Normal,
+                    c => current.push(c),
+                },
+                State::DoubleQuote => match ch {
+                    '"' => state = State::Normal,
+                    '\\' => state = State::DoubleEscape,
+                    c => current.push(c),
+                },
+                State::DoubleEscape => {
+                    match ch {
+                        '"' | '\\' => current.push(ch),
+                        c => {
+                            current.push('\\');
+                            current.push(c);
+                        }
+                    }
+                    state = State::DoubleQuote;
+                }
+            }
+        }
+
+        match state {
+            State::Normal => {
+                if !current.is_empty() {
+                    tokens.push(current);
+                }
+                Ok(tokens)
+            }
+            State::Escape => Err(TokenError::UnclosedEscape),
+            State::SingleQuote | State::DoubleQuote | State::DoubleEscape => {
+                Err(TokenError::UnclosedQuote)
+            }
+        }
+    }
+}
+
+// -- HID/FAT32 helpers
+
+fn try_get_hid_endpoint() -> Option<Endpoint> {
+    let registry_ep = Endpoint::from_cptr(cptr(REGISTRY_EP_SLOT));
+
+    // SAFETY: IPC buffer is mapped at the standard userspace address
+    unsafe { ipc_set_recv_slots(&[HID_EP_SLOT]); }
+
     let result = registry_ep
         .call(devmgr_ipc::ENSURE, [devmgr_ipc::CLASS_USB_HID, 0, 0, 0])
         .ok()?;
     println!("[shell] Got HID ENSURE reply: label={:#x}", result.label);
 
     if result.label == devmgr_ipc::OK {
-        // Check if capability was received
         // SAFETY: IPC buffer is mapped
         let ipc_buf = unsafe { IpcBuffer::get() };
         if ipc_buf.recv_extra_caps > 0 {
@@ -283,8 +359,6 @@ fn try_get_hid_endpoint(cnode_radix: u8) -> Option<Endpoint> {
         } else {
             println!("Warning: ENSURE succeeded but no cap received");
         }
-
-        // The HID endpoint capability should now be in HID_EP_SLOT
         Some(Endpoint::from_cptr(cptr(HID_EP_SLOT)))
     } else {
         println!("ENSURE failed with code: {}", result.label);
@@ -292,15 +366,11 @@ fn try_get_hid_endpoint(cnode_radix: u8) -> Option<Endpoint> {
     }
 }
 
-/// Try to get FAT32 service endpoint via device-mgr ENSURE
-fn try_get_fat32_endpoint(cnode_radix: u8) -> Option<Endpoint> {
-    let cptr = |slot: u64| slot_to_cptr(slot, cnode_radix);
+fn try_get_fat32_endpoint() -> Option<Endpoint> {
     let registry_ep = Endpoint::from_cptr(cptr(REGISTRY_EP_SLOT));
 
     // SAFETY: IPC buffer is mapped at the standard userspace address
-    unsafe {
-        ipc_set_recv_slots(&[FAT32_EP_SLOT]);
-    }
+    unsafe { ipc_set_recv_slots(&[FAT32_EP_SLOT]); }
 
     let result = registry_ep
         .call(devmgr_ipc::ENSURE, [devmgr_ipc::CLASS_FAT32, 0, 0, 0])
@@ -313,9 +383,143 @@ fn try_get_fat32_endpoint(cnode_radix: u8) -> Option<Endpoint> {
     }
 }
 
-/// Format the NVMe drive as FAT32 via svc-fat32.
-fn cmd_mkfs(cnode_radix: u8) {
-    let fat32_ep = match try_get_fat32_endpoint(cnode_radix) {
+fn get_fat32_ep(ctx: &mut ShellContext) -> Option<Endpoint> {
+    if let Some(ep) = ctx.fat32_ep {
+        return Some(ep);
+    }
+    let ep = try_get_fat32_endpoint()?;
+    ctx.fat32_ep = Some(ep);
+    Some(ep)
+}
+
+fn subscribe_keyboard(hid_ep: &Endpoint) -> Option<u64> {
+    let result = hid_ep
+        .call(hid_ipc::SUBSCRIBE, [hid_ipc::device_type::KEYBOARD, 0, 0, 0])
+        .ok()?;
+
+    if (result.label & 0xFFFF) == hid_ipc::OK {
+        Some(result.label >> 16)
+    } else {
+        None
+    }
+}
+
+fn poll_keyboard_events(hid_ep: &Endpoint, sub_id: u64) -> Vec<InputEvent> {
+    let mut events = Vec::new();
+
+    let result = match hid_ep.call(hid_ipc::POLL_EVENTS, [sub_id, 0, 0, 0]) {
+        Ok(r) => r,
+        Err(_) => return events,
+    };
+
+    if (result.label & 0xFFFF) != hid_ipc::OK {
+        return events;
+    }
+    let count = (result.label >> 16) as usize;
+    if count == 0 {
+        return events;
+    }
+
+    let result = match hid_ep.call(hid_ipc::GET_EVENTS, [sub_id, 2, 0, 0]) {
+        Ok(r) => r,
+        Err(_) => return events,
+    };
+
+    let returned = (result.label >> 16) as usize;
+    if returned >= 1 {
+        events.push(InputEvent::unpack(result.msg[0], result.msg[1]));
+    }
+    if returned >= 2 {
+        events.push(InputEvent::unpack(result.msg[2], result.msg[3]));
+    }
+
+    events
+}
+
+// -- Built-in commands
+
+fn builtin_help() {
+    println!("Available commands:");
+    println!("  help         - Show this help");
+    println!("  version      - Show M6 version");
+    println!("  ls           - List root directory (FAT32 NVMe)");
+    println!("  mkfs         - Format NVMe drive as FAT32");
+    println!("  echo [args]  - Print arguments");
+    println!("  clear        - Clear screen");
+    println!("  exit [N]     - Exit with code N (default 0)");
+    println!("  <name>       - Execute binary from initrd");
+}
+
+fn builtin_version() {
+    println!("M6 Microkernel OS v0.1.0");
+    println!("Shell v0.2");
+}
+
+fn cmd_ls(ctx: &mut ShellContext) {
+    let fat32_ep = match get_fat32_ep(ctx) {
+        Some(ep) => ep,
+        None => {
+            println!("ls: FAT32 service unavailable");
+            return;
+        }
+    };
+
+    let open_result = match fat32_ep.call(fat32_ipc::OPENDIR, [0, 0, 0, 0]) {
+        Ok(r) => r,
+        Err(_) => {
+            println!("ls: OPENDIR failed");
+            return;
+        }
+    };
+
+    if open_result.label & 0xFFFF != fat32_ipc::OK {
+        println!("ls: OPENDIR error {}", open_result.label & 0xFFFF);
+        return;
+    }
+
+    let handle = open_result.label >> 16;
+
+    loop {
+        let r = match fat32_ep.call(fat32_ipc::READDIR, [handle, 0, 0, 0]) {
+            Ok(r) => r,
+            Err(_) => break,
+        };
+
+        if r.label & 0xFFFF == fat32_ipc::ERR_END_OF_DIR {
+            break;
+        }
+        if r.label & 0xFFFF != fat32_ipc::OK {
+            break;
+        }
+
+        let name_len = ((r.label >> 16) & 0xFF) as usize;
+        let attr = ((r.label >> 32) & 0xFF) as u8;
+        let size = r.msg[0];
+        let m1 = r.msg[1];
+        let m2 = r.msg[2];
+
+        let mut name_buf = [0u8; 13];
+        for i in 0..8usize.min(name_len) {
+            name_buf[i] = ((m1 >> (i * 8)) & 0xFF) as u8;
+        }
+        for i in 0..5usize.min(name_len.saturating_sub(8)) {
+            name_buf[8 + i] = ((m2 >> (i * 8)) & 0xFF) as u8;
+        }
+
+        let name = core::str::from_utf8(&name_buf[..name_len]).unwrap_or("?");
+
+        if attr & fat32_ipc::ATTR_DIR != 0 {
+            println!("{}/\t<DIR>", name);
+        } else {
+            println!("{}\t{} bytes", name, size);
+        }
+    }
+
+    let _ = fat32_ep.call(fat32_ipc::CLOSEDIR, [handle, 0, 0, 0]);
+}
+
+fn cmd_mkfs(ctx: &mut ShellContext) {
+    let fat32_ep = match get_fat32_ep(ctx) {
         Some(ep) => ep,
         None => {
             println!("mkfs: FAT32 service unavailable");
@@ -338,185 +542,210 @@ fn cmd_mkfs(cnode_radix: u8) {
     }
 }
 
-/// List the root directory of the FAT32 volume.
-fn cmd_ls(cnode_radix: u8) {
-    let fat32_ep = match try_get_fat32_endpoint(cnode_radix) {
-        Some(ep) => ep,
-        None => {
-            println!("ls: FAT32 service unavailable");
-            return;
-        }
-    };
+// -- External command spawning
 
-    // Open root directory
-    let open_result = match fat32_ep.call(fat32_ipc::OPENDIR, [0, 0, 0, 0]) {
-        Ok(r) => r,
-        Err(_) => {
-            println!("ls: OPENDIR failed");
-            return;
-        }
-    };
-
-    if open_result.label & 0xFFFF != fat32_ipc::OK {
-        println!("ls: OPENDIR error {}", open_result.label & 0xFFFF);
-        return;
+/// Build an argv page: argc (u64) at offset 0, then N pointer u64s, then null-terminated strings.
+/// Returns empty Vec when no args (not worth mapping a page).
+fn build_argv_page(program: &str, args: &[String]) -> Vec<u8> {
+    if args.is_empty() {
+        return Vec::new();
     }
 
-    let handle = open_result.label >> 16;
+    // argv[0] = program name, argv[1..] = user-supplied args
+    let all_args: Vec<&str> = core::iter::once(program)
+        .chain(args.iter().map(|s| s.as_str()))
+        .collect();
 
-    // Read entries
-    loop {
-        let r = match fat32_ep.call(fat32_ipc::READDIR, [handle, 0, 0, 0]) {
-            Ok(r) => r,
-            Err(_) => break,
-        };
+    let argc = all_args.len() as u64;
+    let header_size = 8 + 8 * all_args.len(); // argc u64 + N pointer u64s
 
-        if r.label & 0xFFFF == fat32_ipc::ERR_END_OF_DIR {
-            break;
-        }
-        if r.label & 0xFFFF != fat32_ipc::OK {
-            break;
-        }
-
-        let name_len = ((r.label >> 16) & 0xFF) as usize;
-        let attr = ((r.label >> 32) & 0xFF) as u8;
-        let size = r.msg[0];
-        let m1 = r.msg[1];
-        let m2 = r.msg[2];
-
-        // Unpack name bytes
-        let mut name_buf = [0u8; 13];
-        for i in 0..8usize.min(name_len) {
-            name_buf[i] = ((m1 >> (i * 8)) & 0xFF) as u8;
-        }
-        for i in 0..5usize.min(name_len.saturating_sub(8)) {
-            name_buf[8 + i] = ((m2 >> (i * 8)) & 0xFF) as u8;
-        }
-
-        let name = core::str::from_utf8(&name_buf[..name_len]).unwrap_or("?");
-
-        if attr & fat32_ipc::ATTR_DIR != 0 {
-            println!("{}/\t<DIR>", name);
-        } else {
-            println!("{}\t{} bytes", name, size);
-        }
+    // Collect string data and remember offsets within the string section
+    let mut string_offsets: Vec<usize> = Vec::new();
+    let mut string_data: Vec<u8> = Vec::new();
+    for s in &all_args {
+        string_offsets.push(string_data.len());
+        string_data.extend_from_slice(s.as_bytes());
+        string_data.push(0); // null terminator
     }
 
-    // Close directory handle
-    let _ = fat32_ep.call(fat32_ipc::CLOSEDIR, [handle, 0, 0, 0]);
+    let total = header_size + string_data.len();
+    let page_size = total.div_ceil(4096) * 4096;
+    let mut page: Vec<u8> = Vec::new();
+    page.resize(page_size, 0u8);
+
+    // Write argc
+    page[0..8].copy_from_slice(&argc.to_le_bytes());
+
+    // Write pointers (absolute VAs in child's address space)
+    for (i, &str_off) in string_offsets.iter().enumerate() {
+        let ptr = ARGS_PAGE_ADDR + (header_size + str_off) as u64;
+        let slot = 8 + i * 8;
+        page[slot..slot + 8].copy_from_slice(&ptr.to_le_bytes());
+    }
+
+    // Write string data
+    page[header_size..header_size + string_data.len()].copy_from_slice(&string_data);
+
+    page
 }
 
-/// Subscribe to keyboard events from HID driver
-fn subscribe_keyboard(hid_ep: &Endpoint) -> Option<u64> {
-    let result = hid_ep
-        .call(
-            hid_ipc::SUBSCRIBE,
-            [hid_ipc::device_type::KEYBOARD, 0, 0, 0],
-        )
-        .ok()?;
-
-    // Response format: label = OK | (sub_id << 16)
-    if (result.label & 0xFFFF) == hid_ipc::OK {
-        Some(result.label >> 16)
-    } else {
-        None
-    }
-}
-
-/// Poll for keyboard events
-fn poll_keyboard_events(hid_ep: &Endpoint, sub_id: u64) -> Vec<InputEvent> {
-    let mut events = Vec::new();
-
-    // Poll for available events
-    // Response format: label = OK | (count << 16)
-    let result = match hid_ep.call(hid_ipc::POLL_EVENTS, [sub_id, 0, 0, 0]) {
-        Ok(r) => r,
-        Err(_) => return events,
-    };
-
-    // Check response code and extract count from upper bits
-    if (result.label & 0xFFFF) != hid_ipc::OK {
-        return events;
-    }
-    let count = (result.label >> 16) as usize;
-    if count == 0 {
-        return events;
-    }
-
-    // Get events (up to 2 per call due to IPC buffer limits)
-    // Response format: label = (count << 16) | OK, events packed in msg[]
-    let result = match hid_ep.call(hid_ipc::GET_EVENTS, [sub_id, 2, 0, 0]) {
-        Ok(r) => r,
-        Err(_) => return events,
-    };
-
-    let returned = (result.label >> 16) as usize;
-    if returned >= 1 {
-        events.push(InputEvent::unpack(result.msg[0], result.msg[1]));
-    }
-    if returned >= 2 {
-        events.push(InputEvent::unpack(result.msg[2], result.msg[3]));
-    }
-
-    events
-}
-
-/// Execute a shell command
-fn execute_command(cmd: &str, cnode_radix: u8) {
-    let cmd = cmd.trim();
-    if cmd.is_empty() {
-        return;
-    }
-
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-    if parts.is_empty() {
-        return;
-    }
-
-    match parts[0] {
-        "help" => {
-            println!("Available commands:");
-            println!("  help     - Show this help");
-            println!("  ls       - List root directory (FAT32 NVMe)");
-            println!("  mkfs     - Format NVMe drive as FAT32");
-            println!("  echo     - Print arguments");
-            println!("  clear    - Clear screen");
-            println!("  version  - Show M6 version");
-        }
-        "ls" => {
-            cmd_ls(cnode_radix);
-        }
-        "mkfs" => {
-            cmd_mkfs(cnode_radix);
-        }
-        "echo" => {
-            let args = parts[1..].join(" ");
-            println!("{}", args);
-        }
-        "clear" => {
-            // ANSI escape sequence to clear screen
-            print!("\x1b[2J\x1b[H");
-        }
-        "version" => {
-            println!("M6 Microkernel OS v0.1.0");
-            println!("Shell v0.1");
+/// Request a fresh RAM untyped from init's memory server.
+/// On success, stores the new untyped in ctx.ram_untyped and returns true.
+fn request_memory(ctx: &mut ShellContext) -> bool {
+    let recv_slot = ctx.next_slot;
+    ctx.next_slot += 1;
+    // SAFETY: IPC buffer is always mapped for userspace processes
+    unsafe { ipc_set_recv_slots(&[recv_slot]); }
+    let mem_ep = Endpoint::from_cptr(cptr(MEM_SERVER_SLOT));
+    match mem_ep.call(0, [0, 0, 0, 0]) {
+        Ok(r) if r.label == 0 => {
+            ctx.ram_untyped = recv_slot;
+            true
         }
         _ => {
-            println!("Unknown command: {}", parts[0]);
-            println!("Type 'help' for available commands");
+            ctx.next_slot -= 1;
+            false
         }
     }
 }
+
+fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
+    // 1. Find ELF in initrd
+    let Some(elf_data) = m6_system::find_in_initrd(ctx.initrd, program) else {
+        println!("{}: command not found", program);
+        return;
+    };
+
+    // 2. Allocate exit notification slot
+    let notif_slot = ctx.next_slot;
+    ctx.next_slot += 1;
+    if invoke::retype(
+        cptr(ctx.ram_untyped),
+        ObjectType::Notification as u64,
+        0,
+        cptr(0), // root CNode self-ref at slot 0
+        notif_slot,
+        1,
+    )
+    .is_err()
+    {
+        ctx.next_slot -= 1;
+        println!("{}: out of resources", program);
+        return;
+    }
+
+    // 3. Build argv page
+    let argv_data = build_argv_page(program, args);
+
+    // 4. Spawn with resume: false so we can map argv and bind notification first.
+    //    On memory failure, request a fresh untyped from init and retry once.
+    let spawn_start = ctx.next_slot;
+    let result = loop {
+        let config = SpawnConfig {
+            elf_data,
+            root_cnode: 0,           // slot 0 = self-ref CNode
+            cnode_radix: CNODE_RADIX,
+            ram_untyped: ctx.ram_untyped,
+            asid_pool: ASID_POOL_SLOT,
+            next_free_slot: ctx.next_slot,
+            initial_caps: &[],
+            x0: if args.is_empty() { 0 } else { ARGS_PAGE_ADDR },
+            resume: false,
+        };
+        match spawn_process(&config) {
+            Ok(r) => break r,
+            Err(_) => {
+                // Skip past any partially-allocated slots from the failed attempt
+                ctx.next_slot = spawn_start + 64;
+                if request_memory(ctx) {
+                    continue;
+                }
+                println!("{}: spawn failed (out of memory)", program);
+                return;
+            }
+        }
+    };
+    ctx.next_slot = result.next_free_slot;
+
+    // 5. Map argv page into child's VSpace
+    if !argv_data.is_empty() {
+        let _ = ensure_child_page_tables(
+            0,
+            CNODE_RADIX,
+            result.vspace_slot,
+            ctx.ram_untyped,
+            &mut ctx.next_slot,
+            ARGS_PAGE_ADDR,
+            ARGS_PAGE_ADDR + 4096,
+        );
+        let _ = map_data_to_child(
+            0,
+            CNODE_RADIX,
+            result.vspace_slot,
+            ctx.ram_untyped,
+            &mut ctx.next_slot,
+            ARGS_PAGE_ADDR,
+            &argv_data,
+            MapRights::R,
+        );
+    }
+
+    // 6. Bind exit notification to child TCB, then resume
+    let notif_cptr = cptr(notif_slot);
+    let tcb_cptr = cptr(result.tcb_slot);
+    let _ = invoke::tcb_bind_notification(tcb_cptr, notif_cptr);
+    let _ = invoke::tcb_resume(tcb_cptr);
+
+    // 7. Block until child exits — the kernel signals the notification on tcb_exit
+    let _ = invoke::wait(notif_cptr);
+}
+
+// -- Command dispatch
+
+fn execute_line(tokens: &[String], ctx: &mut ShellContext) {
+    if tokens.is_empty() {
+        return;
+    }
+    match tokens[0].as_str() {
+        "echo" => println!("{}", tokens[1..].join(" ")),
+        "clear" => print!("\x1b[2J\x1b[H"),
+        "help" => builtin_help(),
+        "version" => builtin_version(),
+        "exit" | "quit" => {
+            let code = tokens.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            std::process::exit(code);
+        }
+        "ls" => cmd_ls(ctx),
+        "mkfs" => cmd_mkfs(ctx),
+        name => spawn_external(name, &tokens[1..], ctx),
+    }
+}
+
+// -- Entry point
 
 #[unsafe(no_mangle)]
 fn main() -> i32 {
-    println!("\n\x1b[36m=== M6 Shell v0.1 ===\x1b[0m");
-    println!("Shell running in userspace (m6-std runtime)");
+    println!("\n\x1b[36m=== M6 Shell v0.2 ===\x1b[0m");
 
-    let cnode_radix = std::rt::startup_arg() as u8;
-    let cnode_radix = if cnode_radix == 0 { 10u8 } else { cnode_radix };
+    let initrd_size = std::rt::startup_arg() as usize;
 
-    let hid_ep = try_get_hid_endpoint(cnode_radix);
+    // SAFETY: init mapped the initrd at SHELL_INITRD_ADDR before resuming us
+    let initrd: &'static [u8] = if initrd_size > 0 {
+        unsafe {
+            core::slice::from_raw_parts(SHELL_INITRD_ADDR as *const u8, initrd_size)
+        }
+    } else {
+        &[]
+    };
+
+    let mut ctx = ShellContext {
+        next_slot: FIRST_FREE_SLOT,
+        ram_untyped: UNTYPED_SLOT,
+        initrd,
+        fat32_ep: None,
+    };
+
+    let hid_ep = try_get_hid_endpoint();
 
     if hid_ep.is_none() {
         println!("No HID driver available - running in display-only mode\n");
@@ -541,23 +770,17 @@ fn main() -> i32 {
 
     // Transfer notification to HID driver during subscribe
     // SAFETY: IPC buffer is mapped and accessible
-    unsafe {
-        ipc_set_send_caps(&[input_notif.cptr()]);
-    }
+    unsafe { ipc_set_send_caps(&[input_notif.cptr()]); }
 
     let sub_id = match subscribe_keyboard(&hid_ep) {
         Some(id) => {
             // SAFETY: IPC buffer is mapped and accessible
-            unsafe {
-                IpcBuffer::get_mut().extra_caps = 0;
-            }
+            unsafe { IpcBuffer::get_mut().extra_caps = 0; }
             id
         }
         None => {
             // SAFETY: IPC buffer is mapped and accessible
-            unsafe {
-                IpcBuffer::get_mut().extra_caps = 0;
-            }
+            unsafe { IpcBuffer::get_mut().extra_caps = 0; }
             println!("Failed to subscribe to keyboard events\n");
             print!("\x1b[32mm6>\x1b[0m ");
             loop {
@@ -572,13 +795,10 @@ fn main() -> i32 {
     let mut line = String::new();
     let mut kb_state = KeyboardState::new();
 
-    // Input loop — poll HID every 16ms using yield-based delay.
-    // Uses CNTPCT_EL0 hardware counter (no tcb_sleep dependency).
     let poll_interval = Duration::from_millis(16);
     loop {
         yield_delay(poll_interval);
 
-        // Drain all buffered events
         loop {
             let events = poll_keyboard_events(&hid_ep, sub_id);
             if events.is_empty() {
@@ -597,7 +817,15 @@ fn main() -> i32 {
                     match ch {
                         '\n' => {
                             println!();
-                            execute_command(&line, cnode_radix);
+                            match tokenizer::tokenize(&line) {
+                                Ok(tokens) => execute_line(&tokens, &mut ctx),
+                                Err(tokenizer::TokenError::UnclosedQuote) => {
+                                    println!("syntax error: unclosed quote");
+                                }
+                                Err(tokenizer::TokenError::UnclosedEscape) => {
+                                    println!("syntax error: trailing backslash");
+                                }
+                            }
                             line.clear();
                             print!("\x1b[32mm6>\x1b[0m ");
                         }

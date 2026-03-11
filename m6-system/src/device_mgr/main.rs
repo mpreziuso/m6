@@ -1598,7 +1598,26 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
         manifest: manifest_entry,
         console_ep_slot: registry.console_ep_slot,
     };
-    let spawn_result = spawn::spawn_driver(&config, registry);
+    let spawn_result = {
+        let first = spawn::spawn_driver(&config, registry);
+        if let Err(spawn::SpawnError::RetypeFailed(_)) | Err(spawn::SpawnError::OutOfMemory) =
+            &first
+        {
+            // Current RAM untyped is exhausted — request a fresh one from init.
+            // SAFETY: _start has initialised BOOT_INFO
+            let boot_info = unsafe { get_boot_info() };
+            let recv_slot = registry.alloc_slot();
+            if spawn::request_memory_from_init(boot_info.cnode_radix, recv_slot) {
+                spawn::set_ram_untyped(recv_slot);
+                log::info!("Retrying driver spawn with fresh memory: {}", compat);
+                spawn::spawn_driver(&config, registry)
+            } else {
+                first
+            }
+        } else {
+            first
+        }
+    };
 
     match spawn_result {
         Ok(result) => {

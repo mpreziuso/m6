@@ -42,3 +42,4 @@ path = "src/bin/mkfs_fat32.rs"
 [dependencies]
 # std comes from the custom sysroot
 m6-cap = { path = "../m6-cap" }
+m6-system = { path = "../m6-system" }
