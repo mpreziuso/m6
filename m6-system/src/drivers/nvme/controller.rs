@@ -5,6 +5,8 @@
 
 #![allow(dead_code)]
 
+use m6_syscall::invoke::sched_yield;
+
 use super::command::{
     DOORBELL_BASE, REG_ACQ, REG_AQA, REG_ASQ, REG_CAP, REG_CC, REG_CSTS, REG_INTMS, REG_NSSR,
     REG_VS,
@@ -168,28 +170,36 @@ impl NvmeController {
 
     /// Wait for controller to become ready.
     fn wait_ready(&self) -> Result<(), &'static str> {
-        for _ in 0..(TIMEOUT_MS as usize * POLL_ITERATIONS_PER_MS) {
+        for (i, _) in (0..(TIMEOUT_MS as usize * POLL_ITERATIONS_PER_MS)).enumerate() {
             if self.is_ready() {
                 return Ok(());
             }
             if self.is_fatal() {
                 return Err("Controller fatal error");
             }
-            core::hint::spin_loop();
+            if i % POLL_ITERATIONS_PER_MS == 0 && i > 0 {
+                sched_yield();
+            } else {
+                core::hint::spin_loop();
+            }
         }
         Err("Timeout waiting for controller ready")
     }
 
     /// Wait for controller to become not ready.
     fn wait_not_ready(&self) -> Result<(), &'static str> {
-        for _ in 0..(TIMEOUT_MS as usize * POLL_ITERATIONS_PER_MS) {
+        for (i, _) in (0..(TIMEOUT_MS as usize * POLL_ITERATIONS_PER_MS)).enumerate() {
             if !self.is_ready() {
                 return Ok(());
             }
             if self.is_fatal() {
                 return Err("Controller fatal error during disable");
             }
-            core::hint::spin_loop();
+            if i % POLL_ITERATIONS_PER_MS == 0 && i > 0 {
+                sched_yield();
+            } else {
+                core::hint::spin_loop();
+            }
         }
         Err("Timeout waiting for controller disable")
     }

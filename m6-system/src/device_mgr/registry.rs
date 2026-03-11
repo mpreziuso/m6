@@ -269,6 +269,10 @@ pub struct Registry {
     pub hid_driver_endpoint: Option<u64>,
     /// FAT32 filesystem service endpoint slot (for class-based ENSURE)
     pub fat32_ep_slot: Option<u64>,
+    /// Badge counter for minting per-client FAT32 endpoint capabilities
+    pub fat32_client_badge: u64,
+    /// Temp slot holding the last minted FAT32 cap (deleted on next client request)
+    pub fat32_mint_slot: Option<u64>,
 }
 
 impl Registry {
@@ -288,6 +292,8 @@ impl Registry {
                 MAX_ADDITIONAL_FRAME_CACHE],
             hid_driver_endpoint: None,
             fat32_ep_slot: None,
+            fat32_client_badge: 1,
+            fat32_mint_slot: None,
         }
     }
 
