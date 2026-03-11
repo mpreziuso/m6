@@ -1582,6 +1582,66 @@ pub fn cache_flush(vaddr: u64, size: usize) -> SyscallResult {
     ))
 }
 
+// -- Restricted Mode (Starnix)
+
+/// Bind a state frame to the current thread for restricted mode.
+///
+/// The state frame is a 4KB page shared between the Starnix thread and the
+/// kernel. On restricted enter/exit, the kernel reads/writes the Linux
+/// register state from/to this frame.
+///
+/// # Arguments
+///
+/// * `frame_cptr` - CPtr to a Frame capability (must have Write right)
+#[inline]
+pub fn restricted_bind_state(frame_cptr: u64) -> SyscallResult {
+    check_result(invoke3(
+        SELF_CAP,
+        method::current::RESTRICTED_BIND,
+        frame_cptr,
+    ))
+}
+
+/// Enter restricted mode to run Linux code in a different VSpace.
+///
+/// The kernel loads the Linux register state from the bound state frame,
+/// switches to the specified VSpace, and returns to EL0 via eret. When
+/// the Linux code executes `svc #0` or triggers a fault, the kernel
+/// saves the Linux state back to the state frame and returns here with
+/// the exit reason.
+///
+/// # Arguments
+///
+/// * `vspace_cptr` - CPtr to the VSpace for the Linux address space
+///
+/// # Returns
+///
+/// The exit reason:
+/// - 0 = SYSCALL (Linux `svc #0`)
+/// - 1 = EXCEPTION (fault in Linux code)
+/// - 2 = KICK (another thread called `restricted_kick`)
+#[inline]
+pub fn restricted_enter(vspace_cptr: u64) -> SyscallResult {
+    check_result(syscall1(Syscall::RestrictedEnter, vspace_cptr))
+}
+
+/// Kick a restricted-mode thread, forcing it to exit restricted mode.
+///
+/// The target thread will exit restricted mode with REASON_KICK on its
+/// next timer tick. Requires a TCB capability with Write right.
+///
+/// # Arguments
+///
+/// * `tcb_cptr` - CPtr to the target thread's TCB capability
+#[inline]
+pub fn restricted_kick(tcb_cptr: u64) -> SyscallResult {
+    check_result(invoke3(
+        tcb_cptr,
+        method::tcb::KICK_RESTRICTED,
+        0,
+    ))
+}
+
 /// Synchronise cache for DMA with direction awareness.
 ///
 /// This is a convenience wrapper that selects the appropriate cache

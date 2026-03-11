@@ -25,6 +25,7 @@ pub mod irq_ops;
 pub mod mem_ops;
 pub mod misc_ops;
 pub mod numbers;
+pub mod restricted;
 pub mod tcb_ops;
 pub mod timer_ops;
 pub mod user_ptr;
@@ -131,6 +132,9 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
         Syscall::Signal => handle_signal(args),
         Syscall::Wait => handle_wait(args, ctx),
         Syscall::Poll => handle_poll(args, ctx),
+
+        // -- Restricted mode (Starnix)
+        Syscall::RestrictedEnter => restricted::handle_restricted_enter(args, ctx),
 
         // -- Object invocation (central dispatcher for all cap operations)
         Syscall::Invoke => invoke::handle_invoke(args, ctx),
@@ -500,7 +504,16 @@ fn sync_exception_handler(ctx: &mut ExceptionContext) {
         // System calls
         esr::ec::SVC_AARCH64 => {
             if ctx.from_el0() {
-                handle_syscall(ctx);
+                // If the current thread is in restricted mode, the SVC came from
+                // Linux code — exit restricted mode instead of dispatching a syscall.
+                if restricted::is_current_restricted() {
+                    restricted::restricted_exit(
+                        ctx,
+                        m6_syscall::numbers::method::restricted::REASON_SYSCALL,
+                    );
+                } else {
+                    handle_syscall(ctx);
+                }
                 // Check if we need to reschedule (yield was called or timer requested it).
                 // Use should_reschedule() which atomically clears the flag, preventing
                 // stale flags from causing unnecessary context switches on every syscall.
@@ -617,8 +630,20 @@ fn sync_exception_handler(ctx: &mut ExceptionContext) {
 /// This function is called for all user-mode exceptions that should be
 /// delivered to a fault handler (page faults, instruction faults, etc.).
 ///
+/// If the thread is in restricted mode, the fault causes a restricted exit
+/// with REASON_EXCEPTION rather than being delivered to a fault handler.
+///
 /// If the thread has no fault endpoint configured, the thread is terminated.
 fn handle_user_exception(ctx: &mut ExceptionContext, ec: u8) {
+    // If we're in restricted mode, exit to Starnix instead of delivering a fault.
+    if restricted::is_current_restricted() {
+        restricted::restricted_exit(
+            ctx,
+            m6_syscall::numbers::method::restricted::REASON_EXCEPTION,
+        );
+        return;
+    }
+
     use crate::ipc::fault::{classify_fault, handle_user_fault};
 
     // Get current task

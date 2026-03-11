@@ -278,6 +278,16 @@ fn irq_handler(ctx: &mut exceptions::ExceptionContext) {
     // to the current TCB would overwrite the saved userspace context.
     let from_el0 = (ctx.spsr & 0b1111) == 0b0000; // SPSR.M[3:0] == EL0t
     let from_idle_el1 = !from_el0 && m6_kernel::sched::current_task_is_idle();
+
+    // If a restricted-mode thread was interrupted and a kick is pending,
+    // force-exit restricted mode before any context switch.
+    if from_el0 && m6_kernel::syscall::restricted::is_restricted_kick_pending() {
+        m6_kernel::syscall::restricted::restricted_exit(
+            ctx,
+            m6_syscall::numbers::method::restricted::REASON_KICK,
+        );
+    }
+
     if (from_el0 || from_idle_el1) && m6_kernel::sched::should_reschedule() {
         m6_kernel::sched::timer_context_switch(ctx);
     }

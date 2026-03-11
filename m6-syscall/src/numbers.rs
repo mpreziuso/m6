@@ -25,6 +25,7 @@ pub mod method {
         pub const CACHE_CLEAN: u64 = 3;
         pub const CACHE_INVALIDATE: u64 = 4;
         pub const CACHE_FLUSH: u64 = 5;
+        pub const RESTRICTED_BIND: u64 = 6;
     }
 
     /// Untyped memory operations.
@@ -70,6 +71,17 @@ pub mod method {
         pub const SUSPEND: u64 = 4;
         pub const SET_PRIORITY: u64 = 5;
         pub const BIND_NOTIF: u64 = 6;
+        pub const KICK_RESTRICTED: u64 = 8;
+    }
+
+    /// Restricted mode exit reasons.
+    pub mod restricted {
+        /// Linux code executed `svc #0`.
+        pub const REASON_SYSCALL: u64 = 0;
+        /// Linux code triggered a fault (data abort, etc.).
+        pub const REASON_EXCEPTION: u64 = 1;
+        /// Another thread kicked the restricted-mode thread.
+        pub const REASON_KICK: u64 = 2;
     }
 
     /// IRQ handler operations.
@@ -144,6 +156,11 @@ pub enum Syscall {
     /// Yield CPU to scheduler.
     Yield = 6,
 
+    // -- Restricted mode (Starnix)
+    /// Enter restricted mode: run Linux code in a different VSpace.
+    /// x0 = VSpace capability pointer.
+    RestrictedEnter = 10,
+
     // -- Notification operations
     /// Signal a notification (OR badge into signal word).
     Signal = 7,
@@ -177,6 +194,7 @@ impl Syscall {
             7 => Some(Self::Signal),
             8 => Some(Self::Wait),
             9 => Some(Self::Poll),
+            10 => Some(Self::RestrictedEnter),
             32 => Some(Self::Invoke),
             254 => Some(Self::DebugPuts),
             255 => Some(Self::DebugPutChar),
@@ -197,6 +215,7 @@ impl Syscall {
             Self::Signal => "Signal",
             Self::Wait => "Wait",
             Self::Poll => "Poll",
+            Self::RestrictedEnter => "RestrictedEnter",
             Self::Invoke => "Invoke",
             Self::DebugPuts => "DebugPuts",
             Self::DebugPutChar => "DebugPutChar",

@@ -21,8 +21,8 @@ use m6_syscall::numbers::{self, method};
 use crate::ipc;
 use crate::syscall::error::{SyscallError, SyscallResult};
 use crate::syscall::{
-    SyscallArgs, asid_ops, cache_ops, cap_ops, iommu_ops, irq_ops, mem_ops, misc_ops, tcb_ops,
-    timer_ops,
+    SyscallArgs, asid_ops, cache_ops, cap_ops, iommu_ops, irq_ops, mem_ops, misc_ops, restricted,
+    tcb_ops, timer_ops,
 };
 
 /// Handle Invoke syscall.
@@ -162,6 +162,7 @@ fn dispatch_self(label: u64, args: &SyscallArgs) -> SyscallResult {
         method::current::CACHE_CLEAN => cache_ops::handle_cache_clean(&repacked),
         method::current::CACHE_INVALIDATE => cache_ops::handle_cache_invalidate(&repacked),
         method::current::CACHE_FLUSH => cache_ops::handle_cache_flush(&repacked),
+        method::current::RESTRICTED_BIND => restricted::handle_restricted_bind(&repacked),
         _ => Err(SyscallError::InvalidArg),
     }
 }
@@ -220,6 +221,7 @@ fn dispatch_tcb(label: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) -> S
         method::tcb::SUSPEND => tcb_ops::handle_tcb_suspend(&repacked),
         method::tcb::SET_PRIORITY => tcb_ops::handle_tcb_set_priority(&repacked),
         method::tcb::BIND_NOTIF => tcb_ops::handle_tcb_bind_notification(&repacked),
+        method::tcb::KICK_RESTRICTED => restricted::handle_restricted_kick(&repacked),
         _ => Err(SyscallError::InvalidArg),
     }
 }
