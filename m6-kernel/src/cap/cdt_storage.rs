@@ -297,20 +297,20 @@ pub fn rotate_cdt_mappings(cnode: ObjectRef, slot1: u32, slot2: u32, slot3: u32)
 
     // Update CDT node back-references for rotated slots
     let mut pool = get_pool().lock();
-    if let Some(id) = node1 {
-        if let Some(n) = pool.get_node_mut(id) {
-            n.slot_index = slot2;
-        }
+    if let Some(id) = node1
+        && let Some(n) = pool.get_node_mut(id)
+    {
+        n.slot_index = slot2;
     }
-    if let Some(id) = node2 {
-        if let Some(n) = pool.get_node_mut(id) {
-            n.slot_index = slot3;
-        }
+    if let Some(id) = node2
+        && let Some(n) = pool.get_node_mut(id)
+    {
+        n.slot_index = slot3;
     }
-    if let Some(id) = node3 {
-        if let Some(n) = pool.get_node_mut(id) {
-            n.slot_index = slot1;
-        }
+    if let Some(id) = node3
+        && let Some(n) = pool.get_node_mut(id)
+    {
+        n.slot_index = slot1;
     }
 }
 

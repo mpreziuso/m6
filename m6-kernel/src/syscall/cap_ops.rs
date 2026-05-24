@@ -328,7 +328,9 @@ struct SlotClearCallback;
 
 impl RevocationCallback for SlotClearCallback {
     fn on_revoke(&mut self, node: &m6_cap::CdtNode) {
-        // Clear the capability slot
+        let obj_ref = node.object_ref;
+
+        // Clear the capability slot.
         object_table::with_object(node.slot_cnode, |obj| {
             if obj.obj_type != KernelObjectType::CNode {
                 return;
@@ -347,8 +349,39 @@ impl RevocationCallback for SlotClearCallback {
             }
         });
 
-        // Unregister from slot map
+        // Unregister from slot map.
         cdt_storage::unregister_cdt_node(node.slot_cnode, node.slot_index);
+
+        // Decrement ref count and free the kernel object if no longer referenced.
+        if obj_ref.is_valid() {
+            object_table::with_table(|t| {
+                if t.dec_ref(obj_ref) {
+                    // Ref count hit zero — free any heap-allocated resources.
+                    if let Some(obj) = t.get(obj_ref) {
+                        match obj.obj_type {
+                            KernelObjectType::Tcb => {
+                                let ptr = unsafe { obj.data.tcb_ptr };
+                                if !ptr.is_null() {
+                                    // SAFETY: TCB allocated by create_tcb; ref count is zero
+                                    // and the thread is terminated (removed from run queue).
+                                    unsafe { crate::cap::tcb_storage::destroy_tcb(ptr) };
+                                }
+                            }
+                            KernelObjectType::CNode => {
+                                let ptr = unsafe { obj.data.cnode_ptr };
+                                if !ptr.is_null() {
+                                    // SAFETY: CNode allocated by create_cnode; ref count is zero.
+                                    unsafe { crate::cap::cnode_storage::destroy_cnode(ptr) };
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    // SAFETY: ref count is zero and heap resources freed above.
+                    unsafe { t.free(obj_ref) };
+                }
+            });
+        }
     }
 }
 
@@ -378,14 +411,31 @@ pub fn handle_cap_revoke(args: &SyscallArgs) -> SyscallResult {
     let cdt_node = cdt_storage::lookup_cdt_node(loc.cnode_ref, loc.slot_index as u32)
         .ok_or(SyscallError::InvalidCap)?;
 
-    // Revoke all descendants
+    // Revoke all children (seL4 semantics: root is preserved, only descendants removed).
     let count = cdt_storage::with_cdt(|cdt| {
+        use m6_cap::CdtOps;
+        let first_child = cdt
+            .get_node(cdt_node)
+            .map_or(CdtNodeId::NULL, |n| n.first_child);
         let mut callback = SlotClearCallback;
-        m6_cap::cdt::revoke_subtree(cdt, cdt_node, &mut callback)
+        let mut total = 0usize;
+        let mut child = first_child;
+        while child.is_valid() {
+            // Snapshot next_sibling before revoke_subtree frees this node.
+            let next = cdt
+                .get_node(child)
+                .map_or(CdtNodeId::NULL, |n| n.next_sibling);
+            total += m6_cap::cdt::revoke_subtree(cdt, child, &mut callback);
+            child = next;
+        }
+        total
     });
 
-    // Unregister the root node from the slot map (revoke_subtree already freed it)
-    cdt_storage::unregister_cdt_node(loc.cnode_ref, loc.slot_index as u32);
+    // Reset the untyped watermark so its physical memory can be reused.
+    let target_obj_ref = cspace::with_slot(&loc, |slot| Ok(slot.object_ref()))?;
+    object_table::with_untyped_mut(target_obj_ref, |untyped| {
+        untyped.reset();
+    });
 
     Ok(count as i64)
 }

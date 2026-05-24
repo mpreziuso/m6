@@ -783,6 +783,32 @@ pub fn frame_write(frame: u64, offset: u64, src: *const u8, len: usize) -> Sysca
     ))
 }
 
+/// Read data from a frame capability into a userspace buffer.
+///
+/// Symmetric to `frame_write`. Copies `len` bytes starting at `offset`
+/// within the frame into the buffer at `dst`.
+///
+/// # Arguments
+///
+/// * `frame` - CPtr to the frame capability (must have Read right)
+/// * `offset` - Byte offset within the frame to start reading
+/// * `dst` - Destination buffer pointer (in caller's address space)
+/// * `len` - Number of bytes to read
+///
+/// # Returns
+///
+/// Number of bytes read on success, negative error code on failure.
+#[inline]
+pub fn frame_read(frame: u64, offset: u64, dst: *mut u8, len: usize) -> SyscallResult {
+    check_result(invoke5(
+        frame,
+        method::frame::READ,
+        offset,
+        dst as u64,
+        len as u64,
+    ))
+}
+
 /// Get the physical address of a frame.
 ///
 /// Returns the physical address of the frame, suitable for DMA programming
@@ -1635,11 +1661,7 @@ pub fn restricted_enter(vspace_cptr: u64) -> SyscallResult {
 /// * `tcb_cptr` - CPtr to the target thread's TCB capability
 #[inline]
 pub fn restricted_kick(tcb_cptr: u64) -> SyscallResult {
-    check_result(invoke3(
-        tcb_cptr,
-        method::tcb::KICK_RESTRICTED,
-        0,
-    ))
+    check_result(invoke3(tcb_cptr, method::tcb::KICK_RESTRICTED, 0))
 }
 
 /// Synchronise cache for DMA with direction awareness.

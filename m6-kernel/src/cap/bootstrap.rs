@@ -545,9 +545,8 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
     // we claim all remaining free frames and decompose them into maximally-aligned
     // power-of-2 chunks.  Each chunk becomes one RAM Untyped capability for the
     // root task — this is the seL4-style "give everything to userspace" handoff.
-    let mut ram_chunks = crate::memory::frame::drain_free_aligned_chunks(
-        m6_common::boot::MAX_RAM_UNTYPED_REGIONS,
-    );
+    let mut ram_chunks =
+        crate::memory::frame::drain_free_aligned_chunks(m6_common::boot::MAX_RAM_UNTYPED_REGIONS);
     if ram_chunks.is_empty() {
         log::error!("No free physical memory left to hand to init — boot failed");
         return Err(BootstrapError::OutOfMemory);
@@ -731,11 +730,7 @@ pub fn bootstrap_root_task_from_initrd(boot_info: &BootInfo) -> BootstrapResult<
     })?;
 
     // 10. Update UserBootInfo with untyped region info (RAM chunks + device regions)
-    update_user_boot_info_all_untyped(
-        user_boot_info_phys,
-        &ram_chunks,
-        boot_info,
-    );
+    update_user_boot_info_all_untyped(user_boot_info_phys, &ram_chunks, boot_info);
 
     // 11. Configure TCB for EL0 entry
     configure_tcb_for_el0(

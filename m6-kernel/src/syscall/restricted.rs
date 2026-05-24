@@ -41,10 +41,9 @@ pub fn handle_restricted_bind(args: &SyscallArgs) -> SyscallResult {
     let frame_cap = ipc::lookup_cap(frame_cptr, ObjectType::Frame, CapRights::WRITE)?;
 
     // Get the physical address from the frame object.
-    let phys_addr = object_table::with_frame_mut(frame_cap.obj_ref, |frame| {
-        frame.phys_addr.as_u64()
-    })
-    .ok_or(SyscallError::TypeMismatch)?;
+    let phys_addr =
+        object_table::with_frame_mut(frame_cap.obj_ref, |frame| frame.phys_addr.as_u64())
+            .ok_or(SyscallError::TypeMismatch)?;
 
     if phys_addr == 0 {
         return Err(SyscallError::InvalidArg);
@@ -180,11 +179,7 @@ pub fn restricted_exit(ctx: &mut ExceptionContext, reason: u64) {
         switch_vspace(Some(vspace));
     }
 
-    log::trace!(
-        "restricted_exit: reason={} for {:?}",
-        reason,
-        tcb_ref
-    );
+    log::trace!("restricted_exit: reason={} for {:?}", reason, tcb_ref);
 }
 
 // -- Kick
@@ -224,9 +219,7 @@ pub fn handle_restricted_kick(args: &SyscallArgs) -> SyscallResult {
 #[inline]
 pub fn is_current_restricted() -> bool {
     sched::current_task()
-        .map(|tcb_ref| {
-            object_table::with_tcb(tcb_ref, |tcb| tcb.restricted_mode)
-        })
+        .map(|tcb_ref| object_table::with_tcb(tcb_ref, |tcb| tcb.restricted_mode))
         .unwrap_or(false)
 }
 

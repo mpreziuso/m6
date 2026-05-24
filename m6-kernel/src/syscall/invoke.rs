@@ -73,9 +73,9 @@ pub fn handle_invoke(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallR
 
 fn minimum_invoke_rights(obj_type: ObjectType, label: u64) -> CapRights {
     match obj_type {
-        // Frame: read-only query vs mutating write
+        // Frame: read-only query/read vs mutating write
         ObjectType::Frame | ObjectType::DeviceFrame => match label {
-            method::frame::GET_PHYS => CapRights::READ,
+            method::frame::GET_PHYS | method::frame::READ => CapRights::READ,
             _ => CapRights::WRITE,
         },
 
@@ -178,6 +178,7 @@ fn dispatch_frame(label: u64, args: &SyscallArgs) -> SyscallResult {
     match label {
         method::frame::GET_PHYS => mem_ops::handle_frame_get_phys(&shift_args(args)),
         method::frame::WRITE => mem_ops::handle_frame_write(&shift_args(args)),
+        method::frame::READ => mem_ops::handle_frame_read(&shift_args(args)),
         _ => Err(SyscallError::InvalidArg),
     }
 }

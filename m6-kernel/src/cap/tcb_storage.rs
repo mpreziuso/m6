@@ -75,7 +75,6 @@ pub struct TcbFull {
     pub task_ctx: TaskContext,
 
     // -- Restricted mode (Starnix)
-
     /// Physical address of the restricted state frame (0 = not bound).
     pub restricted_state_phys: u64,
     /// Whether this thread is currently executing in restricted mode.

@@ -332,7 +332,7 @@ fn timer_irq_handler(_intid: u32) {
         static SMMU_POLL_COUNTER: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
         let count = SMMU_POLL_COUNTER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if count % 2 == 0 {
+        if count.is_multiple_of(2) {
             // Poll all SMMU instances
             for i in 0..4u8 {
                 let _ = m6_kernel::smmu::process_events(i);

@@ -37,6 +37,7 @@ pub mod method {
     pub mod frame {
         pub const GET_PHYS: u64 = 0;
         pub const WRITE: u64 = 1;
+        pub const READ: u64 = 2;
     }
 
     /// VSpace operations.

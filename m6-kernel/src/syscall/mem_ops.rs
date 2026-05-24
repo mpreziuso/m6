@@ -25,7 +25,7 @@ use m6_paging::{
 };
 
 use crate::cap::object_table::KernelObjectType;
-use crate::cap::{cspace, object_table};
+use crate::cap::{cdt_storage, cspace, object_table};
 use crate::ipc;
 
 use super::SyscallArgs;
@@ -38,14 +38,16 @@ const USER_SPACE_MAX: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 /// Convert syscall rights bitmap to PTE permissions.
 ///
-/// Rights bitmap: R=1 (always), W=2, X=4
+/// Rights bitmap: R=1, W=2, X=4, (bit 3 reserved for userspace), COW=16
+/// When COW is set, write is forced off (read-only + COW flag).
 fn rights_to_pte_perms(rights: u64) -> PtePermissions {
+    let cow = rights & 16 != 0;
     PtePermissions {
         read: true,
-        write: rights & 2 != 0,
+        write: if cow { false } else { rights & 2 != 0 },
         execute: rights & 4 != 0,
         user: true, // Always user-accessible for syscall mappings
-        cow: false,
+        cow,
         global: false, // User mappings are per-ASID
     }
 }
@@ -146,6 +148,13 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
 
     // Map target type to kernel object type
     let kernel_type = object_type_to_kernel_type(target_type)?;
+
+    // Resolve the untyped's slot location to find its CDT node.
+    // Required so that newly typed objects can be linked as CDT children,
+    // making them visible to cap_revoke.
+    let untyped_loc = cspace::resolve_cptr(untyped_cptr, 0)?;
+    let untyped_cdt_id =
+        cdt_storage::lookup_cdt_node(untyped_loc.cnode_ref, untyped_loc.slot_index as u32);
 
     // Track how many objects we successfully created
     let mut created = 0usize;
@@ -267,7 +276,7 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
         // Register CDT node for the new capability
         if cap_result.is_ok() {
             let dest_cnode_ref = ObjectRef::from_index(slot_loc.cnode_ref.index());
-            crate::cap::cdt_storage::with_cdt(|cdt| {
+            cdt_storage::with_cdt(|cdt| {
                 use m6_cap::CdtOps;
                 if let Some(node_id) = cdt.alloc_node() {
                     if let Some(node) = cdt.get_node_mut(node_id) {
@@ -275,11 +284,11 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
                         node.slot_cnode = dest_cnode_ref;
                         node.slot_index = slot_index as u32;
                     }
-                    crate::cap::cdt_storage::register_cdt_node(
-                        dest_cnode_ref,
-                        slot_index as u32,
-                        node_id,
-                    );
+                    cdt_storage::register_cdt_node(dest_cnode_ref, slot_index as u32, node_id);
+                    // Link as child of the untyped's CDT node so cap_revoke can reach it.
+                    if let Some(parent) = untyped_cdt_id {
+                        cdt.insert_child(parent, node_id);
+                    }
                 }
             });
         }
@@ -883,7 +892,7 @@ fn install_page_table(
 /// entry is flushed across all CPUs, not the entire TLB.
 /// Operand encoding: bits [63:48] = ASID, bits [43:0] = VA[55:12].
 fn invalidate_tlb_entry(vaddr: u64, asid: u16) {
-    let operand = ((asid as u64) << 48) | ((vaddr >> 12) & 0x0000_FFFF_FFFF_F);
+    let operand = ((asid as u64) << 48) | ((vaddr >> 12) & 0x0000_000F_FFFF_FFFF);
     // SAFETY: TLBI VAE1IS is safe; it only invalidates TLB entries,
     // never causes data loss.
     unsafe {
@@ -965,6 +974,72 @@ pub fn handle_frame_write(args: &SyscallArgs) -> SyscallResult {
 
     // Ensure the write is visible
     m6_arch::cpu::dsb_sy();
+
+    Ok(len as i64)
+}
+
+/// Handle FrameRead syscall.
+///
+/// Reads data from a frame into a userspace buffer without needing to map it.
+/// Symmetric to `handle_frame_write()`.
+///
+/// # ABI
+///
+/// - x0: Frame capability pointer
+/// - x1: Offset within frame to start reading
+/// - x2: Destination address in userspace
+/// - x3: Length in bytes
+///
+/// # Returns
+///
+/// - Number of bytes read on success
+/// - Negative error code on failure
+pub fn handle_frame_read(args: &SyscallArgs) -> SyscallResult {
+    let frame_cptr = args.arg0;
+    let offset = args.arg1 as usize;
+    let dest_addr = args.arg2;
+    let len = args.arg3 as usize;
+
+    // Validate destination is in user address space
+    if dest_addr > USER_SPACE_MAX || dest_addr.saturating_add(len as u64) > USER_SPACE_MAX {
+        return Err(SyscallError::Range);
+    }
+
+    // Probe user destination buffer for write accessibility before copying.
+    super::user_ptr::probe_user_buffer_write(dest_addr, len)?;
+
+    // Look up frame capability with READ right
+    let frame_cap = ipc::lookup_cap(frame_cptr, ObjectType::Frame, CapRights::READ)?;
+
+    // Get frame info
+    let (frame_phys, frame_size_bits) = object_table::with_frame_mut(frame_cap.obj_ref, |frame| {
+        (frame.phys_addr, frame.size_bits)
+    })
+    .ok_or(SyscallError::InvalidCap)?;
+
+    let frame_size = 1usize << frame_size_bits;
+
+    // Validate offset and length fit within frame
+    if offset >= frame_size || len > frame_size - offset {
+        return Err(SyscallError::Range);
+    }
+
+    if len == 0 {
+        return Ok(0);
+    }
+
+    // Convert frame physical address to kernel virtual address
+    let kernel_va = phys_to_kernel_va(frame_phys);
+    let src_ptr = (kernel_va + offset as u64) as *const u8;
+
+    // Copy to userspace
+    // SAFETY: All pages in [dest_addr, dest_addr+len) were verified mapped and
+    // writable by AT S1E0W above. The source is within a valid frame and
+    // the kernel has all physical memory mapped.
+    unsafe {
+        let dest_ptr = dest_addr as *mut u8;
+        core::ptr::copy_nonoverlapping(src_ptr, dest_ptr, len);
+    }
 
     Ok(len as i64)
 }

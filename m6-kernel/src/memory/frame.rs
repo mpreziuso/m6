@@ -798,13 +798,15 @@ pub fn alloc_frames_aligned(count: usize, align_pages: usize) -> Option<u64> {
     let total_size = count * page::SIZE_4K;
     drop(guard); // Release lock before zeroing
 
-    if let Some(virt) = phys_to_virt_checked(phys) {
-        if phys_to_virt_checked(phys + total_size as u64 - 1).is_some() {
-            unsafe {
-                core::ptr::write_bytes(virt as *mut u8, 0, total_size);
-            }
-            return Some(phys);
+    if let Some(virt) = phys_to_virt_checked(phys)
+        && phys_to_virt_checked(phys + total_size as u64 - 1).is_some()
+    {
+        // SAFETY: phys_to_virt_checked confirmed both the start and end of
+        // the allocation fall within the kernel direct-map window.
+        unsafe {
+            core::ptr::write_bytes(virt as *mut u8, 0, total_size);
         }
+        return Some(phys);
     }
 
     log::error!(
@@ -934,15 +936,17 @@ pub fn drain_free_aligned_chunks(max_chunks: usize) -> alloc::vec::Vec<(u64, u8)
             let align_log2 = (abs_pos.trailing_zeros() as usize).min(47 - 12);
 
             // Largest power-of-2 <= remaining.
-            let fit_log2 =
-                (usize::BITS - 1 - remaining.leading_zeros()) as usize;
+            let fit_log2 = (usize::BITS - 1 - remaining.leading_zeros()) as usize;
 
             let chunk_log2_frames = fit_log2.min(align_log2);
             let chunk_frames = 1usize << chunk_log2_frames;
             let size_bits = (chunk_log2_frames + 12) as u8;
 
             // Mark these frames as allocated so the kernel won't reuse them.
-            if alloc.mark_allocated(first_frame + pos, chunk_frames).is_err() {
+            if alloc
+                .mark_allocated(first_frame + pos, chunk_frames)
+                .is_err()
+            {
                 break 'outer;
             }
 
