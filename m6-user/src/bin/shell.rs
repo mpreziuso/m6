@@ -10,12 +10,13 @@ extern crate std;
 
 use core::time::Duration;
 use std::ipc::{Endpoint, IpcBuffer, Notification, ipc_set_recv_slots, ipc_set_send_caps};
-use std::{String, Vec, print, println, thread};
+use std::{String, Vec, print, println, thread, vec};
 
 use m6_cap::ObjectType;
+use m6_system::process::{
+    InitialCap, MapRights, SpawnConfig, ensure_child_page_tables, map_data_to_child, spawn_process,
+};
 use m6_system::{invoke, slot_to_cptr};
-use m6_system::process::{MapRights, SpawnConfig, ensure_child_page_tables,
-                          map_data_to_child, spawn_process};
 
 // -- Constants
 
@@ -173,7 +174,10 @@ struct KeyboardState {
 
 impl KeyboardState {
     fn new() -> Self {
-        Self { shift_held: false, caps_lock: false }
+        Self {
+            shift_held: false,
+            caps_lock: false,
+        }
     }
 
     fn update(&mut self, code: u16, pressed: bool) {
@@ -344,7 +348,9 @@ fn try_get_hid_endpoint() -> Option<Endpoint> {
     let registry_ep = Endpoint::from_cptr(cptr(REGISTRY_EP_SLOT));
 
     // SAFETY: IPC buffer is mapped at the standard userspace address
-    unsafe { ipc_set_recv_slots(&[HID_EP_SLOT]); }
+    unsafe {
+        ipc_set_recv_slots(&[HID_EP_SLOT]);
+    }
 
     let result = registry_ep
         .call(devmgr_ipc::ENSURE, [devmgr_ipc::CLASS_USB_HID, 0, 0, 0])
@@ -370,7 +376,9 @@ fn try_get_fat32_endpoint() -> Option<Endpoint> {
     let registry_ep = Endpoint::from_cptr(cptr(REGISTRY_EP_SLOT));
 
     // SAFETY: IPC buffer is mapped at the standard userspace address
-    unsafe { ipc_set_recv_slots(&[FAT32_EP_SLOT]); }
+    unsafe {
+        ipc_set_recv_slots(&[FAT32_EP_SLOT]);
+    }
 
     let result = registry_ep
         .call(devmgr_ipc::ENSURE, [devmgr_ipc::CLASS_FAT32, 0, 0, 0])
@@ -394,7 +402,10 @@ fn get_fat32_ep(ctx: &mut ShellContext) -> Option<Endpoint> {
 
 fn subscribe_keyboard(hid_ep: &Endpoint) -> Option<u64> {
     let result = hid_ep
-        .call(hid_ipc::SUBSCRIBE, [hid_ipc::device_type::KEYBOARD, 0, 0, 0])
+        .call(
+            hid_ipc::SUBSCRIBE,
+            [hid_ipc::device_type::KEYBOARD, 0, 0, 0],
+        )
         .ok()?;
 
     if (result.label & 0xFFFF) == hid_ipc::OK {
@@ -479,12 +490,7 @@ fn cmd_ls(ctx: &mut ShellContext) {
 
     let handle = open_result.label >> 16;
 
-    loop {
-        let r = match fat32_ep.call(fat32_ipc::READDIR, [handle, 0, 0, 0]) {
-            Ok(r) => r,
-            Err(_) => break,
-        };
-
+    while let Ok(r) = fat32_ep.call(fat32_ipc::READDIR, [handle, 0, 0, 0]) {
         if r.label & 0xFFFF == fat32_ipc::ERR_END_OF_DIR {
             break;
         }
@@ -499,11 +505,16 @@ fn cmd_ls(ctx: &mut ShellContext) {
         let m2 = r.msg[2];
 
         let mut name_buf = [0u8; 13];
-        for i in 0..8usize.min(name_len) {
-            name_buf[i] = ((m1 >> (i * 8)) & 0xFF) as u8;
+        for (i, slot) in name_buf.iter_mut().enumerate().take(8usize.min(name_len)) {
+            *slot = ((m1 >> (i * 8)) & 0xFF) as u8;
         }
-        for i in 0..5usize.min(name_len.saturating_sub(8)) {
-            name_buf[8 + i] = ((m2 >> (i * 8)) & 0xFF) as u8;
+        for (i, slot) in name_buf
+            .iter_mut()
+            .skip(8)
+            .enumerate()
+            .take(5usize.min(name_len.saturating_sub(8)))
+        {
+            *slot = ((m2 >> (i * 8)) & 0xFF) as u8;
         }
 
         let name = core::str::from_utf8(&name_buf[..name_len]).unwrap_or("?");
@@ -570,8 +581,7 @@ fn build_argv_page(program: &str, args: &[String]) -> Vec<u8> {
 
     let total = header_size + string_data.len();
     let page_size = total.div_ceil(4096) * 4096;
-    let mut page: Vec<u8> = Vec::new();
-    page.resize(page_size, 0u8);
+    let mut page: Vec<u8> = vec![0; page_size];
 
     // Write argc
     page[0..8].copy_from_slice(&argc.to_le_bytes());
@@ -595,7 +605,9 @@ fn request_memory(ctx: &mut ShellContext) -> bool {
     let recv_slot = ctx.next_slot;
     ctx.next_slot += 1;
     // SAFETY: IPC buffer is always mapped for userspace processes
-    unsafe { ipc_set_recv_slots(&[recv_slot]); }
+    unsafe {
+        ipc_set_recv_slots(&[recv_slot]);
+    }
     let mem_ep = Endpoint::from_cptr(cptr(MEM_SERVER_SLOT));
     match mem_ep.call(0, [0, 0, 0, 0]) {
         Ok(r) if r.label == 0 => {
@@ -616,7 +628,10 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
         return;
     };
 
-    // 2. Allocate exit notification slot
+    // Snapshot slot counter so we can reset it after the child exits.
+    let spawn_base = ctx.next_slot;
+
+    // 2. Allocate exit notification slot; retry once with fresh memory if needed.
     let notif_slot = ctx.next_slot;
     ctx.next_slot += 1;
     if invoke::retype(
@@ -629,9 +644,25 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
     )
     .is_err()
     {
-        ctx.next_slot -= 1;
-        println!("{}: out of resources", program);
-        return;
+        if !request_memory(ctx) {
+            ctx.next_slot = spawn_base;
+            println!("{}: out of resources", program);
+            return;
+        }
+        if invoke::retype(
+            cptr(ctx.ram_untyped),
+            ObjectType::Notification as u64,
+            0,
+            cptr(0),
+            notif_slot,
+            1,
+        )
+        .is_err()
+        {
+            ctx.next_slot = spawn_base;
+            println!("{}: out of resources", program);
+            return;
+        }
     }
 
     // 3. Build argv page
@@ -639,16 +670,21 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
 
     // 4. Spawn with resume: false so we can map argv and bind notification first.
     //    On memory failure, request a fresh untyped from init and retry once.
+    //    Grant the registry endpoint so tools can call ENSURE themselves.
+    let initial_caps = [InitialCap {
+        src_slot: REGISTRY_EP_SLOT,
+        dst_slot: REGISTRY_EP_SLOT,
+    }];
     let spawn_start = ctx.next_slot;
     let result = loop {
         let config = SpawnConfig {
             elf_data,
-            root_cnode: 0,           // slot 0 = self-ref CNode
+            root_cnode: 0, // slot 0 = self-ref CNode
             cnode_radix: CNODE_RADIX,
             ram_untyped: ctx.ram_untyped,
             asid_pool: ASID_POOL_SLOT,
             next_free_slot: ctx.next_slot,
-            initial_caps: &[],
+            initial_caps: &initial_caps,
             x0: if args.is_empty() { 0 } else { ARGS_PAGE_ADDR },
             resume: false,
         };
@@ -670,7 +706,7 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
     // 5. Map argv page into child's VSpace
     if !argv_data.is_empty() {
         let mut pt_tracker = result.page_table_tracker;
-        let _ = ensure_child_page_tables(
+        if let Err(e) = ensure_child_page_tables(
             0,
             CNODE_RADIX,
             result.vspace_slot,
@@ -679,8 +715,9 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
             ARGS_PAGE_ADDR,
             ARGS_PAGE_ADDR + 4096,
             &mut pt_tracker,
-        );
-        let _ = map_data_to_child(
+        ) {
+            println!("[shell] ensure_child_page_tables failed: {:?}", e);
+        } else if let Err(e) = map_data_to_child(
             0,
             CNODE_RADIX,
             result.vspace_slot,
@@ -689,7 +726,9 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
             ARGS_PAGE_ADDR,
             &argv_data,
             MapRights::R,
-        );
+        ) {
+            println!("[shell] map_data_to_child failed: {:?}", e);
+        }
     }
 
     // 6. Bind exit notification to child TCB, then resume
@@ -700,6 +739,12 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
 
     // 7. Block until child exits — the kernel signals the notification on tcb_exit
     let _ = invoke::wait(notif_cptr);
+
+    // 8. Reclaim memory: revoke the untyped, destroying all derived objects (notification,
+    //    TCB, CNode, VSpace, frames, page tables) and returning their memory to the untyped.
+    //    Then reset the slot counter past the untyped slot so it's ready for the next spawn.
+    let _ = invoke::cap_revoke(cptr(0), ctx.ram_untyped, CNODE_RADIX as u64);
+    ctx.next_slot = ctx.ram_untyped + 1;
 }
 
 // -- Command dispatch
@@ -714,7 +759,10 @@ fn execute_line(tokens: &[String], ctx: &mut ShellContext) {
         "help" => builtin_help(),
         "version" => builtin_version(),
         "exit" | "quit" => {
-            let code = tokens.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            let code = tokens
+                .get(1)
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
             std::process::exit(code);
         }
         "ls" => cmd_ls(ctx),
@@ -733,9 +781,7 @@ fn main() -> i32 {
 
     // SAFETY: init mapped the initrd at SHELL_INITRD_ADDR before resuming us
     let initrd: &'static [u8] = if initrd_size > 0 {
-        unsafe {
-            core::slice::from_raw_parts(SHELL_INITRD_ADDR as *const u8, initrd_size)
-        }
+        unsafe { core::slice::from_raw_parts(SHELL_INITRD_ADDR as *const u8, initrd_size) }
     } else {
         &[]
     };
@@ -772,17 +818,23 @@ fn main() -> i32 {
 
     // Transfer notification to HID driver during subscribe
     // SAFETY: IPC buffer is mapped and accessible
-    unsafe { ipc_set_send_caps(&[input_notif.cptr()]); }
+    unsafe {
+        ipc_set_send_caps(&[input_notif.cptr()]);
+    }
 
     let sub_id = match subscribe_keyboard(&hid_ep) {
         Some(id) => {
             // SAFETY: IPC buffer is mapped and accessible
-            unsafe { IpcBuffer::get_mut().extra_caps = 0; }
+            unsafe {
+                IpcBuffer::get_mut().extra_caps = 0;
+            }
             id
         }
         None => {
             // SAFETY: IPC buffer is mapped and accessible
-            unsafe { IpcBuffer::get_mut().extra_caps = 0; }
+            unsafe {
+                IpcBuffer::get_mut().extra_caps = 0;
+            }
             println!("Failed to subscribe to keyboard events\n");
             print!("\x1b[32mm6>\x1b[0m ");
             loop {
