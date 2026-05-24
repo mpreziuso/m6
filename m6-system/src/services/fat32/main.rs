@@ -59,13 +59,9 @@ const SERVICE_EP: u64 = cptr(12);
 const BLK_EP: u64 = cptr(30);
 /// Frame for block I/O data (slot 31)
 const DATA_FRAME: u64 = cptr(31);
-/// Frame for path/data buffer (slot 32)
-const PATH_FRAME: u64 = cptr(32);
 
-/// Virtual address for data frame
+/// Virtual address for block I/O data frame
 const DATA_VADDR: u64 = 0x8002_0000;
-/// Virtual address for path/data buffer
-const PATH_VADDR: u64 = 0x8003_0000;
 
 /// Null time source (returns fixed timestamp)
 struct NullTimeSource;
@@ -106,19 +102,6 @@ pub unsafe extern "C" fn _start() -> ! {
         }
         Err(e) => {
             log::error!("Failed to map data frame: {}", e as u64);
-            loop {
-                sched_yield();
-            }
-        }
-    }
-
-    // Map the path/data buffer frame
-    match map_frame(ROOT_VSPACE, PATH_FRAME, PATH_VADDR, 0b011, 0) {
-        Ok(_) => {
-            log::debug!("Mapped path frame at {:#x}", PATH_VADDR);
-        }
-        Err(e) => {
-            log::error!("Failed to map path frame: {}", e as u64);
             loop {
                 sched_yield();
             }
@@ -261,7 +244,7 @@ fn handle_request(
             0,
         ),
         request::CLOSE => (handle_close(volume_mgr, handles, badge, msg), 0, 0, 0),
-        request::READ => (handle_read(volume_mgr, handles, badge, msg), 0, 0, 0),
+        request::READ => handle_read(volume_mgr, handles, badge, msg),
         request::WRITE => (handle_write(volume_mgr, handles, badge, msg), 0, 0, 0),
         request::MKDIR => (handle_mkdir(volume_mgr, volume, badge, msg), 0, 0, 0),
         request::UNLINK => (handle_unlink(volume_mgr, volume, badge, msg), 0, 0, 0),
@@ -273,22 +256,48 @@ fn handle_request(
     }
 }
 
-/// Read path from the data buffer at PATH_VADDR.
-fn read_path(path_len: u64) -> Option<&'static str> {
-    if path_len == 0 || path_len > 255 {
+/// Unpack an inline path from two message words (up to 16 bytes).
+#[allow(clippy::needless_range_loop)]
+fn unpack_path_inline(w0: u64, w1: u64, path_len: usize) -> Option<[u8; 16]> {
+    if path_len == 0 || path_len > 16 {
         return None;
     }
-
-    // SAFETY: PATH_VADDR is our mapped frame
-    let bytes = unsafe {
-        let ptr = PATH_VADDR as *const u8;
-        core::slice::from_raw_parts(ptr, path_len as usize)
-    };
-
-    core::str::from_utf8(bytes).ok()
+    let mut buf = [0u8; 16];
+    for i in 0..8.min(path_len) {
+        buf[i] = ((w0 >> (i * 8)) & 0xFF) as u8;
+    }
+    for i in 0..8.min(path_len.saturating_sub(8)) {
+        buf[8 + i] = ((w1 >> (i * 8)) & 0xFF) as u8;
+    }
+    Some(buf)
 }
 
-/// Handle OPEN request.
+/// Pack up to 24 bytes into three u64s for inline READ reply.
+#[allow(clippy::needless_range_loop)]
+fn pack_data_reply(buf: &[u8]) -> (u64, u64, u64) {
+    let mut m0 = 0u64;
+    let mut m1 = 0u64;
+    let mut m2 = 0u64;
+    for i in 0..8.min(buf.len()) {
+        m0 |= (buf[i] as u64) << (i * 8);
+    }
+    for i in 0..8.min(buf.len().saturating_sub(8)) {
+        m1 |= (buf[8 + i] as u64) << (i * 8);
+    }
+    for i in 0..8.min(buf.len().saturating_sub(16)) {
+        m2 |= (buf[16 + i] as u64) << (i * 8);
+    }
+    (m0, m1, m2)
+}
+
+/// Handle OPEN request (inline path).
+///
+/// Message format:
+/// - msg[0]: path bytes [0..7] packed little-endian
+/// - msg[1]: path bytes [8..15] packed little-endian
+/// - msg[2]: flags (low 32 bits) | path_len (high 32 bits)
+///
+/// Response label: `OK | (handle << 16)`
 fn handle_open(
     volume_mgr: &mut VolMgr,
     volume: embedded_sdmmc::RawVolume,
@@ -296,12 +305,16 @@ fn handle_open(
     badge: u64,
     msg: &[u64; 4],
 ) -> u64 {
-    let open_flags = msg[0];
-    let path_len = msg[1];
+    let open_flags = msg[2] & 0xFFFF_FFFF;
+    let path_len = (msg[2] >> 32) as usize;
 
-    let path = match read_path(path_len) {
-        Some(p) => p,
+    let path_buf = match unpack_path_inline(msg[0], msg[1], path_len) {
+        Some(b) => b,
         None => return response::ERR_INVALID,
+    };
+    let path = match core::str::from_utf8(&path_buf[..path_len]) {
+        Ok(s) => s,
+        Err(_) => return response::ERR_INVALID,
     };
 
     // Open root directory first
@@ -373,51 +386,60 @@ fn handle_close(
     response::ERR_HANDLE_INVALID
 }
 
-/// Handle READ request.
+/// Handle READ request (inline data reply).
+///
+/// Message format:
+/// - msg[0]: file handle
+/// - msg[1]: max bytes to read (≤ 24)
+///
+/// Response: `OK | (bytes_read << 16)` with data packed into reply m0/m1/m2.
 fn handle_read(
     volume_mgr: &mut VolMgr,
     handles: &mut HandleTable,
     badge: u64,
     msg: &[u64; 4],
-) -> u64 {
+) -> (u64, u64, u64, u64) {
     let handle = msg[0] as u32;
-    let max_bytes = msg[1] as usize;
+    let max_bytes = (msg[1] as usize).min(24);
 
-    // Get handle entry
     let entry = match handles.get(handle, badge) {
         Some(e) if e.handle_type == HandleType::File => e,
-        _ => return response::ERR_HANDLE_INVALID,
+        _ => return (response::ERR_HANDLE_INVALID, 0, 0, 0),
     };
 
     let raw_file = match entry.raw_file {
         Some(f) => f,
-        None => return response::ERR_HANDLE_INVALID,
+        None => return (response::ERR_HANDLE_INVALID, 0, 0, 0),
     };
 
-    // Read into buffer
-    let read_len = max_bytes.min(4096);
-    let buf = unsafe {
-        let ptr = DATA_VADDR as *mut u8;
-        core::slice::from_raw_parts_mut(ptr, read_len)
-    };
-
-    match volume_mgr.read(raw_file, buf) {
-        Ok(bytes_read) => response::OK | ((bytes_read as u64) << 16),
-        Err(e) => FsError::from_sdmmc(e).to_response(),
+    let mut buf = [0u8; 24];
+    match volume_mgr.read(raw_file, &mut buf[..max_bytes]) {
+        Ok(bytes_read) => {
+            let (m0, m1, m2) = pack_data_reply(&buf[..bytes_read]);
+            (response::OK | ((bytes_read as u64) << 16), m0, m1, m2)
+        }
+        Err(e) => (FsError::from_sdmmc(e).to_response(), 0, 0, 0),
     }
 }
 
-/// Handle WRITE request.
+/// Handle WRITE request (inline data).
+///
+/// Message format:
+/// - msg[0]: data bytes [0..7] packed little-endian
+/// - msg[1]: data bytes [8..15] packed little-endian
+/// - msg[2]: handle (low 32 bits) | byte_count (high 32 bits, ≤ 16)
+///
+/// Response: `OK | (bytes_written << 16)`
+#[allow(clippy::needless_range_loop)]
 fn handle_write(
     volume_mgr: &mut VolMgr,
     handles: &mut HandleTable,
     badge: u64,
     msg: &[u64; 4],
 ) -> u64 {
-    let handle = msg[0] as u32;
-    let byte_count = msg[1] as usize;
+    let handle = (msg[2] & 0xFFFF_FFFF) as u32;
+    let byte_count = ((msg[2] >> 32) as usize).min(16);
 
-    // Get handle entry
     let entry = match handles.get(handle, badge) {
         Some(e) if e.handle_type == HandleType::File => e,
         _ => return response::ERR_HANDLE_INVALID,
@@ -428,31 +450,44 @@ fn handle_write(
         None => return response::ERR_HANDLE_INVALID,
     };
 
-    // Read data from buffer
-    let write_len = byte_count.min(4096);
-    let buf = unsafe {
-        let ptr = DATA_VADDR as *const u8;
-        core::slice::from_raw_parts(ptr, write_len)
-    };
+    // Unpack data from the two message words (up to 16 bytes)
+    let mut buf = [0u8; 16];
+    let w0_bytes = msg[0].to_le_bytes();
+    let w1_bytes = msg[1].to_le_bytes();
+    let copy0 = 8.min(byte_count);
+    buf[..copy0].copy_from_slice(&w0_bytes[..copy0]);
+    let copy1 = 8.min(byte_count.saturating_sub(8));
+    buf[8..8 + copy1].copy_from_slice(&w1_bytes[..copy1]);
 
-    match volume_mgr.write(raw_file, buf) {
-        Ok(()) => response::OK | ((write_len as u64) << 16),
+    match volume_mgr.write(raw_file, &buf[..byte_count]) {
+        Ok(()) => response::OK | ((byte_count as u64) << 16),
         Err(e) => FsError::from_sdmmc(e).to_response(),
     }
 }
 
-/// Handle MKDIR request.
+/// Handle MKDIR request (inline path).
+///
+/// Message format:
+/// - msg[0]: path bytes [0..7] packed little-endian
+/// - msg[1]: path bytes [8..15] packed little-endian
+/// - msg[2]: path_len (≤ 16)
+///
+/// Response: `OK` on success.
 fn handle_mkdir(
     volume_mgr: &mut VolMgr,
     volume: embedded_sdmmc::RawVolume,
     _badge: u64,
     msg: &[u64; 4],
 ) -> u64 {
-    let path_len = msg[0];
+    let path_len = msg[2] as usize;
 
-    let path = match read_path(path_len) {
-        Some(p) => p,
+    let path_buf = match unpack_path_inline(msg[0], msg[1], path_len) {
+        Some(b) => b,
         None => return response::ERR_INVALID,
+    };
+    let path = match core::str::from_utf8(&path_buf[..path_len]) {
+        Ok(s) => s,
+        Err(_) => return response::ERR_INVALID,
     };
 
     // Open root directory
@@ -480,18 +515,24 @@ fn handle_mkdir(
     result
 }
 
-/// Handle UNLINK request.
+/// Handle UNLINK request (inline path).
+///
+/// Message format matches MKDIR: msg[0]/msg[1] = path bytes, msg[2] = path_len.
 fn handle_unlink(
     volume_mgr: &mut VolMgr,
     volume: embedded_sdmmc::RawVolume,
     _badge: u64,
     msg: &[u64; 4],
 ) -> u64 {
-    let path_len = msg[0];
+    let path_len = msg[2] as usize;
 
-    let path = match read_path(path_len) {
-        Some(p) => p,
+    let path_buf = match unpack_path_inline(msg[0], msg[1], path_len) {
+        Some(b) => b,
         None => return response::ERR_INVALID,
+    };
+    let path = match core::str::from_utf8(&path_buf[..path_len]) {
+        Ok(s) => s,
+        Err(_) => return response::ERR_INVALID,
     };
 
     // Open root directory

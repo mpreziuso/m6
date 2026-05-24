@@ -28,7 +28,7 @@ fn compute_fat_size(block_count: u64, spc: u8) -> u32 {
     // FATSz   = ceil(TmpVal1 / TmpVal2)
     let tmp1 = block_count.saturating_sub(RESERVED_SECTORS as u64);
     let tmp2 = 128u64 * spc as u64 + 1;
-    ((tmp1 + tmp2 - 1) / tmp2) as u32
+    tmp1.div_ceil(tmp2) as u32
 }
 
 fn le16(buf: &mut [u8; SECTOR_SIZE], off: usize, val: u16) {
