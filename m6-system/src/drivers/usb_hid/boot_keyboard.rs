@@ -126,14 +126,12 @@ impl BootKeyboardState {
             if prev_key == 0 || prev_key == 0x01 {
                 continue;
             }
-            let still_pressed = report.keys.iter().any(|&k| k == prev_key);
-            if !still_pressed {
-                if count < events.len() {
-                    let keycode = hid_to_keycode(prev_key);
-                    if keycode != KEY_RESERVED {
-                        events[count] = InputEvent::key_release(keycode, timestamp_ns);
-                        count += 1;
-                    }
+            let still_pressed = report.keys.contains(&prev_key);
+            if !still_pressed && count < events.len() {
+                let keycode = hid_to_keycode(prev_key);
+                if keycode != KEY_RESERVED {
+                    events[count] = InputEvent::key_release(keycode, timestamp_ns);
+                    count += 1;
                 }
             }
         }
@@ -143,14 +141,12 @@ impl BootKeyboardState {
             if curr_key == 0 || curr_key == 0x01 {
                 continue;
             }
-            let was_pressed = self.prev_report.keys.iter().any(|&k| k == curr_key);
-            if !was_pressed {
-                if count < events.len() {
-                    let keycode = hid_to_keycode(curr_key);
-                    if keycode != KEY_RESERVED {
-                        events[count] = InputEvent::key_press(keycode, timestamp_ns);
-                        count += 1;
-                    }
+            let was_pressed = self.prev_report.keys.contains(&curr_key);
+            if !was_pressed && count < events.len() {
+                let keycode = hid_to_keycode(curr_key);
+                if keycode != KEY_RESERVED {
+                    events[count] = InputEvent::key_press(keycode, timestamp_ns);
+                    count += 1;
                 }
             }
         }

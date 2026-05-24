@@ -35,7 +35,9 @@ pub fn set_ram_untyped(slot: u64) {
 pub fn request_memory_from_init(cnode_radix: u8, recv_slot: u64) -> bool {
     let cptr = |s| slot_to_cptr(s, cnode_radix);
     // SAFETY: device-mgr is single-threaded; IPC buffer is always mapped.
-    unsafe { ipc_set_recv_slots(&[recv_slot]); }
+    unsafe {
+        ipc_set_recv_slots(&[recv_slot]);
+    }
     matches!(
         call(cptr(slots::MEM_SERVER_EP), 0, 0, 0, 0),
         Ok(r) if r.label == 0

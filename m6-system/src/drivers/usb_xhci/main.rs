@@ -20,6 +20,7 @@
 #![no_std]
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
+#![allow(clippy::deref_addrof)]
 
 extern crate alloc;
 
@@ -35,7 +36,7 @@ use m6_syscall::invoke::{
 };
 
 use ipc::{request, response, status};
-use xhci::{DeviceDescriptor, PortSpeed, PortStatus, XhciController, XhciDmaRegion};
+use xhci::{PortSpeed, PortStatus, XhciController, XhciDmaRegion};
 
 // -- Capability slot definitions
 
@@ -105,7 +106,9 @@ struct XhciDevice {
 #[derive(Clone)]
 struct UsbDeviceInfo {
     slot_id: u8,
+    #[allow(dead_code)]
     port: u8,
+    #[allow(dead_code)]
     speed: PortSpeed,
     interfaces: alloc::vec::Vec<UsbInterfaceInfo>,
 }
@@ -113,6 +116,7 @@ struct UsbDeviceInfo {
 /// Basic USB interface info
 #[derive(Clone)]
 struct UsbInterfaceInfo {
+    #[allow(dead_code)]
     interface_number: u8,
     class: u8,
     subclass: u8,
@@ -176,6 +180,11 @@ fn setup_irq() {
 }
 
 /// Entry point for xHCI driver.
+///
+/// # Safety
+///
+/// Must be called by the kernel with a valid xHCI controller physical address.
+/// The capability space must be set up by device-mgr prior to entry.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
@@ -183,7 +192,7 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
     rt::init_allocator();
 
     // Map the DeviceFrame (xHCI MMIO) to our address space
-    if let Err(_) = map_frame(ROOT_VSPACE, DEVICE_FRAME, XHCI_MMIO_VADDR, 0b011, 0) {
+    if map_frame(ROOT_VSPACE, DEVICE_FRAME, XHCI_MMIO_VADDR, 0b011, 0).is_err() {
         halt();
     }
 
@@ -285,7 +294,7 @@ fn service_loop(device: &mut XhciDevice) -> ! {
 
 /// Signal all client notifications that have pending data.
 fn signal_client_notifications() {
-    // SAFETY: Single-threaded driver
+    // SAFETY: Single-threaded driver — no concurrent access
     let transfers = unsafe { &*(&raw const INTERRUPT_TRANSFERS) };
 
     for transfer in transfers.iter() {
@@ -301,7 +310,7 @@ fn poll_interrupt_transfers(device: &mut XhciDevice) {
         return;
     }
 
-    // SAFETY: Single-threaded driver
+    // SAFETY: Single-threaded driver — no concurrent access
     let transfers = unsafe { &mut *(&raw mut INTERRUPT_TRANSFERS) };
 
     for transfer in transfers.iter_mut() {
@@ -523,11 +532,8 @@ fn ensure_enumerated(device: &mut XhciDevice) {
         let port_status = &device.port_status_cache[i];
         if port_status.connected && !port_status.enabled {
             // Port numbers are 1-indexed, convert to 0-indexed for reset
-            match device.xhci_ctrl.reset_port(port_status.port - 1) {
-                Ok(new_status) => {
-                    device.port_status_cache[i] = new_status;
-                }
-                Err(_) => {}
+            if let Ok(new_status) = device.xhci_ctrl.reset_port(port_status.port - 1) {
+                device.port_status_cache[i] = new_status;
             }
         }
     }
@@ -562,19 +568,19 @@ fn ensure_enumerated(device: &mut XhciDevice) {
         };
 
         // Address the device
-        if let Err(_) =
-            device
-                .xhci_ctrl
-                .address_device(slot_id, port_status.port, port_status.speed)
+        if device
+            .xhci_ctrl
+            .address_device(slot_id, port_status.port, port_status.speed)
+            .is_err()
         {
             continue;
         }
 
         // Get device descriptor
-        let _dev_desc = match device.xhci_ctrl.get_device_descriptor(slot_id) {
-            Ok(desc) => desc,
-            Err(_) => DeviceDescriptor::default(),
-        };
+        let _dev_desc = device
+            .xhci_ctrl
+            .get_device_descriptor(slot_id)
+            .unwrap_or_default();
 
         // Get configuration descriptor and parse interfaces
         let mut config_buf = [0u8; 256];
@@ -782,7 +788,7 @@ fn handle_start_interrupt(
         }
     };
 
-    // SAFETY: Single-threaded driver
+    // SAFETY: Single-threaded driver — no concurrent access
     let transfers = unsafe { &mut *(&raw mut INTERRUPT_TRANSFERS) };
     let slot = transfers.iter_mut().find(|t| !t.active);
 
@@ -836,7 +842,7 @@ fn handle_start_interrupt(
 }
 
 fn handle_stop_interrupt(_device: &mut XhciDevice, device_addr: u8, endpoint: u8) -> u64 {
-    // SAFETY: Single-threaded driver
+    // SAFETY: Single-threaded driver — no concurrent access
     let transfers = unsafe { &mut *(&raw mut INTERRUPT_TRANSFERS) };
 
     for transfer in transfers.iter_mut() {
@@ -866,28 +872,28 @@ fn handle_get_interrupt_data(
     device_addr: u8,
     endpoint: u8,
 ) -> IpcResponse {
-    // SAFETY: Single-threaded driver
+    // SAFETY: Single-threaded driver — no concurrent access
     let transfers = unsafe { &mut *(&raw mut INTERRUPT_TRANSFERS) };
 
     for transfer in transfers.iter_mut() {
         if transfer.active && transfer.device_addr == device_addr && transfer.endpoint == endpoint {
             // Poll hardware for new data if configured
-            if transfer.hw_configured && device.xhci_initialized {
-                if let Some((data, len)) = device
+            if transfer.hw_configured
+                && device.xhci_initialized
+                && let Some((data, len)) = device
                     .xhci_ctrl
                     .poll_interrupt_data(transfer.slot_id, transfer.ep_idx as usize)
-                {
-                    // Store in transfer buffer
-                    let copy_len = len.min(8);
-                    transfer.buffer[..copy_len].copy_from_slice(&data[..copy_len]);
-                    transfer.buffer_len = copy_len as u8;
-                    transfer.has_pending_data = true;
+            {
+                // Store in transfer buffer
+                let copy_len = len.min(8);
+                transfer.buffer[..copy_len].copy_from_slice(&data[..copy_len]);
+                transfer.buffer_len = copy_len as u8;
+                transfer.has_pending_data = true;
 
-                    // Re-queue the transfer for continuous polling
-                    let _ = device
-                        .xhci_ctrl
-                        .queue_interrupt_transfer(transfer.slot_id, transfer.ep_idx as usize);
-                }
+                // Re-queue the transfer for continuous polling
+                let _ = device
+                    .xhci_ctrl
+                    .queue_interrupt_transfer(transfer.slot_id, transfer.ep_idx as usize);
             }
 
             if transfer.has_pending_data {

@@ -19,8 +19,9 @@ use m6_cap::root_slots::Slot;
 use m6_common::boot::{MAX_DEVICE_REGIONS, MAX_UNTYPED_REGIONS};
 use m6_syscall::{
     IpcBuffer, USER_BOOT_INFO_ADDR, USER_BOOT_INFO_MAGIC, USER_BOOT_INFO_VERSION, UserBootInfo,
-    invoke::{ipc_get_recv_caps, ipc_set_recv_slots, ipc_set_send_caps, recv, reply_recv,
-             sched_yield},
+    invoke::{
+        ipc_get_recv_caps, ipc_set_recv_slots, ipc_set_send_caps, recv, reply_recv, sched_yield,
+    },
 };
 use process::{InitialCap, SpawnConfig};
 
@@ -187,7 +188,9 @@ fn serve_memory_requests(boot_info: &UserBootInfo, radix: u8, _next_slot: u64) -
 
             if let Some(ut) = ut_cptr {
                 // SAFETY: IPC buffer is always mapped for init.
-                unsafe { ipc_set_send_caps(&[ut]); }
+                unsafe {
+                    ipc_set_send_caps(&[ut]);
+                }
                 reply_recv(cptr(MEM_SERVER_EP_SLOT), 0, 0, 0, 0)
             } else {
                 log::warn!("Memory server: all RAM untypeds exhausted");
@@ -532,7 +535,12 @@ fn request_uart_driver(registry_ep: u64, radix: u8, next_slot: &mut u64) {
 }
 
 /// Spawn the shell with registry endpoint for HID access.
-fn spawn_shell(boot_info: &UserBootInfo, next_slot: &mut u64, registry_slot: u64, mem_ep_slot: u64) {
+fn spawn_shell(
+    boot_info: &UserBootInfo,
+    next_slot: &mut u64,
+    registry_slot: u64,
+    mem_ep_slot: u64,
+) {
     let elf_data = match find_in_initrd(boot_info, "shell") {
         Some(data) => data,
         None => return,

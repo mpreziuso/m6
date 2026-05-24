@@ -366,7 +366,7 @@ pub unsafe extern "C" fn _start(device_offset: u64) -> ! {
     // Register DMA fault handler for observability. Uses the MSI-X vector 0
     // notification cap with a distinct badge so fault signals can be
     // distinguished from IRQ completions.
-    if let Err(_) = iospace_set_fault_handler(IOSPACE, 0, msix_notif(0), DMA_FAULT_BADGE) {
+    if iospace_set_fault_handler(IOSPACE, 0, msix_notif(0), DMA_FAULT_BADGE).is_err() {
         log::warn!("DMA fault handler not available");
     }
 

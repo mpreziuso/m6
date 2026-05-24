@@ -7,6 +7,10 @@
 //! Based on the xHCI specification (eXtensible Host Controller Interface).
 
 #![allow(dead_code)]
+#![allow(clippy::identity_op)]
+#![allow(clippy::type_complexity)]
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::collapsible_if)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use core::ptr::{read_volatile, write_volatile};

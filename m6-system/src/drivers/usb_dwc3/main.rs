@@ -29,6 +29,7 @@
 #![no_std]
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
+#![allow(clippy::deref_addrof)]
 
 extern crate alloc;
 
@@ -199,7 +200,9 @@ struct Dwc3Device {
 #[derive(Clone)]
 struct UsbDeviceInfo {
     slot_id: u8,
+    #[allow(dead_code)]
     port: u8,
+    #[allow(dead_code)]
     speed: xhci::PortSpeed,
     interfaces: alloc::vec::Vec<UsbInterfaceInfo>,
 }
@@ -248,6 +251,11 @@ fn map_extended_mmio_frames(layout: &VaddrLayout) -> usize {
 }
 
 /// Entry point for DWC3 driver.
+///
+/// # Safety
+///
+/// Must be called by the kernel with a valid DWC3 controller physical address.
+/// The capability space must be set up by device-mgr prior to entry.
 #[unsafe(no_mangle)]
 #[unsafe(link_section = ".text.entry")]
 pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
@@ -276,7 +284,7 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
     let layout = VaddrLayout::for_controller(controller_idx);
 
     // Map the DeviceFrame (DWC3 MMIO)
-    if let Err(_) = map_frame(ROOT_VSPACE, DEVICE_FRAME, layout.mmio, 0b011, 0) {
+    if map_frame(ROOT_VSPACE, DEVICE_FRAME, layout.mmio, 0b011, 0).is_err() {
         halt();
     }
 
@@ -318,8 +326,7 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
         // Wait for CSFTRST to self-clear (typically <1ms, allow up to 1s)
         let mut reset_ok = false;
         for _ in 0..1_000_000u32 {
-            let val =
-                unsafe { core::ptr::read_volatile((ctrl_addr + DCTL_OFFSET) as *const u32) };
+            let val = unsafe { core::ptr::read_volatile((ctrl_addr + DCTL_OFFSET) as *const u32) };
             if (val & DCTL_CSFTRST) == 0 {
                 reset_ok = true;
                 break;
@@ -874,7 +881,7 @@ fn service_loop(device: &mut Dwc3Device) -> ! {
 
 /// Signal all client notifications that have pending data.
 fn signal_client_notifications() {
-    // SAFETY: Single-threaded driver
+    // SAFETY: Single-threaded driver — no concurrent access
     let transfers = unsafe { &*(&raw const INTERRUPT_TRANSFERS) };
 
     for transfer in transfers.iter() {
@@ -895,23 +902,22 @@ fn process_xhci_interrupts(device: &mut Dwc3Device) {
 
     // Check all active interrupt endpoints for data dispatched above
     for transfer in transfers.iter_mut() {
-        if transfer.active && transfer.configured {
-            if let Some((data, len)) = device
+        if transfer.active
+            && transfer.configured
+            && let Some((data, len)) = device
                 .xhci_ctrl
                 .poll_interrupt_data(transfer.slot_id, transfer.ep_idx)
-            {
-                for i in 0..len.min(8) {
-                    transfer.buffer[i] = data[i];
-                }
-                transfer.buffer_len = len as u8;
-                transfer.has_pending_data = true;
+        {
+            let copy_len = len.min(8);
+            transfer.buffer[..copy_len].copy_from_slice(&data[..copy_len]);
+            transfer.buffer_len = len as u8;
+            transfer.has_pending_data = true;
 
-                // Re-queue immediately so the endpoint always has a TRB
-                // ready for the next IN token.
-                let _ = device
-                    .xhci_ctrl
-                    .queue_interrupt_transfer(transfer.slot_id, transfer.ep_idx);
-            }
+            // Re-queue immediately so the endpoint always has a TRB
+            // ready for the next IN token.
+            let _ = device
+                .xhci_ctrl
+                .queue_interrupt_transfer(transfer.slot_id, transfer.ep_idx);
         }
     }
 }
@@ -1049,11 +1055,8 @@ fn ensure_enumerated(device: &mut Dwc3Device) {
         let port_status = &device.port_status_cache[i];
         if port_status.connected {
             let port_idx = port_status.port - 1;
-            match device.xhci_ctrl.reset_port(port_idx) {
-                Ok(new_status) => {
-                    device.port_status_cache[i] = new_status;
-                }
-                Err(_) => {}
+            if let Ok(new_status) = device.xhci_ctrl.reset_port(port_idx) {
+                device.port_status_cache[i] = new_status;
             }
         }
     }
@@ -1425,20 +1428,19 @@ fn handle_get_interrupt_data(
             }
 
             // No pending data — poll xHCI event ring directly
-            if transfer.configured {
-                if let Some((data, len)) = device
+            if transfer.configured
+                && let Some((data, len)) = device
                     .xhci_ctrl
                     .poll_interrupt_data(transfer.slot_id, transfer.ep_idx)
-                {
-                    let packed_all = u64::from_le_bytes(data);
-                    let _ = device
-                        .xhci_ctrl
-                        .queue_interrupt_transfer(transfer.slot_id, transfer.ep_idx);
-                    return IpcResponse {
-                        label: response::OK | ((len as u64) << 16),
-                        msg: [packed_all, 0, 0, 0],
-                    };
-                }
+            {
+                let packed_all = u64::from_le_bytes(data);
+                let _ = device
+                    .xhci_ctrl
+                    .queue_interrupt_transfer(transfer.slot_id, transfer.ep_idx);
+                return IpcResponse {
+                    label: response::OK | ((len as u64) << 16),
+                    msg: [packed_all, 0, 0, 0],
+                };
             }
 
             return IpcResponse::simple(response::OK);

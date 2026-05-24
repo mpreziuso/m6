@@ -152,6 +152,7 @@ where
         }
 
         // Fall back to large allocation
+        #[allow(clippy::manual_unwrap_or_default)] // cfg block in Ok arm
         match self.alloc_large(layout) {
             Ok(ptr) => {
                 #[cfg(feature = "debug-poison")]

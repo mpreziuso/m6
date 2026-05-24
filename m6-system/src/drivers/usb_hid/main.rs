@@ -263,7 +263,8 @@ impl HidDriver {
         // First, set boot protocol (protocol=0) for HID boot devices
         // This is required for keyboards/mice with boot protocol support
         // Pack: device_addr | interface<<8 | protocol<<16
-        let set_protocol_arg = (device_addr as u64) | ((interface as u64) << 8) | (0u64 << 16); // protocol=0 for boot protocol
+        // protocol=0 for boot protocol (bits [23:16] left as zero)
+        let set_protocol_arg = (device_addr as u64) | ((interface as u64) << 8);
 
         let _ = m6_syscall::invoke::call(
             USB_HOST_EP,
@@ -275,10 +276,8 @@ impl HidDriver {
 
         // Also set idle rate to 0 (report only on change)
         // Pack: device_addr | interface<<8 | duration<<16 | report_id<<24
-        let set_idle_arg = (device_addr as u64)
-            | ((interface as u64) << 8)
-            | (0u64 << 16)  // duration=0 (only report on change)
-            | (0u64 << 24); // report_id=0 (all reports)
+        // duration=0 (bits [23:16]) and report_id=0 (bits [31:24]) left as zero
+        let set_idle_arg = (device_addr as u64) | ((interface as u64) << 8);
 
         let _ =
             m6_syscall::invoke::call(USB_HOST_EP, usb_ipc::request::SET_IDLE, set_idle_arg, 0, 0);

@@ -38,7 +38,9 @@ mod io;
 #[path = "../logger.rs"]
 mod logger;
 
-use m6_syscall::invoke::{cap_delete, cap_mint, ipc_set_send_caps, recv, reply_recv, sched_yield, signal};
+use m6_syscall::invoke::{
+    cap_delete, cap_mint, ipc_set_send_caps, recv, reply_recv, sched_yield, signal,
+};
 use m6_syscall::{MintArgs, slot_to_cptr};
 
 use boot_info::DevMgrBootInfo;

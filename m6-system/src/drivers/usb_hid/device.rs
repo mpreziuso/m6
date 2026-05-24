@@ -90,7 +90,7 @@ impl HidDevice {
     pub fn process_report(&mut self, report: &[u8], timestamp_ns: u64) -> usize {
         // Skip if report is identical to last one
         let len = report.len().min(MAX_REPORT_SIZE);
-        if &report[..len] == &self.last_report[..len] {
+        if report[..len] == self.last_report[..len] {
             return 0;
         }
 
