@@ -234,6 +234,10 @@ fn init_dtb(registry: &mut Registry, boot_info: &DevMgrBootInfo) -> Result<usize
     // SAFETY: Init must have mapped the DTB frame before spawning us
     let dtb_data = unsafe { boot_info.dtb_slice() }.ok_or("DTB slice failed")?;
 
+    // Build the SMMU phandle → slot table before enumerating devices, so
+    // anything that resolves an `iommus` phandle later can find its slot.
+    spawn::set_smmu_phandles(&dtb::parse_smmu_phandles(dtb_data));
+
     let count = dtb::enumerate_devices(dtb_data, registry)?;
 
     // Probe VirtIO devices to determine their specific type

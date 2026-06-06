@@ -224,6 +224,66 @@ fn parse_iommus_stream_id(node: &fdt::node::FdtNode) -> Option<u32> {
     parse_iommus_info(node).map(|(_, stream_id)| stream_id)
 }
 
+/// Parse SMMU phandles from the DTB in enumeration order.
+///
+/// Walks `arm,smmu-v3` nodes in the same order as `m6-pal::dtb::parse_smmus`,
+/// so the i-th entry in the returned array corresponds to the i-th `SmmuControl`
+/// capability that init handed device-mgr (slot `SMMU_CONTROL_0 + i`).
+///
+/// A phandle of `0` indicates an empty slot (fewer SMMUs than `MAX_SMMUS`) or
+/// a node without an explicit `phandle` property.
+pub fn parse_smmu_phandles(fdt_data: &[u8]) -> [u32; crate::slots::MAX_SMMUS] {
+    let mut phandles = [0u32; crate::slots::MAX_SMMUS];
+
+    let Ok(fdt) = fdt::Fdt::new(fdt_data) else {
+        return phandles;
+    };
+
+    let mut count = 0;
+    for node in fdt.all_nodes() {
+        if count >= phandles.len() {
+            break;
+        }
+        let Some(compatible) = node.compatible() else {
+            continue;
+        };
+        if !compatible.all().any(|c| c == "arm,smmu-v3") {
+            continue;
+        }
+        // Mirror `m6-pal::dtb::parse_smmus` exactly: the kernel creates one
+        // SmmuControl capability per `arm,smmu-v3` node that has a `reg`, in
+        // all-nodes order, and hands them to device-mgr at SMMU_CONTROL_0 + i.
+        // We must select the same nodes in the same order, or our index→slot
+        // mapping desyncs — a reg-less node here would shift every later entry
+        // and push a real SMMU (e.g. phandle 0x190) out of the array entirely.
+        let has_reg = node.reg().and_then(|mut r| r.next()).is_some();
+        // Phandle may be stored as the modern `phandle` or legacy `linux,phandle`.
+        let phandle = read_node_phandle(&node);
+        log::debug!("smmu-v3 candidate #{count}: has_reg={has_reg} phandle={phandle:#x}");
+        if !has_reg {
+            continue;
+        }
+        phandles[count] = phandle;
+        count += 1;
+    }
+
+    log::debug!("parsed SMMU phandle table = {phandles:#x?}");
+    phandles
+}
+
+/// Read a node's phandle, accepting either the modern `phandle` property or the
+/// legacy `linux,phandle` (some vendor/U-Boot DTBs still emit the latter).
+fn read_node_phandle(node: &fdt::node::FdtNode) -> u32 {
+    for name in ["phandle", "linux,phandle"] {
+        if let Some(prop) = node.property(name)
+            && prop.value.len() >= 4
+        {
+            return u32::from_be_bytes([prop.value[0], prop.value[1], prop.value[2], prop.value[3]]);
+        }
+    }
+    0
+}
+
 /// Get the platform name from DTB root node.
 pub fn get_platform_name(fdt_data: &[u8]) -> Option<&str> {
     let fdt = fdt::Fdt::new(fdt_data).ok()?;

@@ -3,7 +3,7 @@
 //! This module handles creating driver processes with the appropriate
 //! capabilities for their device (MMIO access, IRQ, IOSpace for DMA).
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use m6_cap::ObjectType;
 use m6_syscall::{error::SyscallError, invoke::*, slot_to_cptr};
@@ -53,25 +53,54 @@ use elf::{Elf64, ElfError};
 /// Page size constant (4KB)
 pub const PAGE_SIZE: usize = 4096;
 
+// -- SMMU phandle → slot mapping
+//
+// The kernel parses `arm,smmu-v3` nodes from the DTB in document order and
+// creates one SmmuControl capability per node. Init copies them into device-mgr
+// at slots SMMU_CONTROL_0..SMMU_CONTROL_3 in the same order. To resolve a
+// device's `iommus` phandle to the right slot we mirror that enumeration here
+// at startup. Phandle 0 marks an unused entry.
+static SMMU_PHANDLES: [AtomicU32; slots::MAX_SMMUS] = [
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+    AtomicU32::new(0),
+];
+
+/// Record the SMMU phandle table parsed from the DTB.
+///
+/// Index `i` corresponds to slot `SMMU_CONTROL_0 + i`.
+pub fn set_smmu_phandles(phandles: &[u32; slots::MAX_SMMUS]) {
+    for (slot, &phandle) in SMMU_PHANDLES.iter().zip(phandles.iter()) {
+        slot.store(phandle, Ordering::Relaxed);
+    }
+}
+
 /// Resolve SMMU DTB phandle to SmmuControl slot index.
 ///
-/// Maps device tree SMMU phandles to the corresponding SmmuControl capability
-/// slot in the device manager's CSpace.
-///
-/// # RK3588 Mapping
-/// - 0x190 (mmu600_pcie @ 0xfc900000) → SMMU #0 (slot 18)
-/// - 0x191 (mmu600_php @ 0xfcb00000) → SMMU #1 (slot 19)
-///
-/// Returns None if the phandle doesn't map to a known SMMU.
+/// Returns None if the phandle is 0 (no SMMU) or doesn't correspond to any
+/// SMMU enumerated by the kernel.
 fn resolve_smmu_phandle_to_slot(phandle: u32) -> Option<u64> {
+    if phandle == 0 {
+        return None;
+    }
+    // Primary path: the table parsed from the DTB. Works when SMMU nodes expose
+    // a readable `phandle` property and devices reference them by it.
+    if let Some(idx) = SMMU_PHANDLES
+        .iter()
+        .position(|p| p.load(Ordering::Relaxed) == phandle)
+    {
+        return Some(slots::SMMU_CONTROL_0 + idx as u64);
+    }
+    // Fallback: some DTBs (notably the RK3588 EDK2 DTB) carry no `phandle`
+    // property on their SMMU nodes, so the table is empty. In that case the
+    // PCIe/USB parsers inject device-mgr's well-known RK3588 SMMU sentinels,
+    // which map to the kernel's SmmuControl enumeration order:
+    //   0x190 = mmu600_pcie (SMMU #0), 0x191 = mmu600_php (SMMU #1).
     match phandle {
-        0x190 => Some(slots::SMMU_CONTROL_0), // PCIe SMMU
-        0x191 => Some(slots::SMMU_CONTROL_1), // PHP SMMU (USB, etc.)
-        0 => None,                            // No SMMU
-        _ => {
-            log::warn!("Unknown SMMU phandle {:#x}, refusing to bind", phandle);
-            None
-        }
+        0x190 => Some(slots::SMMU_CONTROL_0),
+        0x191 => Some(slots::SMMU_CONTROL_1),
+        _ => None,
     }
 }
 
@@ -902,13 +931,20 @@ fn create_extended_mmio_frames(
 ) -> Result<[u64; slots::driver::EXTENDED_MMIO_MAX], SpawnError> {
     let mut frame_slots = [0u64; slots::driver::EXTENDED_MMIO_MAX];
 
+    // Use the actual BAR/MMIO region size when it's larger than the manifest
+    // hint — e.g., qemu-xhci reports 16KB BAR but the manifest only knows 1
+    // page. Without this, drivers fault when touching doorbells / runtime
+    // registers past the first page.
+    let actual_pages = device_info.size.div_ceil(PAGE_SIZE as u64) as usize;
+    let total_pages = mmio_pages.max(actual_pages);
+
     // Nothing to do if only 1 page needed
-    if mmio_pages <= 1 {
+    if total_pages <= 1 {
         return Ok(frame_slots);
     }
 
     // Cap at maximum extended pages
-    let pages_to_create = (mmio_pages - 1).min(slots::driver::EXTENDED_MMIO_MAX);
+    let pages_to_create = (total_pages - 1).min(slots::driver::EXTENDED_MMIO_MAX);
 
     // SAFETY: Called after _start has initialised BOOT_INFO
     let boot_info = unsafe { crate::get_boot_info() };
