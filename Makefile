@@ -1,4 +1,5 @@
-.PHONY: clean check clippy run debug fmt fmt-check sysroot system user image test
+.PHONY: clean check clippy run debug fmt fmt-check sysroot system user image test \
+        flash flash-full
 
 all: boot kernel initrd-full
 
@@ -96,6 +97,33 @@ run-full: boot kernel initrd-full
 # Create image without running QEMU
 image: all
 	./scripts/run-qemu.sh --prepare-only
+
+# SD card / flash device. Override on the command line: make flash DEV=/dev/sdX
+DEV ?= /dev/mmcblk0
+
+# Fast incremental flash: mount the bare FAT32 filesystem and copy only the
+# changed payload (~3MB) instead of dd'ing the whole 64MB image. Use this for
+# day-to-day iteration after a first-time `make flash-full`.
+flash: image
+	@test -b "$(DEV)" || { echo "Error: $(DEV) is not a block device (set DEV=...)"; exit 1; }
+	@MNT=$$(mktemp -d) && \
+	  echo "Mounting $(DEV) at $$MNT" && \
+	  sudo mount "$(DEV)" "$$MNT" && \
+	  trap 'sudo umount "$$MNT"; rmdir "$$MNT"' EXIT && \
+	  sudo mkdir -p "$$MNT/EFI/BOOT" "$$MNT/EFI/M6" && \
+	  sudo cp target/esp/EFI/BOOT/BOOTAA64.EFI "$$MNT/EFI/BOOT/BOOTAA64.EFI" && \
+	  sudo cp target/esp/EFI/M6/KERNEL        "$$MNT/EFI/M6/KERNEL" && \
+	  sudo cp target/esp/EFI/M6/INITRD        "$$MNT/EFI/M6/INITRD" && \
+	  sync && \
+	  echo "Flashed bootloader + kernel + initrd to $(DEV)"
+
+# Full flash: write the entire FAT32 image to the device. Needed the first time
+# or whenever the on-disk layout changes. conv=fsync flushes before returning,
+# so no separate `sync` is required.
+flash-full: image
+	@test -b "$(DEV)" || { echo "Error: $(DEV) is not a block device (set DEV=...)"; exit 1; }
+	sudo dd if=target/esp.img of="$(DEV)" bs=4M status=progress conv=fsync
+	@echo "Flashed full image to $(DEV)"
 
 debug: all
 	./scripts/run-qemu.sh -s -S
