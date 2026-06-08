@@ -18,6 +18,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec::Vec;
 
 use m6_cap::ObjectType;
 use m6_starnix_std::sync::Mutex;
@@ -321,4 +322,155 @@ pub fn commit_fault_page(vspace_cptr: u64, fault_vaddr: u64) -> Result<bool, Sta
     let frame_cptr = vmo.commit_and_get_frame(vmo_page_idx)?;
     map_frame_into(vspace_cptr, frame_cptr, page_vaddr, rights, 0, false)?;
     Ok(true)
+}
+
+/// Page-align `len` bytes starting at `addr` to the covering `[start, end)`.
+fn page_range(addr: u64, len: u64) -> (u64, u64) {
+    (addr & !0xFFF, (addr + len).div_ceil(4096) * 4096)
+}
+
+/// Collect the registered mapping bases in `vspace_cptr` whose extent overlaps
+/// `[start, end)`.
+fn overlapping_bases(vmaps: &BTreeMap<u64, LazyMapping>, start: u64, end: u64) -> Vec<u64> {
+    vmaps
+        .range(..end)
+        .filter(|(_, m)| m.base + m.len > start)
+        .map(|(&b, _)| b)
+        .collect()
+}
+
+/// Drop any lazy mappings overlapping `[addr, addr+len)` from the registry
+/// (trimming/splitting partial overlaps) and unmap any pages already faulted in
+/// over that range from the VSpace, so a later mapping at the same address faults
+/// afresh instead of reusing stale pages. Called from [`Vmar::unmap`](crate::Vmar::unmap).
+pub fn unregister_lazy_range(vspace_cptr: u64, addr: u64, len: u64) {
+    if len == 0 {
+        return;
+    }
+    let (start, end) = page_range(addr, len);
+
+    {
+        let mut reg = LAZY_REGISTRY.lock();
+        if let Some(vmaps) = reg.get_mut(&vspace_cptr) {
+            for base in overlapping_bases(vmaps, start, end) {
+                let m = vmaps.remove(&base).expect("base came from this map");
+                let m_end = m.base + m.len;
+                // Surviving head [m.base, start).
+                if m.base < start {
+                    vmaps.insert(
+                        m.base,
+                        LazyMapping {
+                            vmo: m.vmo.clone(),
+                            base: m.base,
+                            vmo_offset: m.vmo_offset,
+                            len: start - m.base,
+                            rights: m.rights,
+                        },
+                    );
+                }
+                // Surviving tail [end, m_end).
+                if m_end > end {
+                    vmaps.insert(
+                        end,
+                        LazyMapping {
+                            vmo: m.vmo.clone(),
+                            base: end,
+                            vmo_offset: m.vmo_offset + (end - m.base),
+                            len: m_end - end,
+                            rights: m.rights,
+                        },
+                    );
+                }
+            }
+            if vmaps.is_empty() {
+                reg.remove(&vspace_cptr);
+            }
+        }
+    }
+
+    // Tear down committed leaf translations in the range. Unmapped pages (the
+    // common case — never faulted in) simply error and are ignored.
+    let mut page = start;
+    while page < end {
+        let _ = invoke::unmap_frame(vspace_cptr, page);
+        page += 4096;
+    }
+}
+
+/// Apply `rights` to the part of any lazy mapping(s) overlapping
+/// `[addr, addr+len)`: update the registry so future faults install the new
+/// permissions (splitting partial overlaps), and re-map pages already faulted in
+/// with the new rights. Eager mappings are not tracked here, so protecting one
+/// remains a no-op — unchanged from the previous stub. Called from
+/// [`Vmar::protect`](crate::Vmar::protect).
+pub fn update_lazy_rights(vspace_cptr: u64, addr: u64, len: u64, rights: u64) {
+    if len == 0 {
+        return;
+    }
+    let (start, end) = page_range(addr, len);
+
+    let mut to_remap: Vec<(u64, u64)> = Vec::new();
+    {
+        let mut reg = LAZY_REGISTRY.lock();
+        let Some(vmaps) = reg.get_mut(&vspace_cptr) else {
+            return;
+        };
+        for base in overlapping_bases(vmaps, start, end) {
+            let m = vmaps.remove(&base).expect("base came from this map");
+            let m_end = m.base + m.len;
+            let ov_start = m.base.max(start);
+            let ov_end = m_end.min(end);
+
+            // Head outside the protected range keeps its old rights.
+            if m.base < ov_start {
+                vmaps.insert(
+                    m.base,
+                    LazyMapping {
+                        vmo: m.vmo.clone(),
+                        base: m.base,
+                        vmo_offset: m.vmo_offset,
+                        len: ov_start - m.base,
+                        rights: m.rights,
+                    },
+                );
+            }
+            // Overlap takes the new rights; collect any committed pages to re-map.
+            let ov_vmo_offset = m.vmo_offset + (ov_start - m.base);
+            let mut p = ov_start;
+            while p < ov_end {
+                let idx = ((ov_vmo_offset + (p - ov_start)) / 4096) as usize;
+                if let Some((frame_cptr, _)) = m.vmo.get_page(idx) {
+                    to_remap.push((p, frame_cptr));
+                }
+                p += 4096;
+            }
+            vmaps.insert(
+                ov_start,
+                LazyMapping {
+                    vmo: m.vmo.clone(),
+                    base: ov_start,
+                    vmo_offset: ov_vmo_offset,
+                    len: ov_end - ov_start,
+                    rights,
+                },
+            );
+            // Tail outside the protected range keeps its old rights.
+            if m_end > ov_end {
+                vmaps.insert(
+                    ov_end,
+                    LazyMapping {
+                        vmo: m.vmo.clone(),
+                        base: ov_end,
+                        vmo_offset: m.vmo_offset + (ov_end - m.base),
+                        len: m_end - ov_end,
+                        rights: m.rights,
+                    },
+                );
+            }
+        }
+    }
+
+    for (page_vaddr, frame_cptr) in to_remap {
+        let _ = map_frame_into(vspace_cptr, frame_cptr, page_vaddr, rights, 0, true);
+    }
 }

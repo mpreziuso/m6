@@ -179,7 +179,11 @@ impl Vmar {
             return Err(Status::ERR_OUT_OF_RANGE);
         }
 
-        // TODO: Call UnmapFrame for each page in the range
+        // Drop any lazy registry entries over the range and tear down committed
+        // leaf translations, so a later mapping at the same address faults afresh.
+        if crate::mem_context::is_initialised() {
+            crate::mem_context::unregister_lazy_range(self.vspace_cptr, addr, len);
+        }
         Ok(())
     }
 
@@ -194,8 +198,16 @@ impl Vmar {
             return Err(Status::ERR_OUT_OF_RANGE);
         }
 
-        // TODO: Unmap + remap with new rights (BBM sequence)
-        let _ = flags;
+        // Update the rights of any lazy mapping over the range (future faults) and
+        // re-map already-committed pages with the new permissions.
+        if crate::mem_context::is_initialised() {
+            crate::mem_context::update_lazy_rights(
+                self.vspace_cptr,
+                addr,
+                len,
+                vmar_flags_to_rights(flags),
+            );
+        }
 
         Ok(())
     }
