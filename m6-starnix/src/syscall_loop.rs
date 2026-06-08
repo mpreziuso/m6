@@ -600,12 +600,15 @@ pub fn run_starnix_task_loop(
                         Err(e) => e.return_value() as i64,
                     };
                     let msg = m6_starnix_std::format!(
-                        "[starnix] syscall {} {} ({:#x}, {:#x}, {:#x}) -> {:#x}\n",
+                        "[starnix] syscall {} {} ({:#x}, {:#x}, {:#x}, {:#x}, {:#x}, {:#x}) -> {:#x}\n",
                         nr,
                         decl.name(),
                         syscall.arg0.raw(),
                         syscall.arg1.raw(),
                         syscall.arg2.raw(),
+                        syscall.arg3.raw(),
+                        syscall.arg4.raw(),
+                        syscall.arg5.raw(),
                         rv,
                     );
                     debug_puts(&msg);
