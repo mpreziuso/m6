@@ -9,22 +9,25 @@
 //!
 //! Spawned by `shell` with these inherited caps:
 //!   slot 13 = ASID_POOL     (to assign ASID to the Linux VSpace)
-//!   slot 14 = MEM_SERVER    (init's memory server, for fresh untyped)
+//!   slot 15 = UNTYPED       (shell-granted; backs BOTH our heap — m6-std's
+//!                            M6PagePool also draws from slot 15 — and the Linux
+//!                            process we run. The shell revokes+resets this
+//!                            untyped after we exit, so repeated `linux …` runs
+//!                            in one boot do not drain init's one-way memory
+//!                            server.)
 //!
 //! Layout of svc-starnix's own CSpace:
-//!   slot 16 = UNTYPED       (acquired via MEM_SERVER::request)
-//!   slot 17 = Linux VSpace
 //!   slot 18 = L2 PT for state-frame mapping (svc-starnix's own VSpace)
 //!   slot 19 = L3 PT for state-frame mapping
 //!   slot 20 = state-frame Frame
-//!   slot 21+ = m6-starnix MemoryManager allocates here
+//!   slot 21+ = m6-starnix MemoryManager allocates here (grows down from the
+//!              top slot; heap grows up from slot 136 — no collision)
 
 #![no_main]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 extern crate std;
 
-use std::ipc::{Endpoint, ipc_set_recv_slots};
 use std::println;
 
 use m6_cap::ObjectType;
@@ -36,11 +39,12 @@ use m6_system::{invoke, slot_to_cptr};
 const CNODE_RADIX: u8 = 12;
 
 const ASID_POOL_SLOT: u64 = 13;
-const MEM_SERVER_SLOT: u64 = 14;
 
-const UNTYPED_SLOT: u64 = 16;
-// slot 17 reserved (was the Linux VSpace; the forked Starnix bootstrap now
-// allocates the Linux VSpace itself via zx::mem_context::create_vspace).
+// The untyped backing all of svc-starnix's allocations. The shell grants this at
+// slot 15 (the same slot m6-std's heap allocator uses), so our heap, the Linux
+// ELF/stack/brk, and the state frame all draw from one region the shell revokes
+// after we exit. We do NOT request a separate untyped from init's memory server.
+const UNTYPED_SLOT: u64 = 15;
 const STATE_FRAME_L2_SLOT: u64 = 18;
 const STATE_FRAME_L3_SLOT: u64 = 19;
 const STATE_FRAME_SLOT: u64 = 20;
@@ -115,22 +119,6 @@ fn read_boot_elf() -> Result<&'static [u8], &'static str> {
 }
 
 // -- Capability allocation for the Linux process
-
-/// Ask init's memory server for a fresh untyped, placed in UNTYPED_SLOT.
-fn request_untyped() -> Result<(), &'static str> {
-    // SAFETY: IPC buffer is mapped at the standard userspace address
-    unsafe {
-        ipc_set_recv_slots(&[UNTYPED_SLOT]);
-    }
-    let mem_ep = Endpoint::from_cptr(cptr(MEM_SERVER_SLOT));
-    let r = mem_ep
-        .call(0, [0, 0, 0, 0])
-        .map_err(|_| "mem_server IPC error")?;
-    if r.label != 0 {
-        return Err("mem_server denied untyped request");
-    }
-    Ok(())
-}
 
 /// Retype + map the Linux VSpace, ASID, and state-frame.
 ///
@@ -219,11 +207,6 @@ fn main() -> i32 {
             return 1;
         }
     };
-
-    if let Err(e) = request_untyped() {
-        println!("[svc-starnix] {}", e);
-        return 1;
-    }
 
     if let Err(e) = allocate_linux_resources() {
         println!("[svc-starnix] {}", e);

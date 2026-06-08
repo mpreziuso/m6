@@ -646,12 +646,22 @@ fn spawn_external_with(
         return;
     };
 
-    // Pull a fresh (largest-available) untyped for this spawn. The child's
-    // ELF/segment mappings AND its heap (granted at slot 15 below) both draw
-    // from `ram_untyped`; a large binary like svc-starnix (~600 frames to map)
-    // plus the forked-Starnix heap easily exhausts a small one. The shell's own
-    // heap lives on its slot-15 untyped, which request_memory never touches.
-    let _ = request_memory(ctx);
+    // Acquire a dedicated child-spawn untyped ONCE (largest available), then
+    // REUSE it across every spawn. The child's ELF/segment mappings AND its heap
+    // (granted at slot 15 below) both draw from `ram_untyped`; a large binary
+    // like svc-starnix (~600 frames to map) plus the forked-Starnix heap and the
+    // Linux process it runs need a generous one. Because teardown (step 8)
+    // revokes this untyped — which resets its watermark and destroys all derived
+    // objects — the same region serves the next spawn cleanly. Reusing it (rather
+    // than pulling a fresh one each spawn) means we no longer drain init's
+    // one-way memory server, so `linux …` can be run repeatedly in one boot.
+    // The shell's own heap lives on its slot-15 untyped (`UNTYPED_SLOT`), which
+    // we never hand to a child; the first request_memory moves `ram_untyped` off
+    // it. Later spawns find `ram_untyped` already pointing at our reusable region
+    // and skip the request.
+    if ctx.ram_untyped == UNTYPED_SLOT {
+        let _ = request_memory(ctx);
+    }
 
     // Snapshot slot counter so we can reset it after the child exits.
     let spawn_base = ctx.next_slot;
@@ -813,9 +823,10 @@ fn spawn_external_with(
 ///
 /// The binary is resolved from the initrd (the only runtime-readable store on
 /// flashed hardware) and handed to svc-starnix via a fixed mapping, so it does
-/// not depend on the NVMe being provisioned. svc-starnix still needs ASID_POOL
-/// (to assign an ASID to the Linux VSpace) and MEM_SERVER (to request untyped
-/// from init).
+/// not depend on the NVMe being provisioned. svc-starnix needs ASID_POOL (to
+/// assign an ASID to the Linux VSpace); it backs both its heap and the Linux
+/// process it runs from the shell-granted untyped at slot 15, so it no longer
+/// requests its own untyped from init's (one-way) memory server.
 fn cmd_linux(args: &[String], ctx: &mut ShellContext) {
     let Some(name) = args.first() else {
         println!("usage: linux <binary> [args...]");
@@ -832,16 +843,10 @@ fn cmd_linux(args: &[String], ctx: &mut ShellContext) {
     info[8..16].copy_from_slice(&m6_system::STARNIX_BOOTELF_DATA_ADDR.to_le_bytes());
     info[16..24].copy_from_slice(&(elf.len() as u64).to_le_bytes());
 
-    let extras = [
-        InitialCap {
-            src_slot: ASID_POOL_SLOT,
-            dst_slot: ASID_POOL_SLOT,
-        },
-        InitialCap {
-            src_slot: MEM_SERVER_SLOT,
-            dst_slot: MEM_SERVER_SLOT,
-        },
-    ];
+    let extras = [InitialCap {
+        src_slot: ASID_POOL_SLOT,
+        dst_slot: ASID_POOL_SLOT,
+    }];
     let data: [(u64, &[u8]); 2] = [
         (m6_system::STARNIX_BOOTELF_INFO_ADDR, info.as_slice()),
         (m6_system::STARNIX_BOOTELF_DATA_ADDR, elf),

@@ -12,6 +12,10 @@ description = "Linux binary compatibility layer (Starnix fork adapted for M6)"
 # minimal M6 core builds without it; see scripts/fork-starnix.sh.
 default = []
 fuchsia = []
+# Bring-up tracing for the restricted-mode loop (per-fault FAR/ESR/PC prints and
+# similar). Off by default so a normal boot is quiet; enable when bringing up the
+# next Linux binary.
+starnix-debug = []
 
 [dependencies]
 m6-syscall = { workspace = true, features = ["userspace"] }

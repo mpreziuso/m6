@@ -115,16 +115,24 @@ pub struct zx_restricted_state_t {
 
 /// Draws random bytes into `buffer`.
 ///
-/// Placeholder: fills the buffer with zeroes. This is a documented stub until
-/// an M6 entropy source is wired in.
+/// Backed by the M6 kernel RNG (`GetRandom` self-invocation — ARMv8.5 RNDR when
+/// available, timer-mixed entropy otherwise). The kernel caps each call at 256
+/// bytes, so we fill in chunks. If a syscall ever fails (e.g. a transiently
+/// unmapped page), the remaining bytes are zeroed so the buffer is always fully
+/// initialised — callers (musl `getrandom`, ASLR seeding) treat this as their
+/// sole entropy source.
 ///
 /// # Safety
 ///
 /// `buffer` must be valid to write `len` bytes to.
 pub unsafe fn zx_cprng_draw(buffer: *mut u8, len: usize) {
-    // SAFETY: The caller guarantees `buffer` is writable for `len` bytes.
-    unsafe {
-        core::ptr::write_bytes(buffer, 0, len);
+    // SAFETY: The caller guarantees `buffer` is writable for `len` bytes, so the
+    // whole slice is a valid mutable region for the lifetime of this call.
+    let buf = unsafe { core::slice::from_raw_parts_mut(buffer, len) };
+    for chunk in buf.chunks_mut(256) {
+        if m6_syscall::invoke::get_random(chunk).is_err() {
+            chunk.fill(0);
+        }
     }
 }
 

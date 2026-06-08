@@ -11,6 +11,12 @@ extern crate alloc;
 use crate::mm::MemoryManager;
 use m6_syscall::invoke::{debug_puts, restricted_enter};
 
+// Fault → Linux signal delivery (used by the forked dispatch loop's EXCEPTION arm).
+use crate::signals::{SignalDetail, SignalInfo, dequeue_signal, send_standard_signal};
+use crate::task::{ExceptionResult, ExitStatus};
+use starnix_uapi::SI_KERNEL;
+use starnix_uapi::signals::{SIGILL, SIGSEGV};
+
 /// Exit reasons from restricted mode (matches kernel definitions).
 pub mod exit_reason {
     pub const SYSCALL: i64 = 0;
@@ -449,10 +455,10 @@ fn handle_getrandom(buf: u64, buflen: u64, _flags: u64, mm: &mut MemoryManager) 
     let len = (buflen as usize).min(256);
     let mut local_buf = alloc::vec![0u8; len];
 
-    // Fill with pseudo-random bytes (real implementation would use get_random syscall)
-    for (i, byte) in local_buf.iter_mut().enumerate() {
-        *byte = (i as u8).wrapping_mul(0x6D).wrapping_add(0x37);
-    }
+    // Fill from the M6 kernel RNG (GetRandom: RNDR when available, else
+    // timer-mixed entropy). Capped at 256 bytes per call by the kernel, which we
+    // already respect via the .min(256) above. On failure leave the buffer zero.
+    let _ = m6_syscall::invoke::get_random(&mut local_buf);
 
     // Write back to Linux address space
     // We need to find the frame for each page and use frame_write
@@ -537,6 +543,17 @@ fn handle_exception(far: u64, esr: u64, mm: &mut MemoryManager) -> bool {
 // point and stack pointer.
 //
 // Returns the process exit code (from `exit`/`exit_group`).
+/// Collapse a Linux `ExitStatus` into the single exit code the loop returns to
+/// svc-starnix. A normal exit yields its code; death by signal yields the shell
+/// convention `128 + signo` so a SIGSEGV-killed binary is distinguishable.
+fn exit_code_from_status(status: &ExitStatus) -> i32 {
+    match status {
+        ExitStatus::Exit(code) => *code as i32,
+        ExitStatus::Kill(si) | ExitStatus::CoreDump(si) => 128 + si.signal.number() as i32,
+        _ => -1,
+    }
+}
+
 pub fn run_starnix_task_loop(
     locked: &mut starnix_sync::Locked<starnix_sync::Unlocked>,
     current_task: &mut crate::task::CurrentTask,
@@ -576,7 +593,10 @@ pub fn run_starnix_task_loop(
 
                 match crate::syscall_table::dispatch_syscall(locked, current_task, &syscall) {
                     Ok(rv) => {
-                        current_task.thread_state.registers.set_return_register(rv.value());
+                        current_task
+                            .thread_state
+                            .registers
+                            .set_return_register(rv.value());
                     }
                     Err(errno) => {
                         // An errno return is the normal syscall-failure path
@@ -595,18 +615,86 @@ pub fn run_starnix_task_loop(
                 }
             }
             exit_reason::EXCEPTION => {
-                // TODO(M4): translate the M6 fault (FAR/ESR) into a Linux signal
-                // via the forked signal machinery. For now, trace and terminate.
+                // Translate the M6 CPU fault (FAR/ESR) into a Linux signal and
+                // deliver it through the forked signal machinery: a memory abort
+                // runs the real `MemoryManager::handle_page_fault` (which also
+                // grows GROWSDOWN stacks), and an uncaught fatal signal
+                // terminates the task with the correct wait status.
                 // SAFETY: `state` is bound and mapped read/write (caller invariant).
-                let (far, esr, pc) = unsafe {
-                    (state.read_far(), state.read_esr(), state.read_pc())
+                let (far, esr, pc) =
+                    unsafe { (state.read_far(), state.read_esr(), state.read_pc()) };
+                #[cfg(feature = "starnix-debug")]
+                {
+                    let msg = m6_starnix_std::format!(
+                        "[starnix] EXCEPTION far={:#x} esr={:#x} pc={:#x}\n",
+                        far,
+                        esr,
+                        pc
+                    );
+                    debug_puts(&msg);
+                }
+                let _ = pc;
+
+                let arch = zx::ExceptionArchData {
+                    esr: esr as u32,
+                    far,
                 };
-                let msg = m6_starnix_std::format!(
-                    "[starnix] EXCEPTION far={:#x} esr={:#x} pc={:#x}\n",
-                    far, esr, pc
-                );
-                debug_puts(&msg);
-                return -1;
+                let ec = ((esr >> 26) & 0b11_1111) as u8;
+                // Instruction abort (0x20/0x21) or data abort (0x24/0x25) from a
+                // lower EL — i.e. a guest memory fault.
+                let is_abort = matches!(ec, 0x20 | 0x21 | 0x24 | 0x25);
+
+                let siginfo = if is_abort {
+                    let decoded = crate::arch::task::decode_page_fault_exception_report(&arch);
+                    // Synthesise the Zircon-style error code the forked handler
+                    // keys on: permission faults (DFSC 0b0011xx) → ACCESS_DENIED;
+                    // alignment fault (0b100001) → OUT_OF_RANGE (SIGBUS); other
+                    // (translation) faults → NOT_FOUND.
+                    let dfsc = (esr as u32) & 0b11_1111;
+                    let error_code = match dfsc {
+                        0b00_1100..=0b00_1111 => zx::Status::ACCESS_DENIED,
+                        0b10_0001 => zx::Status::OUT_OF_RANGE,
+                        _ => zx::Status::NOT_FOUND,
+                    };
+                    match current_task.mm() {
+                        Ok(mm) => match mm.handle_page_fault(locked, decoded, error_code) {
+                            // Resolved in-handler (e.g. growsdown stack extended):
+                            // retry the faulting instruction by re-entering.
+                            ExceptionResult::Handled => continue,
+                            ExceptionResult::Signal(si) => si,
+                        },
+                        Err(_) => SignalInfo::with_detail(
+                            SIGSEGV,
+                            SI_KERNEL as i32,
+                            SignalDetail::SigFault { addr: far },
+                        ),
+                    }
+                } else if let Some(sig) = crate::arch::task::get_signal_for_general_exception(&arch)
+                {
+                    // Floating-point / SIMD exception → SIGFPE.
+                    SignalInfo::with_detail(
+                        sig,
+                        SI_KERNEL as i32,
+                        SignalDetail::SigFault { addr: far },
+                    )
+                } else {
+                    // Undefined instruction or any other unexpected class → SIGILL.
+                    SignalInfo::with_detail(
+                        SIGILL,
+                        SI_KERNEL as i32,
+                        SignalDetail::SigFault { addr: far },
+                    )
+                };
+
+                send_standard_signal(locked, &current_task.task, siginfo);
+                dequeue_signal(locked, current_task);
+
+                if current_task.is_exitted() {
+                    return current_task
+                        .exit_status()
+                        .map_or(-1, |s| exit_code_from_status(&s));
+                }
+                // Otherwise a handler was installed; the loop re-enters at it.
             }
             exit_reason::KICK => {
                 // TODO(M4): deliver pending signals before resuming.
