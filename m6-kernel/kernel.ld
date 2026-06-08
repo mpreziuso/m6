@@ -40,6 +40,26 @@ SECTIONS
         __rodata_end = .;
     }
 
+    /* PIE dynamic-linker metadata (unused at runtime; kept contiguous so it
+       doesn't perturb the segment layout). */
+    .dynsym   : AT(ADDR(.dynsym)   - KERNEL_VIRT_BASE) { *(.dynsym) }
+    .dynstr   : AT(ADDR(.dynstr)   - KERNEL_VIRT_BASE) { *(.dynstr) }
+    .hash     : AT(ADDR(.hash)     - KERNEL_VIRT_BASE) { *(.hash) }
+    .gnu.hash : AT(ADDR(.gnu.hash) - KERNEL_VIRT_BASE) { *(.gnu.hash) }
+    .dynamic  : AT(ADDR(.dynamic)  - KERNEL_VIRT_BASE) { *(.dynamic) }
+    .got      : AT(ADDR(.got)      - KERNEL_VIRT_BASE) { *(.got) *(.got.plt) }
+
+    /* Dynamic relocations — the KASLR self-relocation loop walks
+       [__rela_start, __rela_end) applying R_AARCH64_RELATIVE entries. */
+    . = ALIGN(8);
+    .rela.dyn : AT(ADDR(.rela.dyn) - KERNEL_VIRT_BASE)
+    {
+        __rela_start = .;
+        *(.rela.dyn)
+        *(.rela .rela.*)
+        __rela_end = .;
+    }
+
     /* Read-write data */
     . = ALIGN(4096);
     .data : AT(ADDR(.data) - KERNEL_VIRT_BASE)

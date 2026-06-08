@@ -353,7 +353,8 @@ fn efi_main() -> Status {
         (*ptr).magic = BOOT_INFO_MAGIC;
         (*ptr).version = BOOT_INFO_VERSION;
         (*ptr).kernel_phys_base = PhysAddr::new(kernel.phys_base);
-        (*ptr).kernel_virt_base = VirtAddr::new(KERNEL_VIRT_BASE);
+        // Report the KASLR-slid kernel base so the kernel knows its actual VA.
+        (*ptr).kernel_virt_base = VirtAddr::new(KERNEL_VIRT_BASE + kernel.kaslr_slide);
         (*ptr).kernel_size = kernel.size;
         (*ptr).page_table_base = PhysAddr::new(pt_phys);
         (*ptr).page_table_size = PAGE_TABLE_ALLOC_SIZE as u64;

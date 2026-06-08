@@ -133,8 +133,9 @@ fn map_kernel_segments(
         }
 
         // Calculate physical and virtual addresses for this segment's non-overlapping portion
+        // (the virtual address includes the KASLR slide).
         let seg_phys = kernel.phys_base + adjusted_start;
-        let seg_virt = KERNEL_VIRT_BASE + adjusted_start;
+        let seg_virt = KERNEL_VIRT_BASE + kernel.kaslr_slide + adjusted_start;
         let seg_size = (page_end - adjusted_start) as usize;
 
         let phys_region = PhysMemoryRegion::from_raw(seg_phys, seg_size);
@@ -199,9 +200,12 @@ fn map_kernel_stack(
     stack_size: u64,
     allocator: &mut BootPageAllocator,
 ) -> Option<()> {
-    // Align stack_virt_base to page boundary since kernel.size may not be page-aligned
-    let stack_virt_base =
-        (KERNEL_VIRT_BASE + kernel.size + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+    // Align stack_virt_base to page boundary since kernel.size may not be
+    // page-aligned. Includes the KASLR slide so it tracks the relocated image
+    // (and matches the per-CPU stack VAs computed in the kernel loader).
+    let stack_virt_base = (KERNEL_VIRT_BASE + kernel.kaslr_slide + kernel.size + PAGE_SIZE as u64
+        - 1)
+        & !(PAGE_SIZE as u64 - 1);
     let stack_phys_region = PhysMemoryRegion::from_raw(stack_phys, stack_size as usize);
     let stack_virt_region = VirtMemoryRegion::from_raw(stack_virt_base, stack_size as usize);
 

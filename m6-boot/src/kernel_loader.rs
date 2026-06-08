@@ -5,10 +5,13 @@
 extern crate alloc;
 use alloc::vec::Vec;
 
-use crate::config::{KERNEL_PATH, MAX_CPUS, MAX_KERNEL_SIZE, PER_CPU_STACK_SIZE};
+use crate::config::{
+    KERNEL_MMIO_BASE, KERNEL_PATH, KERNEL_VIRT_BASE, MAX_CPUS, MAX_KERNEL_SIZE, PER_CPU_STACK_SIZE,
+};
 use crate::efi_file::read_efi_file;
 use elf_rs::{Elf, ElfFile, ProgramType};
 use uefi::boot::{self, AllocateType, MemoryType};
+use uefi::proto::rng::Rng;
 
 /// Maximum number of loadable segments we track
 pub const MAX_SEGMENTS: usize = 8;
@@ -59,6 +62,145 @@ pub struct LoadedKernel {
     pub segment_count: usize,
     /// Base virtual address (min vaddr from ELF)
     pub virt_base: u64,
+    /// KASLR virtual-address slide applied to this load (0 if disabled).
+    pub kaslr_slide: u64,
+}
+
+// -- KASLR (Kernel Address Space Layout Randomisation)
+
+/// `R_AARCH64_RELATIVE` dynamic relocation type.
+const R_AARCH64_RELATIVE: u32 = 1027;
+/// `SHT_RELA` section type.
+const SHT_RELA: u32 = 4;
+
+#[inline]
+fn read_u16_le(data: &[u8], off: usize) -> u16 {
+    u16::from_le_bytes([data[off], data[off + 1]])
+}
+
+#[inline]
+fn read_u32_le(data: &[u8], off: usize) -> u32 {
+    u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]])
+}
+
+#[inline]
+fn read_u64_le(data: &[u8], off: usize) -> u64 {
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&data[off..off + 8]);
+    u64::from_le_bytes(b)
+}
+
+/// Gather boot-time entropy for the KASLR slide.
+///
+/// Prefers the UEFI RNG protocol (true hardware entropy where available);
+/// falls back to the architectural counter, which is weak but better than a
+/// fixed layout.
+fn boot_entropy() -> u64 {
+    if let Ok(handle) = boot::get_handle_for_protocol::<Rng>()
+        && let Ok(mut rng) = boot::open_protocol_exclusive::<Rng>(handle)
+    {
+        let mut buf = [0u8; 8];
+        if rng.get_rng(None, &mut buf).is_ok() {
+            return u64::from_le_bytes(buf);
+        }
+    }
+    // Fallback: architectural generic-timer counter.
+    let cnt: u64;
+    // SAFETY: CNTVCT_EL0 is readable at the bootloader's exception level.
+    unsafe {
+        core::arch::asm!("mrs {}, cntvct_el0", out(reg) cnt, options(nomem, nostack));
+    }
+    cnt
+}
+
+/// Choose a random, 2 MiB-aligned virtual-address slide for the kernel image.
+///
+/// The kernel image + per-CPU stacks (< 1 MiB) live in the 1.75 GiB window
+/// between [`KERNEL_VIRT_BASE`] and [`KERNEL_MMIO_BASE`]. The slide is bounded
+/// well within that window so the image never collides with the kernel MMIO or
+/// physmap regions. 2 MiB alignment keeps huge-page mappings possible and
+/// preserves the page alignment the stack placement relies on.
+fn choose_kaslr_slide() -> u64 {
+    const ALIGN: u64 = 0x20_0000; // 2 MiB
+    // Leave a generous 256 MiB margin below KERNEL_MMIO_BASE.
+    let window = (KERNEL_MMIO_BASE - KERNEL_VIRT_BASE) - 0x1000_0000;
+    let positions = window / ALIGN;
+    if positions == 0 {
+        return 0;
+    }
+    (boot_entropy() % positions) * ALIGN
+}
+
+/// Apply `R_AARCH64_RELATIVE` relocations to the freshly-loaded physical image.
+///
+/// The kernel is a position-independent executable; lld emits one RELATIVE
+/// entry per absolute pointer baked into the image. Patching them here — before
+/// the image is mapped with W^X permissions and before the cache is cleaned to
+/// the point of coherency — lets the kernel run at `KERNEL_VIRT_BASE + slide`
+/// with no in-kernel self-relocation and with read-only sections staying
+/// read-only.
+///
+/// With `slide == 0` each slot receives its original link-time value, i.e. the
+/// result is byte-identical to a non-PIE static link.
+///
+/// # Safety
+///
+/// `phys_base` must point to the loaded kernel image (identity-mapped by UEFI),
+/// covering `[min_vaddr, min_vaddr + image_size)` in virtual terms.
+unsafe fn apply_relocations(
+    kernel_data: &[u8],
+    phys_base: u64,
+    min_vaddr: u64,
+    image_size: u64,
+    slide: u64,
+) -> Result<usize, &'static str> {
+    if kernel_data.len() < 0x40 {
+        return Err("ELF too small");
+    }
+    let e_shoff = read_u64_le(kernel_data, 0x28) as usize;
+    let e_shentsize = read_u16_le(kernel_data, 0x3a) as usize;
+    let e_shnum = read_u16_le(kernel_data, 0x3c) as usize;
+    if e_shoff == 0 || e_shentsize < 64 {
+        return Err("no section headers");
+    }
+
+    let mut applied = 0usize;
+    for i in 0..e_shnum {
+        let sh = e_shoff + i * e_shentsize;
+        if sh + 64 > kernel_data.len() {
+            break;
+        }
+        if read_u32_le(kernel_data, sh + 4) != SHT_RELA {
+            continue;
+        }
+        let sh_offset = read_u64_le(kernel_data, sh + 0x18) as usize;
+        let sh_size = read_u64_le(kernel_data, sh + 0x20) as usize;
+        let count = sh_size / 24; // sizeof(Elf64_Rela)
+        for j in 0..count {
+            let e = sh_offset + j * 24;
+            if e + 24 > kernel_data.len() {
+                return Err("relocation entry out of file bounds");
+            }
+            let r_offset = read_u64_le(kernel_data, e);
+            let r_info = read_u64_le(kernel_data, e + 8);
+            let r_addend = read_u64_le(kernel_data, e + 16);
+            if (r_info & 0xffff_ffff) as u32 != R_AARCH64_RELATIVE {
+                return Err("unexpected (non-RELATIVE) relocation type");
+            }
+            if r_offset < min_vaddr || r_offset + 8 > min_vaddr + image_size {
+                return Err("relocation target outside the kernel image");
+            }
+            let target_phys = phys_base + (r_offset - min_vaddr);
+            let value = r_addend.wrapping_add(slide);
+            // SAFETY: target_phys lies within the identity-mapped, freshly
+            // loaded kernel image; the 8-byte write is bounds-checked above.
+            unsafe {
+                core::ptr::write_unaligned(target_phys as *mut u64, value);
+            }
+            applied += 1;
+        }
+    }
+    Ok(applied)
 }
 
 /// Load the kernel from the EFI filesystem
@@ -189,6 +331,25 @@ pub fn load_kernel(cpu_count: u32) -> uefi::Result<LoadedKernel> {
         }
     }
 
+    // KASLR: choose a random virtual-address slide and apply the kernel's
+    // PIE relocations to the physical image so it can run at a random base.
+    let kaslr_slide = choose_kaslr_slide();
+    let phys_base = kernel_phys.as_ptr() as u64;
+    // SAFETY: the kernel image was just loaded at `phys_base` (identity-mapped
+    // by UEFI) and covers [min_vaddr, min_vaddr + total_size).
+    match unsafe { apply_relocations(&kernel_data, phys_base, min_vaddr, total_size, kaslr_slide) } {
+        Ok(n) => log::info!(
+            "KASLR: slide {:#x}, applied {} relocations (kernel base {:#x})",
+            kaslr_slide,
+            n,
+            KERNEL_VIRT_BASE + kaslr_slide
+        ),
+        Err(e) => {
+            log::error!("KASLR relocation failed: {}", e);
+            return Err(uefi::Status::LOAD_ERROR.into());
+        }
+    }
+
     // Allocate per-CPU kernel stacks (contiguous block for all CPUs)
     let stack_pages_per_cpu = PER_CPU_STACK_SIZE.div_ceil(4096);
     let total_stack_pages = stack_pages_per_cpu * cpu_count;
@@ -212,9 +373,10 @@ pub fn load_kernel(cpu_count: u32) -> uefi::Result<LoadedKernel> {
     }
 
     // Calculate per-CPU stack addresses
-    // Virtual addresses are placed right after the kernel in the high-half
+    // Virtual addresses are placed right after the kernel in the high-half,
+    // shifted by the KASLR slide so they track the relocated kernel image.
     let stacks_phys_base = stacks_phys.as_ptr() as u64;
-    let stacks_virt_base = min_vaddr + total_size;
+    let stacks_virt_base = min_vaddr + total_size + kaslr_slide;
 
     let mut per_cpu_stacks = [PerCpuStack::default(); MAX_CPUS];
     for (cpu, stack) in per_cpu_stacks.iter_mut().enumerate().take(cpu_count) {
@@ -265,7 +427,9 @@ pub fn load_kernel(cpu_count: u32) -> uefi::Result<LoadedKernel> {
 
     Ok(LoadedKernel {
         phys_base: kernel_phys.as_ptr() as u64,
-        entry_virt: header.entry_point(),
+        // Entry, stacks and segment mappings are all shifted by the slide so
+        // they address the relocated image.
+        entry_virt: header.entry_point() + kaslr_slide,
         size: total_size,
         stack_phys: stack_phys_top,
         stack_virt: stack_virt_top,
@@ -274,5 +438,6 @@ pub fn load_kernel(cpu_count: u32) -> uefi::Result<LoadedKernel> {
         segments,
         segment_count,
         virt_base: min_vaddr,
+        kaslr_slide,
     })
 }
