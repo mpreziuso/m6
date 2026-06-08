@@ -1,0 +1,10 @@
+[package]
+name = "m6-fuchsia-scheduler-shim"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+description = "Minimal no_std fuchsia_scheduler shim for the M6 Starnix fork"
+
+[lib]
+name = "fuchsia_scheduler"
+path = "src/lib.rs"

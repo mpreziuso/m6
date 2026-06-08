@@ -1,0 +1,86 @@
+// A lock-free-read, growable array backed by RCU.
+
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+use fuchsia_rcu::{RcuCell, RcuReadScope};
+
+/// An array-like data structure that can be read without locking.
+///
+/// Writers create a new copy of the array when it needs to grow, and readers are
+/// guaranteed to see a consistent snapshot without blocking writers.
+#[derive(Default, Debug)]
+pub struct RcuArray<T: Send + Sync + 'static> {
+    inner: RcuCell<Box<[T]>>,
+}
+
+impl<T: Send + Sync + 'static> RcuArray<T> {
+    /// Returns a reference to the element at `index`, or `None` if out of bounds.
+    pub fn get<'a>(&self, scope: &'a RcuReadScope, index: usize) -> Option<&'a T> {
+        let array = self.inner.as_ref(scope);
+        array.get(index)
+    }
+
+    /// Returns a slice containing the entire array.
+    pub fn as_slice<'a>(&self, scope: &'a RcuReadScope) -> &'a [T] {
+        let array = self.inner.as_ref(scope);
+        array.as_ref()
+    }
+
+    /// Ensures the array has at least `requested_size` elements, filling new
+    /// slots with `T::default()` if it needs to grow.
+    ///
+    /// The array at least doubles in size when grown, to avoid frequent
+    /// reallocations. If it is already large enough, this does nothing.
+    ///
+    /// # Safety
+    ///
+    /// Requires external synchronisation to exclude concurrent writers.
+    pub unsafe fn ensure_at_least(&self, requested_size: usize)
+    where
+        T: Clone + Default,
+    {
+        let array = self.inner.read();
+        if array.len() >= requested_size {
+            return;
+        }
+        let new_size = core::cmp::max(requested_size, array.len() * 2);
+        self.copy_update(&array, new_size);
+    }
+
+    /// Updates the array to contain the given vector.
+    pub fn update(&self, new_array: Vec<T>) {
+        self.inner.update(new_array.into_boxed_slice());
+    }
+
+    fn copy_update(&self, array: &[T], new_size: usize)
+    where
+        T: Clone + Default,
+    {
+        let mut new_array = Vec::new();
+        new_array.reserve_exact(new_size);
+        for item in array.iter() {
+            new_array.push(item.clone());
+        }
+        for _ in array.len()..new_size {
+            new_array.push(T::default());
+        }
+        self.inner.update(new_array.into_boxed_slice());
+    }
+}
+
+impl<T: Clone + Sync + Send + 'static> Clone for RcuArray<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+/// Creates an `RcuArray` from a `Vec<T>`.
+impl<T: Send + Sync + 'static> From<Vec<T>> for RcuArray<T> {
+    fn from(value: Vec<T>) -> Self {
+        Self {
+            inner: RcuCell::new(value.into_boxed_slice()),
+        }
+    }
+}

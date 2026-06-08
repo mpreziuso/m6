@@ -1,0 +1,16 @@
+[package]
+name = "m6-starnix-split-enum-storage-macro"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Starnix-fork shim: split_enum_storage proc-macros (host-compiled)"
+
+[lib]
+name = "split_enum_storage_macro"
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

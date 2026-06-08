@@ -1,0 +1,25 @@
+[package]
+name = "m6-starnix-uapi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Linux UAPI wrappers for Starnix (fork of Fuchsia starnix_uapi, adapted for M6)"
+
+[lib]
+name = "starnix_uapi"
+
+[dependencies]
+linux_uapi = { package = "m6-linux-uapi", path = "../m6-linux-uapi" }
+m6-zx-shim = { path = "../m6-zx-shim" }
+# range_map provides the `Gap` trait, implemented for UserAddress (user_address.rs).
+range_map = { package = "m6-starnix-range-map", path = "../m6-starnix-range-map" }
+bitflags = "2"
+# bstr provides the no_std `BStr` type used by file_mode::FileMode::from_string.
+bstr = { version = "1", default-features = false, features = ["alloc"] }
+zerocopy = { workspace = true }
+static_assertions = "1"
+# ref-cast is no_std by default; used by arc_key.
+ref_cast = { package = "ref-cast", version = "1" }
+# paste is a proc-macro crate (host-side); used by the arch_union_wrapper! macro.
+paste = "1"

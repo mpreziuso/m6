@@ -1,0 +1,179 @@
+// Forked from Fuchsia's Starnix for M6 (no_std, ARM64 only).
+// Original: Copyright 2024 The Fuchsia Authors. BSD license.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#[allow(unused_imports)] use m6_starnix_std::prelude::*;
+use crate::security;
+use crate::task::{CurrentTask, Kernel};
+use crate::vfs::{
+    CacheMode, FileHandle, FileObject, FileOps, FileSystem, FileSystemHandle, FileSystemOps,
+    FileSystemOptions, FsNode, FsNodeInfo, FsNodeOps, FsStr, FsString, fs_node_impl_not_dir,
+};
+use starnix_sync::{FileOpsCore, LockEqualOrBefore, Locked};
+use starnix_types::vfs::default_statfs;
+use starnix_uapi::errors::Errno;
+use starnix_uapi::file_mode::FileMode;
+use starnix_uapi::open_flags::OpenFlags;
+use starnix_uapi::{ANON_INODE_FS_MAGIC, error, statfs};
+
+pub struct Anon {
+    /// If this instance represents an `anon_inode` then `name` holds the type-name of the node,
+    /// e.g. "inotify", "sync_file", "[usereventfd]", etc.
+    name: Option<&'static str>,
+
+    is_private: bool,
+}
+
+impl FsNodeOps for Anon {
+    fs_node_impl_not_dir!();
+
+    fn create_file_ops(
+        &self,
+        _locked: &mut Locked<FileOpsCore>,
+        _node: &FsNode,
+        _current_task: &CurrentTask,
+        _flags: OpenFlags,
+    ) -> Result<Box<dyn FileOps>, Errno> {
+        error!(ENOSYS)
+    }
+
+    fn internal_name(&self, _node: &FsNode) -> Option<FsString> {
+        self.name.map(|name| format!("anon_inode:{}", name).into())
+    }
+
+    fn is_private(&self) -> bool {
+        self.is_private
+    }
+}
+
+impl Anon {
+    /// Returns a new `Anon` instance for use in a binder device FD.
+    pub fn new_for_binder_device() -> Self {
+        Self { name: None, is_private: false }
+    }
+
+    /// Returns a new `Anon` instance for use as the `FsNodeOps` of a socket.
+    pub fn new_for_socket(kernel_private: bool) -> Self {
+        Self { name: None, is_private: kernel_private }
+    }
+
+    /// Returns a new anonymous file with the specified properties, and a unique `FsNode`.
+    pub fn new_file_extended<L>(
+        locked: &mut Locked<L>,
+        current_task: &CurrentTask,
+        ops: Box<dyn FileOps>,
+        flags: OpenFlags,
+        name: &'static str,
+        info: FsNodeInfo,
+    ) -> Result<FileHandle, Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        let fs = anon_fs(locked, current_task.kernel());
+        let node =
+            fs.create_node_and_allocate_node_id(Anon { name: Some(name), is_private: false }, info);
+        security::fs_node_init_anon(current_task, &node, name)?;
+        Ok(FileObject::new_anonymous(locked, current_task, ops, node, flags))
+    }
+
+    /// Returns a new anonymous file with the specified properties, and a unique `FsNode`.
+    pub fn new_file<L>(
+        locked: &mut Locked<L>,
+        current_task: &CurrentTask,
+        ops: Box<dyn FileOps>,
+        flags: OpenFlags,
+        name: &'static str,
+    ) -> Result<FileHandle, Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        Self::new_file_extended(
+            locked,
+            current_task,
+            ops,
+            flags,
+            name,
+            FsNodeInfo::new(FileMode::from_bits(0o600), current_task.current_fscred()),
+        )
+    }
+
+    /// Returns a new anonymous file backed by a single "private" `FsNode`, to which no security
+    /// labeling nor access-checks will be applied.
+    pub fn new_private_file<L>(
+        locked: &mut Locked<L>,
+        current_task: &CurrentTask,
+        ops: Box<dyn FileOps>,
+        flags: OpenFlags,
+        name: &'static str,
+    ) -> FileHandle
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        Self::new_private_file_extended(
+            locked,
+            current_task,
+            ops,
+            flags,
+            name,
+            FsNodeInfo::new(FileMode::from_bits(0o600), current_task.current_fscred()),
+        )
+    }
+
+    /// Returns a new private anonymous file, applying caller-supplied `info`.
+    pub fn new_private_file_extended<L>(
+        locked: &mut Locked<L>,
+        current_task: &CurrentTask,
+        ops: Box<dyn FileOps>,
+        flags: OpenFlags,
+        name: &'static str,
+        info: FsNodeInfo,
+    ) -> FileHandle
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        let fs = anon_fs(locked, current_task.kernel());
+        let node =
+            fs.create_node_and_allocate_node_id(Anon { name: Some(name), is_private: true }, info);
+        security::fs_node_init_anon(current_task, &node, name)
+            .expect("Private anon_inode creation cannot fail");
+        FileObject::new_anonymous(locked, current_task, ops, node, flags)
+    }
+}
+
+struct AnonFs;
+impl FileSystemOps for AnonFs {
+    fn statfs(
+        &self,
+        _locked: &mut Locked<FileOpsCore>,
+        _fs: &FileSystem,
+        _current_task: &CurrentTask,
+    ) -> Result<statfs, Errno> {
+        Ok(default_statfs(ANON_INODE_FS_MAGIC))
+    }
+    fn name(&self) -> &'static FsStr {
+        "anon_inodefs".into()
+    }
+}
+pub fn anon_fs<L>(locked: &mut Locked<L>, kernel: &Kernel) -> FileSystemHandle
+where
+    L: LockEqualOrBefore<FileOpsCore>,
+{
+    struct AnonFsHandle(FileSystemHandle);
+
+    kernel
+        .expando
+        .get_or_init(|| {
+            let fs = FileSystem::new(
+                locked,
+                kernel,
+                CacheMode::Uncached,
+                AnonFs,
+                FileSystemOptions::default(),
+            )
+            .expect("anonfs constructed with valid options");
+            AnonFsHandle(fs)
+        })
+        .0
+        .clone()
+}

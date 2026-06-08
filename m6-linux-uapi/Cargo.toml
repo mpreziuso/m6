@@ -1,0 +1,15 @@
+[package]
+name = "m6-linux-uapi"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "linux_uapi"
+
+[lints.rust.unexpected_cfgs]
+level = "allow"
+check-cfg = ['cfg(zerocopy_derive_union_into_bytes)']
+
+[dependencies]
+static_assertions = "1"
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }

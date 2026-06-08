@@ -1,0 +1,18 @@
+[package]
+name = "m6-starnix-sync"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "no_std fork of Fuchsia starnix_sync for M6, using spin/lock_api primitives"
+
+[lib]
+name = "starnix_sync"
+
+[dependencies]
+spin = { workspace = true }
+lock_api = { workspace = true }
+static_assertions = { workspace = true }
+lock_ordering_macro = { path = "lock_ordering_macro" }
+# zx types used by the PortEvent waiter primitive (Signals/Status/Instant/handles).
+zx = { package = "m6-zx-shim", path = "../m6-zx-shim" }

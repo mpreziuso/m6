@@ -1,0 +1,22 @@
+// Forked from Fuchsia's starnix_uapi, adapted for M6 (no_std, ARM64 only).
+// Original: Copyright 2023 The Fuchsia Authors. BSD license.
+
+use crate::uapi;
+use bitflags::bitflags;
+
+bitflags! {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct PersonalityFlags: u32 {
+        const UNAME26 = uapi::UNAME26;
+        const ADDR_NO_RANDOMIZE = uapi::ADDR_NO_RANDOMIZE;
+        const FDPIC_FUNCPTRS = uapi::FDPIC_FUNCPTRS;
+        const MMAP_PAGE_ZERO = uapi::MMAP_PAGE_ZERO;
+        const ADDR_COMPAT_LAYOUT = uapi::ADDR_COMPAT_LAYOUT;
+        const READ_IMPLIES_EXEC = uapi::READ_IMPLIES_EXEC;
+        const ADDR_LIMIT_32BIT = uapi::ADDR_LIMIT_32BIT;
+        const SHORT_INODE = uapi::SHORT_INODE;
+        const WHOLE_SECONDS = uapi::WHOLE_SECONDS;
+        const STICKY_TIMEOUTS = uapi::STICKY_TIMEOUTS;
+        const ADDR_LIMIT_3GB = uapi::ADDR_LIMIT_3GB;
+    }
+}

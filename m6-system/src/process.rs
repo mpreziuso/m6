@@ -140,6 +140,15 @@ pub struct SpawnResult {
     pub page_table_tracker: PageTableTracker,
 }
 
+// Capacities of the installed-region trackers. VSpaceBuilder and
+// PageTableTracker must use the same values so `to_tracker()` never truncates.
+// L3 (2 MiB) sets the address-space coverage: 128 = 256 MiB, headroom for the
+// whole initrd. Once a tracker fills, `add_l3` silently drops tables and
+// mappings fault.
+const MAX_L1_REGIONS: usize = 4;
+const MAX_L2_REGIONS: usize = 8;
+const MAX_L3_REGIONS: usize = 128;
+
 /// VSpace manager for building page tables and mapping frames
 struct VSpaceBuilder {
     vspace_slot: u64,
@@ -148,13 +157,13 @@ struct VSpaceBuilder {
     next_free_slot: u64,
     cnode_radix: u8,
     /// Track installed L1 region (512GB aligned base addresses, 0 = not used)
-    l1_regions: [u64; 4],
+    l1_regions: [u64; MAX_L1_REGIONS],
     l1_count: usize,
     /// Track installed L2 regions (1GB aligned base addresses)
-    l2_regions: [u64; 8],
+    l2_regions: [u64; MAX_L2_REGIONS],
     l2_count: usize,
     /// Track installed L3 regions (2MB aligned base addresses)
-    l3_regions: [u64; 32],
+    l3_regions: [u64; MAX_L3_REGIONS],
     l3_count: usize,
 }
 
@@ -172,11 +181,11 @@ impl VSpaceBuilder {
             ram_untyped,
             next_free_slot,
             cnode_radix,
-            l1_regions: [u64::MAX; 4],
+            l1_regions: [u64::MAX; MAX_L1_REGIONS],
             l1_count: 0,
-            l2_regions: [u64::MAX; 8],
+            l2_regions: [u64::MAX; MAX_L2_REGIONS],
             l2_count: 0,
-            l3_regions: [u64::MAX; 32],
+            l3_regions: [u64::MAX; MAX_L3_REGIONS],
             l3_count: 0,
         }
     }
@@ -570,22 +579,22 @@ pub fn map_data_to_child(
 /// duplicate retype/map calls across multiple `ensure_child_page_tables` invocations
 /// for the same VSpace.
 pub struct PageTableTracker {
-    l1_regions: [u64; 4],
+    l1_regions: [u64; MAX_L1_REGIONS],
     l1_count: usize,
-    l2_regions: [u64; 8],
+    l2_regions: [u64; MAX_L2_REGIONS],
     l2_count: usize,
-    l3_regions: [u64; 32],
+    l3_regions: [u64; MAX_L3_REGIONS],
     l3_count: usize,
 }
 
 impl PageTableTracker {
     pub const fn new() -> Self {
         Self {
-            l1_regions: [u64::MAX; 4],
+            l1_regions: [u64::MAX; MAX_L1_REGIONS],
             l1_count: 0,
-            l2_regions: [u64::MAX; 8],
+            l2_regions: [u64::MAX; MAX_L2_REGIONS],
             l2_count: 0,
-            l3_regions: [u64::MAX; 32],
+            l3_regions: [u64::MAX; MAX_L3_REGIONS],
             l3_count: 0,
         }
     }
@@ -651,50 +660,49 @@ pub fn ensure_child_page_tables(
     const L2_SIZE: u64 = 1024 * 1024 * 1024; // 1GB
     const L3_SIZE: u64 = 2 * 1024 * 1024; // 2MB
 
-    let l1_base = vaddr_start & !(L1_SIZE - 1);
-    let l2_base = vaddr_start & !(L2_SIZE - 1);
-    let l3_base = vaddr_start & !(L3_SIZE - 1);
+    // Walk every L3 (2 MiB) region the range touches and ensure the full
+    // L1 -> L2 -> L3 chain exists for each, so ranges spanning three or more
+    // regions don't leave middle tables unmapped.
+    let mut region = vaddr_start & !(L3_SIZE - 1);
+    let last_region = (vaddr_end - 1) & !(L3_SIZE - 1);
+    loop {
+        let l1_base = region & !(L1_SIZE - 1);
+        let l2_base = region & !(L2_SIZE - 1);
 
-    if !tracker.has_l1(l1_base) {
-        let slot = *next_free_slot;
-        *next_free_slot += 1;
-        retype(cptr(ram_untyped), 5, 0, cptr(root_cnode), slot, 1)
-            .map_err(SpawnError::RetypeFailed)?;
-        map_page_table(cptr(vspace_slot), cptr(slot), l1_base, 1)
-            .map_err(SpawnError::PageTableMapFailed)?;
-        tracker.add_l1(l1_base);
-    }
+        if !tracker.has_l1(l1_base) {
+            let slot = *next_free_slot;
+            *next_free_slot += 1;
+            retype(cptr(ram_untyped), 5, 0, cptr(root_cnode), slot, 1)
+                .map_err(SpawnError::RetypeFailed)?;
+            map_page_table(cptr(vspace_slot), cptr(slot), l1_base, 1)
+                .map_err(SpawnError::PageTableMapFailed)?;
+            tracker.add_l1(l1_base);
+        }
 
-    if !tracker.has_l2(l2_base) {
-        let slot = *next_free_slot;
-        *next_free_slot += 1;
-        retype(cptr(ram_untyped), 6, 0, cptr(root_cnode), slot, 1)
-            .map_err(SpawnError::RetypeFailed)?;
-        map_page_table(cptr(vspace_slot), cptr(slot), l2_base, 2)
-            .map_err(SpawnError::PageTableMapFailed)?;
-        tracker.add_l2(l2_base);
-    }
+        if !tracker.has_l2(l2_base) {
+            let slot = *next_free_slot;
+            *next_free_slot += 1;
+            retype(cptr(ram_untyped), 6, 0, cptr(root_cnode), slot, 1)
+                .map_err(SpawnError::RetypeFailed)?;
+            map_page_table(cptr(vspace_slot), cptr(slot), l2_base, 2)
+                .map_err(SpawnError::PageTableMapFailed)?;
+            tracker.add_l2(l2_base);
+        }
 
-    if !tracker.has_l3(l3_base) {
-        let slot = *next_free_slot;
-        *next_free_slot += 1;
-        retype(cptr(ram_untyped), 7, 0, cptr(root_cnode), slot, 1)
-            .map_err(SpawnError::RetypeFailed)?;
-        map_page_table(cptr(vspace_slot), cptr(slot), l3_base, 3)
-            .map_err(SpawnError::PageTableMapFailed)?;
-        tracker.add_l3(l3_base);
-    }
+        if !tracker.has_l3(region) {
+            let slot = *next_free_slot;
+            *next_free_slot += 1;
+            retype(cptr(ram_untyped), 7, 0, cptr(root_cnode), slot, 1)
+                .map_err(SpawnError::RetypeFailed)?;
+            map_page_table(cptr(vspace_slot), cptr(slot), region, 3)
+                .map_err(SpawnError::PageTableMapFailed)?;
+            tracker.add_l3(region);
+        }
 
-    // Handle case where end address is in a different L3 region
-    let l3_end_base = (vaddr_end - 1) & !(L3_SIZE - 1);
-    if l3_end_base != l3_base && !tracker.has_l3(l3_end_base) {
-        let slot = *next_free_slot;
-        *next_free_slot += 1;
-        retype(cptr(ram_untyped), 7, 0, cptr(root_cnode), slot, 1)
-            .map_err(SpawnError::RetypeFailed)?;
-        map_page_table(cptr(vspace_slot), cptr(slot), l3_end_base, 3)
-            .map_err(SpawnError::PageTableMapFailed)?;
-        tracker.add_l3(l3_end_base);
+        if region == last_region {
+            break;
+        }
+        region += L3_SIZE;
     }
 
     Ok(())
@@ -828,11 +836,17 @@ pub fn spawn_process(config: &SpawnConfig) -> Result<SpawnResult, SpawnError> {
     )
     .map_err(SpawnError::FrameMapFailed)?;
 
-    // Ensure page tables exist for the start of the heap region so child
-    // processes can allocate memory. One L3 table covers 2MB which is enough
-    // for initial allocations. Additional L3 tables can be created on demand.
+    // Ensure page tables exist across the heap region so the child can grow its
+    // heap. m6-std's `M6VmProvider::map_frame` maps heap frames but does NOT
+    // create page tables on demand, so the heap can only grow into L3s that
+    // already exist. One 2 MB L3 is fine for tiny tools but far too little for
+    // svc-starnix (the forked Starnix bootstrap allocates several MB), so
+    // pre-map 16 MB (8 L3 tables). These tables go into the PARENT's cnode and
+    // are mapped into the child's VSpace; the child's heap frames themselves are
+    // capped by its 4096-slot cnode (~15 MB) regardless.
     const HEAP_BASE: u64 = 0x4000_0000;
-    vspace_builder.ensure_page_tables(HEAP_BASE, HEAP_BASE + 0x1000)?;
+    const HEAP_PREMAP: u64 = 16 * 1024 * 1024;
+    vspace_builder.ensure_page_tables(HEAP_BASE, HEAP_BASE + HEAP_PREMAP)?;
 
     // Capture installed page-table state before consuming the builder
     let page_table_tracker = vspace_builder.to_tracker();

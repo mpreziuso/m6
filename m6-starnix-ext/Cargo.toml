@@ -1,0 +1,13 @@
+[package]
+name = "m6-starnix-ext"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Std-ext shims for Starnix fork (replaces Fuchsia starnix_ext)"
+
+[lib]
+name = "starnix_ext"
+
+[dependencies]
+m6-starnix-std = { path = "../m6-starnix-std" }

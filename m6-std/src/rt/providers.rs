@@ -9,7 +9,7 @@ use m6_alloc::AllocatorConfig;
 use m6_alloc::traits::{AllocatedPages, PagePool, SecretProvider, VmProvider, VmRights};
 use m6_cap::ObjectType;
 use m6_syscall::error::SyscallError;
-use m6_syscall::invoke::{get_random, map_frame, retype};
+use m6_syscall::invoke::{get_random, map_frame, retype_batched};
 
 use super::{DEFAULT_HEAP_BASE, DEFAULT_HEAP_SIZE};
 
@@ -48,13 +48,16 @@ impl VmProvider for M6VmProvider {
         // Note: execute permission is inverted (XN bit)
         let attr = if rights.execute { 0 } else { 1 };
 
-        map_frame(
+        if let Err(e) = map_frame(
             self.vspace_cptr,
             frame_cptr,
             vaddr as u64,
             rights_bits,
             attr,
-        )?;
+        ) {
+            dbg_hex("[m6-std] VMPROVIDER map_frame FAILED vaddr=", vaddr as u64);
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -100,24 +103,53 @@ impl M6PagePool {
     }
 }
 
+/// Bring-up diagnostic: print `label` followed by `v` in hex via the raw debug
+/// console syscall (no heap, usable from inside the allocator's own paths).
+fn dbg_hex(label: &str, v: u64) {
+    m6_syscall::invoke::debug_puts(label);
+    let mut buf = [0u8; 19];
+    buf[0] = b'0';
+    buf[1] = b'x';
+    for i in 0..16 {
+        let nibble = ((v >> ((15 - i) * 4)) & 0xf) as u8;
+        buf[2 + i] = if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + nibble - 10
+        };
+    }
+    buf[18] = b'\n';
+    if let Ok(s) = core::str::from_utf8(&buf) {
+        m6_syscall::invoke::debug_puts(s);
+    }
+}
+
 impl PagePool for M6PagePool {
     type Error = SyscallError;
 
     fn alloc_pages(&self, count: usize) -> Result<AllocatedPages, Self::Error> {
-        let slot = self.next_slot.fetch_add(count as u64, Ordering::Relaxed);
-        let frame_cptr = self.slot_to_cptr(slot);
+        let start_slot = self.next_slot.fetch_add(count as u64, Ordering::Relaxed);
+        let frame_cptr = self.slot_to_cptr(start_slot);
 
-        // Retype untyped memory into Frame objects
-        retype(
+        if let Err(e) = retype_batched(
             self.untyped_cptr,
             ObjectType::Frame as u64,
             12, // 4KB pages (2^12)
             self.cnode_cptr,
-            slot,
+            start_slot,
             count as u64,
-        )?;
+        ) {
+            dbg_hex("[m6-std] PAGEPOOL retype FAILED slot=", start_slot);
+            dbg_hex("[m6-std]   count=", count as u64);
+            return Err(e);
+        }
 
-        Ok(AllocatedPages { frame_cptr, count })
+        Ok(AllocatedPages {
+            frame_cptr,
+            count,
+            // Consecutive frame slots differ by 1 << (64 - radix) in CPtr space.
+            slot_offset: 1u64 << (64 - self.cnode_radix as u64),
+        })
     }
 
     fn free_pages(&self, _pages: AllocatedPages) -> Result<(), Self::Error> {
@@ -194,6 +226,9 @@ pub fn init_allocator(_boot_info_ptr: usize) -> Result<(), &'static str> {
         Err(_) => {
             // No capabilities available - skip allocator init
             // Process can still run but heap allocations will panic
+            m6_syscall::invoke::debug_puts(
+                "[m6-std] init_allocator: get_random failed -- heap DISABLED\n",
+            );
             return Ok(());
         }
     };
@@ -202,7 +237,7 @@ pub fn init_allocator(_boot_info_ptr: usize) -> Result<(), &'static str> {
     let page_pool = M6PagePool::new(UNTYPED_CPTR, ROOT_CNODE_CPTR, CNODE_RADIX, HEAP_SLOTS_START);
 
     // SAFETY: We ensure this is called exactly once during runtime init
-    unsafe {
+    let r = unsafe {
         m6_alloc::init(
             vm_provider,
             page_pool,
@@ -213,5 +248,9 @@ pub fn init_allocator(_boot_info_ptr: usize) -> Result<(), &'static str> {
             },
         )
         .map_err(|_| "Failed to initialise allocator")
+    };
+    if r.is_err() {
+        m6_syscall::invoke::debug_puts("[m6-std] init_allocator: m6_alloc::init FAILED\n");
     }
+    r
 }

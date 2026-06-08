@@ -1,0 +1,14 @@
+[package]
+name = "m6-starnix-crypt"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Minimal fscrypt stub for Starnix fork (replaces Fuchsia starnix_crypt)"
+
+[lib]
+name = "starnix_crypt"
+
+[dependencies]
+# Provides `Errno`, `error!`/`errno!` for the stubbed key-management methods.
+starnix_uapi = { package = "m6-starnix-uapi", path = "../m6-starnix-uapi" }

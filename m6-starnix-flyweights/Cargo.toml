@@ -1,0 +1,13 @@
+[package]
+name = "m6-starnix-flyweights"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Interned byte/char string shim for Starnix fork (replaces Fuchsia flyweights)"
+
+[lib]
+name = "flyweights"
+
+[dependencies]
+bstr = { version = "1", default-features = false, features = ["alloc"] }

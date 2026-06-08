@@ -1,0 +1,18 @@
+# M6: Faithful port of Fuchsia's starnix_sync lock_ordering_macro proc-macro
+# crate. It is a host-side proc-macro (compiles for the build host, not the
+# aarch64 target), so it uses std and the usual syn/quote toolchain.
+[package]
+name = "lock_ordering_macro"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Lock ordering graph proc-macro for M6 starnix_sync (port of Fuchsia upstream)"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "parsing"] }
+quote = "1"
+proc-macro2 = "1"

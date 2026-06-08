@@ -986,7 +986,7 @@ impl XhciController {
             self.setup_scratchpad_iommu(num_bufs, array_vaddr, ctx)?;
         } else {
             // Fallback: allocate from heap, use physical addresses
-            self.setup_scratchpad_heap(num_bufs, array_vaddr)?;
+            self.setup_scratchpad_heap(num_bufs, array_vaddr, cap_regs.ac64())?;
         }
 
         // Flush the scratchpad buffer array to physical memory
@@ -1070,27 +1070,63 @@ impl XhciController {
     }
 
     /// Fallback: allocate scratchpad pages from the heap using physical addresses.
-    fn setup_scratchpad_heap(&self, num_bufs: usize, array_vaddr: u64) -> Result<(), &'static str> {
-        let layout = core::alloc::Layout::from_size_align(0x1000, 0x1000)
+    ///
+    /// All pages are allocated as a single page-aligned block rather than one
+    /// allocation per buffer. The heap's large-object side table holds a fixed
+    /// number of entries; allocating each scratchpad page separately consumed
+    /// one entry apiece, so a controller requesting many buffers exhausted the
+    /// table and the allocation silently returned null ("failed to allocate
+    /// scratchpad page"). A single block costs one entry regardless of count.
+    ///
+    /// Each scratchpad buffer is addressed independently by the controller, so
+    /// the block's pages need not be physically contiguous — every page's true
+    /// physical address is looked up and written into the array individually.
+    fn setup_scratchpad_heap(
+        &self,
+        num_bufs: usize,
+        array_vaddr: u64,
+        ac64: bool,
+    ) -> Result<(), &'static str> {
+        let total = num_bufs
+            .checked_mul(0x1000)
+            .ok_or("scratchpad buffer count overflows")?;
+        let layout = core::alloc::Layout::from_size_align(total, 0x1000)
             .map_err(|_| "invalid scratchpad page layout")?;
 
-        for i in 0..num_bufs {
-            // SAFETY: Layout is valid (4KB size, 4KB aligned)
-            let page_ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
-            if page_ptr.is_null() {
-                return Err("failed to allocate scratchpad page");
-            }
-            let page_vaddr = page_ptr as u64;
+        // SAFETY: layout has non-zero size (num_bufs > 0 here) and valid alignment
+        let block_ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
+        if block_ptr.is_null() {
+            return Err("failed to allocate scratchpad pages");
+        }
+        let block_vaddr = block_ptr as u64;
 
-            // Flush zeroed page to DRAM so the controller sees it
-            let _ = cache_clean(page_vaddr, 0x1000);
+        // Flush the zeroed pages to DRAM so the controller sees cleared buffers
+        let _ = cache_clean(block_vaddr, total);
+
+        for i in 0..num_bufs {
+            let page_vaddr = block_vaddr + (i as u64) * 0x1000;
 
             // Get the physical address for this heap page
-            let page_phys = crate::rt::get_heap_phys_addr(page_vaddr)
-                .ok_or("scratchpad page has no physical address")?;
+            let page_phys = match crate::rt::get_heap_phys_addr(page_vaddr) {
+                Some(p) => p,
+                None => {
+                    // SAFETY: block_ptr/layout match the successful allocation above
+                    unsafe { alloc::alloc::dealloc(block_ptr, layout) };
+                    return Err("scratchpad page has no physical address");
+                }
+            };
+
+            // Controllers without 64-bit addressing (AC64=0, e.g. RK3588 DWC3)
+            // can only reach the low 4GB; a scratchpad page above that would
+            // fault the controller (HSE) rather than work silently.
+            if !ac64 && page_phys >= 0x1_0000_0000 {
+                // SAFETY: block_ptr/layout match the successful allocation above
+                unsafe { alloc::alloc::dealloc(block_ptr, layout) };
+                return Err("scratchpad page above 4GB on 32-bit controller");
+            }
 
             // Write page physical address to the Scratchpad Buffer Array
-            // SAFETY: array_vaddr is mapped DMA memory
+            // SAFETY: array_vaddr is mapped DMA memory and i < num_bufs
             unsafe {
                 write_volatile((array_vaddr + (i as u64) * 8) as *mut u64, page_phys);
             }

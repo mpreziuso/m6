@@ -1,0 +1,13 @@
+[package]
+name = "m6-fuchsia-runtime-shim"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+description = "Minimal fuchsia_runtime shim (UTC types) for the M6 Starnix fork"
+
+[lib]
+name = "fuchsia_runtime"
+path = "src/lib.rs"
+
+[dependencies]
+zx = { package = "m6-zx-shim", path = "../../../m6-zx-shim" }

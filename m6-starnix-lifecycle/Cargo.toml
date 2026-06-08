@@ -1,0 +1,15 @@
+[package]
+name = "m6-starnix-lifecycle"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Lifecycle shims for Starnix fork (replaces Fuchsia starnix_lifecycle)"
+
+[lib]
+name = "starnix_lifecycle"
+
+[dependencies]
+paste = "1"
+starnix_types = { package = "m6-starnix-types", path = "../m6-starnix-types" }
+zx = { package = "m6-zx-shim", path = "../m6-zx-shim" }

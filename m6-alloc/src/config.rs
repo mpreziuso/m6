@@ -5,10 +5,15 @@ pub const PAGE_SIZE: usize = 4096;
 
 /// CPtr slot offset for consecutive frame capabilities.
 ///
-/// For CNode radix 10, each slot is offset by 1 << 54 in CPtr space.
-/// When allocating multiple frames, they're placed at consecutive slots,
-/// so frame[i] has cptr = base_cptr + (i * CPTR_SLOT_OFFSET).
-pub const CPTR_SLOT_OFFSET: u64 = 1 << 54;
+/// A CPtr is `slot << (64 - cnode_radix)`. The M6 runtime uses CNode radix 12
+/// (see m6-std `CNODE_RADIX` / `spawn_process`), so consecutive slots are offset
+/// by `1 << (64 - 12) = 1 << 52`. When allocating multiple frames they occupy
+/// consecutive slots, so frame[i] has cptr = base_cptr + (i * CPTR_SLOT_OFFSET).
+///
+/// This previously used `1 << 54` (radix 10), which was only ever exercised by
+/// single-page allocations (count == 1, where the offset is unused); the first
+/// multi-page allocation mapped the wrong cptr for page 1 onward.
+pub const CPTR_SLOT_OFFSET: u64 = 1 << 52;
 
 /// Minimum allocation size (pointer-sized for freelist storage)
 pub const MIN_ALLOC_SIZE: usize = 8;

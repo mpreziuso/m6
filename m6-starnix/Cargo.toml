@@ -1,0 +1,101 @@
+[package]
+name = "m6-starnix"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Linux binary compatibility layer (Starnix fork adapted for M6)"
+
+[features]
+# Off by default. Gates Fuchsia-runtime-specific subtrees (FIDL RemoteFS,
+# SELinux hooks, and other modules that depend on fidl/fuchsia_async). The
+# minimal M6 core builds without it; see scripts/fork-starnix.sh.
+default = []
+fuchsia = []
+
+[dependencies]
+m6-syscall = { workspace = true, features = ["userspace"] }
+m6-cap = { workspace = true }
+m6-common = { workspace = true }
+m6-starnix-std = { path = "../m6-starnix-std" }
+# Crate-rename so the forked code's bare `zx::` / `use zx::…` (extern-crate style,
+# how upstream Starnix refers to Zircon) resolves crate-wide without per-file aliases.
+zx = { package = "m6-zx-shim", path = "../m6-zx-shim" }
+starnix_uapi = { package = "m6-starnix-uapi", path = "../m6-starnix-uapi" }
+starnix_logging = { package = "m6-starnix-logging", path = "../m6-starnix-logging" }
+starnix_types = { package = "m6-starnix-types", path = "../m6-starnix-types" }
+starnix_sync = { package = "m6-starnix-sync", path = "../m6-starnix-sync" }
+starnix_syscalls = { package = "m6-starnix-syscalls", path = "../m6-starnix-syscalls" }
+starnix_ext = { package = "m6-starnix-ext", path = "../m6-starnix-ext" }
+starnix_stack = { package = "m6-starnix-stack", path = "../m6-starnix-stack" }
+starnix_crypt = { package = "m6-starnix-crypt", path = "../m6-starnix-crypt" }
+starnix_lifecycle = { package = "m6-starnix-lifecycle", path = "../m6-starnix-lifecycle" }
+starnix_task_command = { package = "m6-starnix-task-command", path = "../m6-starnix-task-command" }
+expando = { package = "m6-starnix-expando", path = "../m6-starnix-expando" }
+atomic_bitflags = { package = "m6-starnix-atomic-bitflags", path = "../m6-starnix-atomic-bitflags" }
+flyweights = { package = "m6-starnix-flyweights", path = "../m6-starnix-flyweights" }
+starnix_registers = { package = "m6-starnix-registers", path = "../m6-starnix-registers" }
+starnix_rcu = { package = "m6-starnix-rcu", path = "../m6-starnix-rcu" }
+fuchsia_rcu = { package = "m6-fuchsia-rcu", path = "../m6-fuchsia-rcu" }
+fuchsia_rcu_collections = { package = "m6-fuchsia-rcu-collections", path = "../m6-fuchsia-rcu-collections" }
+usercopy = { package = "m6-starnix-usercopy", path = "../m6-starnix-usercopy" }
+memory_pinning = { package = "m6-starnix-memory-pinning", path = "../m6-starnix-memory-pinning" }
+page_buf = { package = "m6-starnix-page-buf", path = "../m6-starnix-page-buf" }
+range_map = { package = "m6-starnix-range-map", path = "../m6-starnix-range-map" }
+split_enum_storage = { package = "m6-starnix-split-enum-storage", path = "../m6-starnix-split-enum-storage" }
+elf_parse = { package = "m6-starnix-elf-parse", path = "../m6-starnix-elf-parse" }
+time_pretty = { package = "m6-starnix-time-pretty", path = "../m6-starnix-time-pretty" }
+mapped_clock = { package = "m6-starnix-mapped-clock", path = "../m6-starnix-mapped-clock" }
+extended_pstate = { package = "m6-starnix-extended-pstate", path = "../m6-starnix-extended-pstate" }
+line_discipline = { package = "m6-starnix-line-discipline", path = "../m6-starnix-line-discipline" }
+filter_methods_macro = { package = "m6-starnix-filter-methods-macro", path = "../m6-starnix-filter-methods-macro" }
+assert_matches = "1"
+linux_uapi = { package = "m6-linux-uapi", path = "../m6-linux-uapi" }
+hashbrown = { version = "0.15", default-features = false, features = ["allocator-api2"] }
+bitflags = "2"
+zerocopy = { workspace = true }
+# Published crates the forked core imports directly (no_std-compatible).
+static_assertions = "1"
+anyhow = { version = "1", default-features = false }
+itertools = { version = "0.13", default-features = false, features = ["use_alloc"] }
+bstr = { version = "1", default-features = false, features = ["alloc"] }
+smallvec = { version = "1", default-features = false }
+byteorder = { version = "1", default-features = false }
+scopeguard = { version = "1", default-features = false }
+memoffset = "0.9"
+nom = { version = "7", default-features = false, features = ["alloc"] }
+macro_rules_attribute = "0.2"
+lock_api = "0.4"
+memchr = { version = "2", default-features = false, features = ["alloc"] }
+derivative = "2"
+paste = "1"
+# Async types (executor semantics deferred — types resolve so the core compiles).
+# NOTE: the `async-await` feature (pin_mut!/select! macros) needs futures-macro
+# 0.3.32 which is not in the offline registry cache; the async-runtime bring-up
+# (executor/channels/macros) is the M2 work item.
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+ref-cast = "1"
+num-traits = { version = "0.2", default-features = false }
+num-derive = "0.4"
+slab = { version = "0.4", default-features = false }
+pin-project = "1"
+dyn-clone = "1"
+bit-vec = { version = "0.8", default-features = false }
+# Minimal zxio type shim (vendored under this crate so it is not a workspace
+# member). Provides only the plain data types non-Fuchsia modules reference.
+syncio = { package = "m6-syncio-shim", path = "vendor/syncio" }
+# Minimal no-op fuchsia_inspect shim (vendored, see vendor/fuchsia_inspect).
+fuchsia_inspect = { package = "m6-fuchsia-inspect-shim", path = "vendor/fuchsia_inspect" }
+# Minimal fuchsia_runtime shim: UTC clock timeline types only.
+fuchsia_runtime = { package = "m6-fuchsia-runtime-shim", path = "vendor/fuchsia_runtime" }
+# Minimal no-op fuchsia_trace shim: Id / trace_site_t / TraceCategoryContext.
+fuchsia_trace = { package = "m6-fuchsia-trace-shim", path = "vendor/fuchsia_trace" }
+# Minimal no_std single-threaded fuchsia_async shim: block_on/LocalExecutor/EHandle/Task.
+fuchsia_async = { package = "m6-fuchsia-async-shim", path = "vendor/fuchsia_async" }
+# Minimal fuchsia_scheduler shim: set_role_for_this_thread (no-op).
+fuchsia_scheduler = { package = "m6-fuchsia-scheduler-shim", path = "vendor/fuchsia_scheduler" }
+# Minimal fragile::Fragile shim (single-thread bring-up).
+fragile = { package = "m6-fragile-shim", path = "vendor/fragile" }
+# Minimal process_builder::elf_load shim (ELF segment mapper for task/loader.rs).
+process_builder = { package = "m6-process-builder-shim", path = "vendor/process_builder" }
+

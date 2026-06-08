@@ -1,0 +1,14 @@
+[package]
+name = "m6-starnix-line-discipline"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Starnix-fork shim: line_discipline (M6 no_std)"
+
+[lib]
+name = "line_discipline"
+
+[dependencies]
+starnix_uapi = { package = "m6-starnix-uapi", path = "../m6-starnix-uapi" }
+utf8parse = "0.2"

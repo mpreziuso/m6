@@ -1,0 +1,225 @@
+// Forked from Fuchsia's Starnix for M6 (no_std, ARM64 only).
+// Original: Copyright 2024 The Fuchsia Authors. BSD license.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+#[allow(unused_imports)] use m6_starnix_std::prelude::*;
+
+#[cfg(feature = "fuchsia")]
+use bstr::ByteSlice;
+#[cfg(feature = "fuchsia")]
+use fidl_fuchsia_hardware_power_statecontrol as fpower;
+#[cfg(feature = "fuchsia")]
+use fuchsia_component::client::connect_to_protocol_sync;
+use linux_uapi::{
+    LINUX_REBOOT_CMD_CAD_OFF, LINUX_REBOOT_CMD_CAD_ON, LINUX_REBOOT_CMD_HALT,
+    LINUX_REBOOT_CMD_KEXEC, LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART,
+    LINUX_REBOOT_CMD_RESTART2, LINUX_REBOOT_CMD_SW_SUSPEND,
+};
+use starnix_logging::{log_debug, log_info, log_warn, track_stub};
+use starnix_sync::{InterruptibleEvent, Locked, Unlocked};
+use starnix_uapi::auth::CAP_SYS_BOOT;
+use starnix_uapi::errors::Errno;
+use starnix_uapi::user_address::{UserAddress, UserCString};
+use starnix_uapi::{
+    LINUX_REBOOT_MAGIC1, LINUX_REBOOT_MAGIC2, LINUX_REBOOT_MAGIC2A, LINUX_REBOOT_MAGIC2B,
+    LINUX_REBOOT_MAGIC2C, errno, error,
+};
+
+use crate::mm_ref::MemoryAccessorExt;
+use crate::security;
+use crate::task::{CurrentTask, Kernel};
+use crate::vfs::FsString;
+
+#[track_caller]
+fn panic_or_error(kernel: &Kernel, errno: Errno) -> Result<(), Errno> {
+    if kernel.features.error_on_failed_reboot {
+        return Err(errno);
+    }
+    panic!("Fatal: {errno:?}");
+}
+
+pub fn sys_reboot(
+    _locked: &mut Locked<Unlocked>,
+    current_task: &CurrentTask,
+    magic: u32,
+    magic2: u32,
+    cmd: u32,
+    arg: UserAddress,
+) -> Result<(), Errno> {
+    if magic != LINUX_REBOOT_MAGIC1
+        || (magic2 != LINUX_REBOOT_MAGIC2
+            && magic2 != LINUX_REBOOT_MAGIC2A
+            && magic2 != LINUX_REBOOT_MAGIC2B
+            && magic2 != LINUX_REBOOT_MAGIC2C)
+    {
+        return error!(EINVAL);
+    }
+    security::check_task_capable(current_task, CAP_SYS_BOOT)?;
+
+    let arg_bytes = if matches!(cmd, LINUX_REBOOT_CMD_RESTART2) {
+        // This is an arbitrary limit that should be large enough.
+        const MAX_REBOOT_ARG_LEN: usize = 256;
+        current_task
+            .read_c_string_to_vec(UserCString::new(current_task, arg), MAX_REBOOT_ARG_LEN)?
+    } else {
+        FsString::default()
+    };
+
+    if current_task.kernel().is_shutting_down() {
+        log_debug!("Ignoring reboot() and parking caller, already shutting down.");
+        let event = InterruptibleEvent::new();
+        return current_task.block_until(event.begin_wait(), zx::MonotonicInstant::INFINITE);
+    }
+
+    // -- M6 has no power-statecontrol FIDL service. CAD on/off is a no-op;
+    // any actual reboot/halt request returns ENOSYS until a native power
+    // service exists.
+    #[cfg(not(feature = "fuchsia"))]
+    {
+        let _ = arg_bytes;
+        return match cmd {
+            LINUX_REBOOT_CMD_CAD_ON | LINUX_REBOOT_CMD_CAD_OFF => Ok(()),
+            _ => error!(ENOSYS),
+        };
+    }
+
+    #[cfg(feature = "fuchsia")]
+    let proxy = connect_to_protocol_sync::<fpower::AdminMarker>().or_else(|_| error!(EINVAL))?;
+
+    #[cfg(feature = "fuchsia")]
+    match cmd {
+        // CAD on/off commands turn Ctrl-Alt-Del keystroke on or off without halting the system.
+        LINUX_REBOOT_CMD_CAD_ON | LINUX_REBOOT_CMD_CAD_OFF => Ok(()),
+
+        // `kexec_load()` is not supported.
+        LINUX_REBOOT_CMD_KEXEC => error!(EINVAL),
+
+        // Suspend is not implemented.
+        LINUX_REBOOT_CMD_SW_SUSPEND => error!(EINVAL),
+
+        LINUX_REBOOT_CMD_HALT | LINUX_REBOOT_CMD_POWER_OFF => {
+            log_info!("Powering off");
+            let options = fpower::ShutdownOptions {
+                action: Some(fpower::ShutdownAction::Poweroff),
+                reasons: Some(vec![fpower::ShutdownReason::StarnixContainerNoReason]),
+                ..Default::default()
+            };
+
+            match proxy.shutdown(&options, zx::MonotonicInstant::INFINITE) {
+                Ok(_) => {
+                    // System is rebooting... wait until runtime ends.
+                    zx::MonotonicInstant::INFINITE.sleep();
+                }
+                Err(e) => {
+                    return panic_or_error(
+                        current_task.kernel(),
+                        errno!(EINVAL, format!("Failed to power off, status: {e}")),
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        LINUX_REBOOT_CMD_RESTART | LINUX_REBOOT_CMD_RESTART2 => {
+            let reboot_args: Vec<_> = arg_bytes.split_str(b",").collect();
+
+            let reboot_result = if reboot_args.contains(&&b"bootloader"[..]) {
+                log_info!("Rebooting to bootloader");
+                let options = fpower::ShutdownOptions {
+                    action: Some(fpower::ShutdownAction::RebootToBootloader),
+                    reasons: Some(vec![fpower::ShutdownReason::StarnixContainerNoReason]),
+                    ..Default::default()
+                };
+                proxy.shutdown(&options, zx::MonotonicInstant::INFINITE)
+            } else if reboot_args.contains(&&b"recovery"[..]) {
+                log_info!("Rebooting to recovery...");
+                let options = fpower::ShutdownOptions {
+                    action: Some(fpower::ShutdownAction::RebootToRecovery),
+                    reasons: Some(vec![fpower::ShutdownReason::StarnixContainerNoReason]),
+                    ..Default::default()
+                };
+                proxy.shutdown(&options, zx::MonotonicInstant::INFINITE)
+            } else {
+                // TODO(https://391585107): Loop through all the arguments and
+                // generate a list of shutdown reasons.
+
+                let shutdown_reason =
+                    if let Some(arg) = reboot_args.iter().find(|arg| arg.ends_with(b"-failed")) {
+                        let process_name =
+                            String::from_utf8_lossy(arg.strip_suffix(b"-failed").unwrap());
+                        // This log message is load-bearing server-side as it's used to
+                        // extract the critical process responsible for the reboot.
+                        // Please notify //src/developer/forensics/OWNERS upon changing.
+                        log_info!("Android critical process '{}' failed, rebooting", process_name);
+                        fpower::ShutdownReason::AndroidCriticalProcessFailure
+                    } else if reboot_args.contains(&&b"ota_update"[..])
+                        || reboot_args.contains(&&b"System update during setup"[..])
+                    {
+                        fpower::ShutdownReason::SystemUpdate
+                    } else if reboot_args.contains(&&b"shell"[..]) {
+                        fpower::ShutdownReason::DeveloperRequest
+                    } else if reboot_args.contains(&&b"RescueParty"[..])
+                        || reboot_args.contains(&&b"rescueparty"[..])
+                    {
+                        fpower::ShutdownReason::AndroidRescueParty
+                    } else if reboot_args.contains(&&b"userrequested"[..]) {
+                        fpower::ShutdownReason::UserRequest
+                    } else if reboot_args == [b""]
+                    // args empty? splitting "" returns [""], not []
+                    {
+                        fpower::ShutdownReason::StarnixContainerNoReason
+                    } else {
+                        log_warn!("Unknown reboot args: {arg_bytes:?}");
+                        track_stub!(
+                            TODO("https://fxbug.dev/322874610"),
+                            "unknown reboot args, see logs for strings"
+                        );
+                        fpower::ShutdownReason::AndroidUnexpectedReason
+                    };
+
+                log_info!("Rebooting... reason: {:?}", shutdown_reason);
+                proxy.shutdown(
+                    &fpower::ShutdownOptions {
+                        action: Some(fpower::ShutdownAction::Reboot),
+                        reasons: Some(vec![shutdown_reason]),
+                        ..Default::default()
+                    },
+                    zx::MonotonicInstant::INFINITE,
+                )
+            };
+
+            match reboot_result {
+                Ok(Ok(())) => {
+                    // System is rebooting... wait until runtime ends.
+                    zx::MonotonicInstant::INFINITE.sleep();
+                }
+                Ok(Err(e)) => {
+                    return panic_or_error(
+                        current_task.kernel(),
+                        errno!(
+                            EINVAL,
+                            format!("Failed to reboot, status: {}", zx::Status::from_raw(e))
+                        ),
+                    );
+                }
+                Err(e) => {
+                    return panic_or_error(
+                        current_task.kernel(),
+                        errno!(EINVAL, format!("Failed to reboot, FIDL error: {e}")),
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        _ => error!(EINVAL),
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+mod arch32 {
+    pub use super::sys_reboot as sys_arch32_reboot;
+}
+
+#[cfg(target_arch = "aarch64")]
+pub use arch32::*;

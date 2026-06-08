@@ -130,8 +130,8 @@ fn dispatch_syscall(num: u64, args: &SyscallArgs, ctx: &mut ExceptionContext) ->
 
         // -- Notification operations
         Syscall::Signal => handle_signal(args),
-        Syscall::Wait => handle_wait(args, ctx),
-        Syscall::Poll => handle_poll(args, ctx),
+        Syscall::Wait => handle_wait(args),
+        Syscall::Poll => handle_poll(args),
 
         // -- Restricted mode (Starnix)
         Syscall::RestrictedEnter => restricted::handle_restricted_enter(args, ctx),
@@ -325,7 +325,7 @@ fn handle_signal(args: &SyscallArgs) -> SyscallResult {
 ///
 /// x0: notification capability pointer
 /// Returns: x0 = signal word
-fn handle_wait(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallResult {
+fn handle_wait(args: &SyscallArgs) -> SyscallResult {
     let cptr = args.arg0;
 
     // Look up notification with READ right
@@ -334,16 +334,12 @@ fn handle_wait(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallResult 
     // Get current task
     let current = crate::sched::current_task().ok_or(SyscallError::InvalidState)?;
 
-    // Perform wait
+    // Return the signal word as the result (dispatcher writes it to x0). If the
+    // thread blocks, the real word is delivered on wake by `deliver_signal`,
+    // overwriting this `Ok(0)`.
     match ipc::do_wait(current, cap.obj_ref)? {
-        Some(word) => {
-            ctx.gpr[0] = word;
-            Ok(0)
-        }
-        None => {
-            // Blocked - signal word will be delivered when we're woken
-            Ok(0)
-        }
+        Some(word) => Ok(word as i64),
+        None => Ok(0),
     }
 }
 
@@ -351,17 +347,15 @@ fn handle_wait(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallResult 
 ///
 /// x0: notification capability pointer
 /// Returns: x0 = signal word (0 if no signals)
-fn handle_poll(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallResult {
+fn handle_poll(args: &SyscallArgs) -> SyscallResult {
     let cptr = args.arg0;
 
     // Look up notification with READ right
     let cap = ipc::lookup_cap(cptr, ObjectType::Notification, CapRights::READ)?;
 
-    // Perform poll
+    // Return the signal word as the result (dispatcher writes it to x0).
     let word = ipc::do_poll(cap.obj_ref)?;
-    ctx.gpr[0] = word;
-
-    Ok(0)
+    Ok(word as i64)
 }
 
 /// Install the syscall handler.

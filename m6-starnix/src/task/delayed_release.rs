@@ -1,0 +1,121 @@
+// Forked from Fuchsia's Starnix for M6 (no_std, ARM64 only).
+// Original: Copyright 2024 The Fuchsia Authors. BSD license.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#[allow(unused_imports)] use m6_starnix_std::prelude::*;
+use crate::task::CurrentTask;
+use fuchsia_rcu::rcu_run_callbacks;
+use starnix_logging::log_warn;
+use starnix_sync::{FileOpsCore, Locked};
+use starnix_types::ownership::Releasable;
+use m6_starnix_std::cell::RefCell;
+use m6_starnix_std::ops::DerefMut;
+
+/// Register the container to be deferred released.
+pub fn register_delayed_release<
+    T: for<'a> Releasable<Context<'a> = CurrentTaskAndLocked<'a>> + 'static,
+>(
+    to_release: T,
+) {
+    RELEASERS.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        let list = &mut cell.as_mut().expect("DelayedReleaser hasn't been finalized").releasables;
+        list.push(Box::new(Some(to_release)));
+    });
+}
+
+impl<T> CurrentTaskAndLockedReleasable for Option<T>
+where
+    for<'a> T: Releasable<Context<'a> = CurrentTaskAndLocked<'a>>,
+{
+    fn release_with_context(&mut self, context: CurrentTaskAndLocked<'_>) {
+        if let Some(this) = self.take() {
+            <T as Releasable>::release(this, context);
+        }
+    }
+}
+
+pub type CurrentTaskAndLocked<'a> = (&'a mut Locked<FileOpsCore>, &'a CurrentTask);
+
+/// An object-safe/dyn-compatible trait to wrap `Releasable` types.
+pub trait CurrentTaskAndLockedReleasable {
+    fn release_with_context(&mut self, context: CurrentTaskAndLocked<'_>);
+}
+
+thread_local! {
+    /// Container of all `FileObject` that are not used anymore, but have not been closed yet.
+    static RELEASERS: RefCell<Option<LocalReleasers>> =
+        RefCell::new(Some(LocalReleasers::default()));
+}
+
+#[derive(Default)]
+struct LocalReleasers {
+    /// The list of entities to be deferred released.
+    releasables: Vec<Box<dyn CurrentTaskAndLockedReleasable>>,
+}
+
+impl LocalReleasers {
+    fn is_empty(&self) -> bool {
+        self.releasables.is_empty()
+    }
+}
+
+impl Releasable for LocalReleasers {
+    type Context<'a> = CurrentTaskAndLocked<'a>;
+
+    fn release<'a>(self, context: CurrentTaskAndLocked<'a>) {
+        let (locked, current_task) = context;
+        for mut releasable in self.releasables {
+            releasable.release_with_context((locked, current_task));
+        }
+    }
+}
+
+/// Service to handle delayed releases.
+///
+/// Delayed releases are cleanup code that is run at specific point where the lock level is
+/// known. The starnix kernel must ensure that delayed releases are run regularly.
+#[derive(Debug, Default)]
+pub struct DelayedReleaser {}
+
+impl DelayedReleaser {
+    /// Run all current delayed releases for the current thread.
+    pub fn apply<'a>(&self, locked: &'a mut Locked<FileOpsCore>, current_task: &'a CurrentTask) {
+        let mut counter = 0u32;
+        loop {
+            rcu_run_callbacks();
+            let releasers = RELEASERS.with(|cell| {
+                m6_starnix_std::mem::take(
+                    cell.borrow_mut()
+                        .as_mut()
+                        .expect("DelayedReleaser hasn't been finalized yet")
+                        .deref_mut(),
+                )
+            });
+            if releasers.is_empty() {
+                return;
+            }
+            releasers.release((locked, current_task));
+            counter += 1;
+            if counter == 100 {
+                log_warn!("DelayedReleaser: applied >=100 delayed releases");
+            }
+            if counter > 10000 {
+                panic!("DelayedReleaser: applied >10000 delayed releases");
+            }
+        }
+    }
+
+    /// Prevent any further releasables from being registered on this thread.
+    ///
+    /// This function should be called during thread teardown to ensure that we do not
+    /// register any new releasables on this thread after we have finalized the delayed
+    /// releasables for the last time.
+    pub fn finalize() {
+        RELEASERS.with(|cell| {
+            let list = cell.borrow_mut().take().expect("DelayedReleaser hasn't been finalized");
+            assert!(list.is_empty());
+        });
+    }
+}

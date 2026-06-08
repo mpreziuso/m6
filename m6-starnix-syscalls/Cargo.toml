@@ -1,0 +1,16 @@
+[package]
+name = "m6-starnix-syscalls"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "starnix_syscalls"
+
+[dependencies]
+paste = "1"
+# uapi types for the SyscallArg ↔ user-pointer/value conversions (matches upstream
+# starnix_syscalls). uapi does not depend on syscalls, so there is no cycle.
+starnix_uapi = { package = "m6-starnix-uapi", path = "../m6-starnix-uapi" }
+# ArchWidth is canonical in starnix_types (matches upstream `use
+# starnix_types::arch::ArchWidth`). types does not depend on syscalls — no cycle.
+starnix_types = { package = "m6-starnix-types", path = "../m6-starnix-types" }

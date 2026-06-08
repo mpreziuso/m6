@@ -1,0 +1,86 @@
+// Forked from Fuchsia's Starnix for M6 (no_std, ARM64 only).
+// Original: Copyright 2024 The Fuchsia Authors. BSD license.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#[allow(unused_imports)] use m6_starnix_std::prelude::*;
+use starnix_rcu::RcuReadScope;
+use starnix_rcu::rcu_hash_map::{Entry, RcuHashMap};
+use m6_starnix_std::sync::{Arc, Weak};
+
+use crate::task::CurrentTask;
+use crate::vfs::FsString;
+use crate::vfs::socket::{Socket, SocketAddress, SocketHandle};
+use starnix_sync::{FileOpsCore, LockEqualOrBefore, Locked};
+use starnix_uapi::errors::Errno;
+use starnix_uapi::{errno, error};
+
+/// A registry of abstract sockets.
+///
+/// AF_UNIX sockets can be bound either to nodes in the file system or to
+/// abstract addresses that are independent of the file system. This object
+/// holds the bindings to abstract addresses.
+///
+/// See "abstract" in https://man7.org/linux/man-pages/man7/unix.7.html
+pub struct AbstractSocketNamespace<K>
+where
+    K: m6_starnix_std::cmp::Eq + m6_starnix_std::hash::Hash + Clone + Send + Sync + 'static,
+{
+    table: RcuHashMap<K, Weak<Socket>>,
+    address_maker: Box<dyn Fn(K) -> SocketAddress + Send + Sync>,
+}
+
+pub type AbstractUnixSocketNamespace = AbstractSocketNamespace<FsString>;
+pub type AbstractVsockSocketNamespace = AbstractSocketNamespace<u32>;
+
+impl<K> AbstractSocketNamespace<K>
+where
+    K: m6_starnix_std::cmp::Eq + m6_starnix_std::hash::Hash + Clone + Send + Sync + 'static,
+{
+    pub fn new(
+        address_maker: Box<dyn Fn(K) -> SocketAddress + Send + Sync>,
+    ) -> Arc<AbstractSocketNamespace<K>> {
+        Arc::new(AbstractSocketNamespace::<K> { table: RcuHashMap::default(), address_maker })
+    }
+
+    pub fn bind<L>(
+        &self,
+        locked: &mut Locked<L>,
+        current_task: &CurrentTask,
+        address: K,
+        socket: &SocketHandle,
+    ) -> Result<(), Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        let locked = locked.cast_locked::<FileOpsCore>();
+        let mut table = self.table.lock();
+        match table.entry(address.clone()) {
+            Entry::Vacant(entry) => {
+                socket.bind(locked, current_task, (self.address_maker)(address))?;
+                entry.insert(Arc::downgrade(socket));
+            }
+            Entry::Occupied(mut entry) => {
+                let occupant = entry.get().upgrade();
+                if occupant.is_some() {
+                    return error!(EADDRINUSE);
+                }
+                socket.bind(locked, current_task, (self.address_maker)(address))?;
+                entry.insert(Arc::downgrade(socket));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn lookup<Q: ?Sized>(&self, address: &Q) -> Result<SocketHandle, Errno>
+    where
+        K: m6_starnix_std::borrow::Borrow<Q>,
+        Q: m6_starnix_std::hash::Hash + Eq,
+    {
+        let scope = RcuReadScope::new();
+        self.table
+            .get(&scope, address)
+            .and_then(|weak| weak.upgrade())
+            .ok_or_else(|| errno!(ECONNREFUSED))
+    }
+}

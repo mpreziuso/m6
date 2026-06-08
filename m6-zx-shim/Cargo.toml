@@ -1,0 +1,16 @@
+[package]
+name = "m6-zx-shim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Zircon API compatibility shim backed by M6 capabilities"
+
+[dependencies]
+m6-syscall = { workspace = true, features = ["userspace"] }
+m6-cap = { workspace = true }
+m6-common = { workspace = true }
+m6-starnix-std = { path = "../m6-starnix-std" }
+bitflags = "2"
+# FromBytes bound for the typed Vmo read API (read_to_vec/read_to_array/…).
+zerocopy = { workspace = true }

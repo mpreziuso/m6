@@ -677,6 +677,30 @@ pub fn retype(
     ))
 }
 
+/// Retype `count` objects, splitting into batches that respect the kernel's
+/// per-call limit ([`crate::numbers::MAX_RETYPE_COUNT`]). Objects land in
+/// consecutive destination slots from `dest_index`, forming one contiguous run.
+///
+/// On success returns the total number of objects created; on failure returns
+/// the error from the failing batch (slots up to that point are left created).
+#[inline]
+pub fn retype_batched(
+    untyped: u64,
+    object_type: u64,
+    size_bits: u64,
+    dest_cnode: u64,
+    dest_index: u64,
+    count: u64,
+) -> SyscallResult {
+    let mut done = 0u64;
+    while done < count {
+        let batch = core::cmp::min(crate::numbers::MAX_RETYPE_COUNT, count - done);
+        retype(untyped, object_type, size_bits, dest_cnode, dest_index + done, batch)?;
+        done += batch;
+    }
+    Ok(done as i64)
+}
+
 /// Map a frame into a VSpace.
 ///
 /// # Arguments

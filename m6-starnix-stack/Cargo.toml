@@ -1,0 +1,12 @@
+[package]
+name = "m6-starnix-stack"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Stack-scrub shim for Starnix fork (replaces Fuchsia starnix_stack)"
+
+[lib]
+name = "starnix_stack"
+
+[dependencies]

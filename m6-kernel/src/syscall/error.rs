@@ -51,6 +51,10 @@ pub type SyscallResult = Result<i64, SyscallError>;
 pub const IPC_MESSAGE_DELIVERED: i64 = i64::MIN;
 
 /// Convert a syscall result to a raw return value.
+///
+/// Handlers return their x0 result via `Ok(v)`, written to `ctx.gpr[0]` here;
+/// writing `ctx.gpr[0]` directly is overwritten, except when returning
+/// [`IPC_MESSAGE_DELIVERED`] after pre-delivering a message to registers.
 #[inline]
 pub fn to_return_value(result: SyscallResult) -> i64 {
     match result {

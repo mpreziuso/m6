@@ -1,0 +1,11 @@
+[package]
+name = "m6-starnix-std"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "std compatibility shim for Starnix (no_std re-exports from core/alloc)"
+
+[dependencies]
+hashbrown = { version = "0.15", default-features = false, features = ["allocator-api2"] }
+spin = { workspace = true }

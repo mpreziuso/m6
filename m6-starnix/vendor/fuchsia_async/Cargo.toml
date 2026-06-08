@@ -1,0 +1,13 @@
+[package]
+name = "m6-fuchsia-async-shim"
+version = "0.1.0"
+edition = "2024"
+license = "BSD-3-Clause"
+description = "Minimal no_std single-threaded fuchsia_async shim for the M6 Starnix fork"
+
+[lib]
+name = "fuchsia_async"
+path = "src/lib.rs"
+
+[dependencies]
+futures = { version = "0.3", default-features = false, features = ["alloc"] }

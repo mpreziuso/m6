@@ -1,0 +1,66 @@
+// Forked from Fuchsia's Starnix for M6 (no_std, ARM64 only).
+// Original: Copyright 2024 The Fuchsia Authors. BSD license.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#[allow(unused_imports)] use m6_starnix_std::prelude::*;
+use crate::vfs::{FsStr, FsString, XattrOp, XattrStorage};
+use starnix_rcu::rcu_hash_map::Entry;
+use starnix_rcu::{RcuHashMap, RcuReadScope};
+use starnix_sync::{FileOpsCore, Locked};
+use starnix_uapi::errors::Errno;
+use starnix_uapi::{errno, error};
+
+pub struct MemoryXattrStorage {
+    // Arbitrary userspace programs can define xattr keys so we use a collision-resistant hasher.
+    xattrs: RcuHashMap<FsString, FsString, m6_starnix_std::collections::hash_map::RandomState>,
+}
+
+impl Default for MemoryXattrStorage {
+    fn default() -> Self {
+        Self { xattrs: RcuHashMap::with_hasher(m6_starnix_std::collections::hash_map::RandomState::new()) }
+    }
+}
+
+impl XattrStorage for MemoryXattrStorage {
+    fn get_xattr(
+        &self,
+        _locked: &mut Locked<FileOpsCore>,
+        name: &FsStr,
+    ) -> Result<FsString, Errno> {
+        self.xattrs.get(&RcuReadScope::new(), name).cloned().ok_or_else(|| errno!(ENODATA))
+    }
+
+    fn set_xattr(
+        &self,
+        _locked: &mut Locked<FileOpsCore>,
+        name: &FsStr,
+        value: &FsStr,
+        op: XattrOp,
+    ) -> Result<(), Errno> {
+        let mut xattrs = self.xattrs.lock();
+        match xattrs.entry(name.to_owned()) {
+            Entry::Vacant(_) if op == XattrOp::Replace => return error!(ENODATA),
+            Entry::Occupied(_) if op == XattrOp::Create => return error!(EEXIST),
+            Entry::Vacant(v) => {
+                v.insert(value.to_owned());
+            }
+            Entry::Occupied(mut o) => {
+                o.insert(value.to_owned());
+            }
+        };
+        Ok(())
+    }
+
+    fn remove_xattr(&self, _locked: &mut Locked<FileOpsCore>, name: &FsStr) -> Result<(), Errno> {
+        let mut xattrs = self.xattrs.lock();
+        if xattrs.remove(name).is_none() {
+            return error!(ENODATA);
+        }
+        Ok(())
+    }
+
+    fn list_xattrs(&self, _locked: &mut Locked<FileOpsCore>) -> Result<Vec<FsString>, Errno> {
+        Ok(self.xattrs.keys(&RcuReadScope::new()).cloned().collect())
+    }
+}

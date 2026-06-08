@@ -121,7 +121,7 @@ else
     # Run QEMU
     exec $QEMU \
         -machine virt,gic-version=3,acpi=off,iommu=smmuv3 \
-        -cpu cortex-a72 \
+        -cpu cortex-a76 \
         -smp $CPUS \
         -m $MEMORY \
         -drive if=pflash,format=raw,readonly=on,file="$FIRMWARE" \

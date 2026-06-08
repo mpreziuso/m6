@@ -46,20 +46,32 @@ pub struct AllocatedPages {
     pub frame_cptr: u64,
     /// Number of pages allocated
     pub count: usize,
+    /// CPtr delta between consecutive frame slots, i.e. `1 << (64 - cnode_radix)`.
+    /// This MUST come from the allocating pool's actual radix — it differs between
+    /// processes (e.g. radix-12 m6-std binaries vs radix-10 drivers), so a single
+    /// global constant cannot be correct for all. A value of 0 falls back to the
+    /// compile-time default (used by free-path reconstructions that never map).
+    pub slot_offset: u64,
 }
 
 impl AllocatedPages {
     /// Get the frame cptr for the page at the given index.
     ///
     /// When multiple pages are allocated, they're placed at consecutive
-    /// CNode slots. This method calculates the cptr for each page.
+    /// CNode slots. This method calculates the cptr for each page using the
+    /// pool's per-radix [`slot_offset`](Self::slot_offset).
     ///
     /// # Panics
     /// Panics if `index >= self.count`.
     #[inline]
     pub fn frame_cptr_for(&self, index: usize) -> u64 {
         debug_assert!(index < self.count, "page index out of bounds");
-        self.frame_cptr + (index as u64 * crate::config::CPTR_SLOT_OFFSET)
+        let offset = if self.slot_offset != 0 {
+            self.slot_offset
+        } else {
+            crate::config::CPTR_SLOT_OFFSET
+        };
+        self.frame_cptr + (index as u64 * offset)
     }
 }
 

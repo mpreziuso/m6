@@ -1,0 +1,28 @@
+[package]
+name = "m6-starnix-types"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Type shims for Starnix fork (replaces Fuchsia starnix_types)"
+
+[lib]
+name = "starnix_types"
+
+[features]
+# Fuchsia-runtime-only code (FIDL conversions). Off by default on M6.
+fuchsia = []
+
+[dependencies]
+starnix_uapi = { package = "m6-starnix-uapi", path = "../m6-starnix-uapi" }
+linux_uapi = { package = "m6-linux-uapi", path = "../m6-linux-uapi" }
+# zx timeline marker types: the forked core parameterises over `zx::*Timeline`
+# but bounds on `zx_time::Timeline`, so we impl the latter for the former.
+zx = { package = "m6-zx-shim", path = "../m6-zx-shim" }
+zerocopy = { workspace = true }
+static_assertions = { workspace = true }
+bitflags = { workspace = true }
+cfg-if = "1"
+memoffset = "0.9"
+smallvec = { version = "1", default-features = false, features = ["const_generics", "union"] }
+bstr = { version = "1", default-features = false, features = ["alloc"] }

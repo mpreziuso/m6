@@ -9,7 +9,9 @@
 use core::mem::ManuallyDrop;
 
 use m6_cap::objects::untyped::{object_alignment, object_size};
-use m6_cap::objects::{FrameObject, PageTableLevel, UntypedObject, VSpaceObject};
+use m6_cap::objects::{
+    EndpointObject, FrameObject, NotificationObject, PageTableLevel, UntypedObject, VSpaceObject,
+};
 use m6_cap::{Badge, CapRights, CapSlot, ObjectRef, ObjectType, SlotFlags};
 use m6_common::PhysAddr;
 use m6_paging::{
@@ -114,7 +116,7 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
     );
 
     // Validate count
-    if count == 0 || count > 256 {
+    if count == 0 || count as u64 > m6_syscall::numbers::MAX_RETYPE_COUNT {
         log::debug!("Retype: invalid count");
         return Err(SyscallError::Range);
     }
@@ -574,6 +576,15 @@ fn init_kernel_object(
             KernelObjectType::VSpace => {
                 let vspace = VSpaceObject::new(phys_addr, ObjectRef::NULL);
                 obj.data.vspace = ManuallyDrop::new(vspace);
+            }
+            // Must be explicitly constructed: `default()` only writes `next_free`,
+            // so on slot reuse stale bytes in multi-word fields survive (e.g. a
+            // stale `signal_word` makes a fresh notification read as signalled).
+            KernelObjectType::Endpoint => {
+                obj.data.endpoint = ManuallyDrop::new(EndpointObject::new());
+            }
+            KernelObjectType::Notification => {
+                obj.data.notification = ManuallyDrop::new(NotificationObject::new());
             }
             // For other types, zeroed memory is a valid initial state
             // or they need special handling (TCB, CNode need heap allocation)

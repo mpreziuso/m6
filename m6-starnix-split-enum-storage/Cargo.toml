@@ -1,0 +1,13 @@
+[package]
+name = "m6-starnix-split-enum-storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Starnix-fork shim: split_enum_storage (M6 no_std)"
+
+[lib]
+name = "split_enum_storage"
+
+[dependencies]
+split_enum_storage_macro = { package = "m6-starnix-split-enum-storage-macro", path = "macro" }

@@ -1,0 +1,13 @@
+[package]
+name = "m6-starnix-mapped-clock"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Starnix-fork shim: mapped_clock (M6 no_std)"
+
+[lib]
+name = "mapped_clock"
+
+[dependencies]
+zx = { package = "m6-zx-shim", path = "../m6-zx-shim" }

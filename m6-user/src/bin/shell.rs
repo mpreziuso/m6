@@ -263,6 +263,11 @@ fn yield_delay(duration: Duration) {
     }
 }
 
+// Bound on how long to wait for a spawned child to exit before reclaiming its
+// memory, so a wedged child cannot hang the shell forever.
+const CHILD_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const CHILD_EXIT_MAX_POLLS: u32 = 1000;
+
 // -- Tokeniser
 
 mod tokenizer {
@@ -622,11 +627,31 @@ fn request_memory(ctx: &mut ShellContext) -> bool {
 }
 
 fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
+    spawn_external_with(program, args, ctx, &[], &[]);
+}
+
+/// `extra_data` is a list of `(vaddr, bytes)` regions to map read-only into the
+/// child's VSpace alongside the argv page — used to hand svc-starnix the Linux
+/// ELF resolved from the initrd.
+fn spawn_external_with(
+    program: &str,
+    args: &[String],
+    ctx: &mut ShellContext,
+    extra_caps: &[InitialCap],
+    extra_data: &[(u64, &[u8])],
+) {
     // 1. Find ELF in initrd
     let Some(elf_data) = m6_system::find_in_initrd(ctx.initrd, program) else {
         println!("{}: command not found", program);
         return;
     };
+
+    // Pull a fresh (largest-available) untyped for this spawn. The child's
+    // ELF/segment mappings AND its heap (granted at slot 15 below) both draw
+    // from `ram_untyped`; a large binary like svc-starnix (~600 frames to map)
+    // plus the forked-Starnix heap easily exhausts a small one. The shell's own
+    // heap lives on its slot-15 untyped, which request_memory never touches.
+    let _ = request_memory(ctx);
 
     // Snapshot slot counter so we can reset it after the child exits.
     let spawn_base = ctx.next_slot;
@@ -670,11 +695,26 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
 
     // 4. Spawn with resume: false so we can map argv and bind notification first.
     //    On memory failure, request a fresh untyped from init and retry once.
-    //    Grant the registry endpoint so tools can call ENSURE themselves.
-    let initial_caps = [InitialCap {
-        src_slot: REGISTRY_EP_SLOT,
-        dst_slot: REGISTRY_EP_SLOT,
-    }];
+    //    Grant the registry endpoint so tools can call ENSURE themselves,
+    //    plus any caller-supplied extras (e.g. ASID_POOL + MEM_SERVER for
+    //    svc-starnix which needs to retype VSpace + page tables itself).
+    let mut initial_caps_buf: Vec<InitialCap> = vec![
+        InitialCap {
+            src_slot: REGISTRY_EP_SLOT,
+            dst_slot: REGISTRY_EP_SLOT,
+        },
+        // m6-std expects an untyped at slot 15 to back the child's heap
+        // (M6PagePool retypes frames from it). Without this, the child's first
+        // allocation hits handle_alloc_error. The shell is blocked in wait()
+        // while the child runs, so sharing this untyped is safe; cap_revoke at
+        // teardown reclaims the child's heap frames too.
+        InitialCap {
+            src_slot: ctx.ram_untyped,
+            dst_slot: 15,
+        },
+    ];
+    initial_caps_buf.extend_from_slice(extra_caps);
+    let initial_caps = initial_caps_buf.as_slice();
     let spawn_start = ctx.next_slot;
     let result = loop {
         let config = SpawnConfig {
@@ -684,15 +724,18 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
             ram_untyped: ctx.ram_untyped,
             asid_pool: ASID_POOL_SLOT,
             next_free_slot: ctx.next_slot,
-            initial_caps: &initial_caps,
+            initial_caps,
             x0: if args.is_empty() { 0 } else { ARGS_PAGE_ADDR },
             resume: false,
         };
         match spawn_process(&config) {
             Ok(r) => break r,
             Err(_) => {
-                // Skip past any partially-allocated slots from the failed attempt
-                ctx.next_slot = spawn_start + 64;
+                // Skip past any partially-allocated slots from the failed attempt.
+                // Large binaries (e.g. the ~1.6 MB svc-starnix, ~400 frames) need
+                // a generous skip so the retry's retypes don't collide with the
+                // failed attempt's still-occupied slots.
+                ctx.next_slot = spawn_start + 1024;
                 if request_memory(ctx) {
                     continue;
                 }
@@ -703,17 +746,20 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
     };
     ctx.next_slot = result.next_free_slot;
 
-    // 5. Map argv page into child's VSpace
-    if !argv_data.is_empty() {
-        let mut pt_tracker = result.page_table_tracker;
+    // 5. Map argv page + any extra data regions into the child's VSpace,
+    //    sharing one page-table tracker so overlapping L1/L2/L3 tables are not
+    //    retyped twice.
+    let mut pt_tracker = result.page_table_tracker;
+    let mut map_region = |vaddr: u64, data: &[u8], ctx: &mut ShellContext| {
+        let end = vaddr + data.len().div_ceil(4096) as u64 * 4096;
         if let Err(e) = ensure_child_page_tables(
             0,
             CNODE_RADIX,
             result.vspace_slot,
             ctx.ram_untyped,
             &mut ctx.next_slot,
-            ARGS_PAGE_ADDR,
-            ARGS_PAGE_ADDR + 4096,
+            vaddr,
+            end,
             &mut pt_tracker,
         ) {
             println!("[shell] ensure_child_page_tables failed: {:?}", e);
@@ -723,28 +769,84 @@ fn spawn_external(program: &str, args: &[String], ctx: &mut ShellContext) {
             result.vspace_slot,
             ctx.ram_untyped,
             &mut ctx.next_slot,
-            ARGS_PAGE_ADDR,
-            &argv_data,
+            vaddr,
+            data,
             MapRights::R,
         ) {
             println!("[shell] map_data_to_child failed: {:?}", e);
         }
+    };
+    if !argv_data.is_empty() {
+        map_region(ARGS_PAGE_ADDR, &argv_data, ctx);
+    }
+    for &(vaddr, data) in extra_data {
+        map_region(vaddr, data, ctx);
     }
 
-    // 6. Bind exit notification to child TCB, then resume
+    // 6. Bind the exit notification to the child TCB and resume it. The kernel
+    //    signals this notification (with TCB_EXIT_NOTIFY_MARKER set) on exit.
     let notif_cptr = cptr(notif_slot);
     let tcb_cptr = cptr(result.tcb_slot);
     let _ = invoke::tcb_bind_notification(tcb_cptr, notif_cptr);
     let _ = invoke::tcb_resume(tcb_cptr);
 
-    // 7. Block until child exits — the kernel signals the notification on tcb_exit
-    let _ = invoke::wait(notif_cptr);
+    // 7. Wait for the child to exit by polling its exit notification, yielding
+    //    between polls so the child gets the CPU. Polling rather than a blocking
+    //    `wait` because a notification bound to the child TCB does not wake a
+    //    thread queued directly on it (see `do_signal`).
+    let exited = |word: i64| word as u64 & m6_system::numbers::TCB_EXIT_NOTIFY_MARKER != 0;
+    for _ in 0..CHILD_EXIT_MAX_POLLS {
+        if invoke::poll(notif_cptr).is_ok_and(exited) {
+            break;
+        }
+        yield_delay(CHILD_EXIT_POLL_INTERVAL);
+    }
 
     // 8. Reclaim memory: revoke the untyped, destroying all derived objects (notification,
     //    TCB, CNode, VSpace, frames, page tables) and returning their memory to the untyped.
     //    Then reset the slot counter past the untyped slot so it's ready for the next spawn.
     let _ = invoke::cap_revoke(cptr(0), ctx.ram_untyped, CNODE_RADIX as u64);
     ctx.next_slot = ctx.ram_untyped + 1;
+}
+
+/// `linux <binary> [args...]` — run a Linux binary under svc-starnix.
+///
+/// The binary is resolved from the initrd (the only runtime-readable store on
+/// flashed hardware) and handed to svc-starnix via a fixed mapping, so it does
+/// not depend on the NVMe being provisioned. svc-starnix still needs ASID_POOL
+/// (to assign an ASID to the Linux VSpace) and MEM_SERVER (to request untyped
+/// from init).
+fn cmd_linux(args: &[String], ctx: &mut ShellContext) {
+    let Some(name) = args.first() else {
+        println!("usage: linux <binary> [args...]");
+        return;
+    };
+    let Some(elf) = m6_system::find_in_initrd(ctx.initrd, name.as_str()) else {
+        println!("linux: {}: not found in initrd", name);
+        return;
+    };
+
+    // Boot-info page: magic, ELF vaddr, ELF length.
+    let mut info: Vec<u8> = vec![0u8; 4096];
+    info[0..8].copy_from_slice(&m6_system::STARNIX_BOOTELF_MAGIC.to_le_bytes());
+    info[8..16].copy_from_slice(&m6_system::STARNIX_BOOTELF_DATA_ADDR.to_le_bytes());
+    info[16..24].copy_from_slice(&(elf.len() as u64).to_le_bytes());
+
+    let extras = [
+        InitialCap {
+            src_slot: ASID_POOL_SLOT,
+            dst_slot: ASID_POOL_SLOT,
+        },
+        InitialCap {
+            src_slot: MEM_SERVER_SLOT,
+            dst_slot: MEM_SERVER_SLOT,
+        },
+    ];
+    let data: [(u64, &[u8]); 2] = [
+        (m6_system::STARNIX_BOOTELF_INFO_ADDR, info.as_slice()),
+        (m6_system::STARNIX_BOOTELF_DATA_ADDR, elf),
+    ];
+    spawn_external_with("svc-starnix", args, ctx, &extras, &data);
 }
 
 // -- Command dispatch
@@ -767,6 +869,7 @@ fn execute_line(tokens: &[String], ctx: &mut ShellContext) {
         }
         "ls" => cmd_ls(ctx),
         "mkfs" => cmd_mkfs(ctx),
+        "linux" => cmd_linux(&tokens[1..], ctx),
         name => spawn_external(name, &tokens[1..], ctx),
     }
 }
@@ -796,8 +899,13 @@ fn main() -> i32 {
     let hid_ep = try_get_hid_endpoint();
 
     if hid_ep.is_none() {
-        println!("No HID driver available - running in display-only mode\n");
-        print!("\x1b[32mm6>\x1b[0m ");
+        println!("No HID driver available - running stage-1 self-test\n");
+        // Auto-execute `linux hello` so the m6-starnix trap path can be
+        // exercised end-to-end on headless QEMU runs where the xHCI/HID
+        // chain isn't available. Remove once interactive HID input works.
+        let test_tokens: Vec<String> = vec!["linux".into(), "hello".into()];
+        execute_line(&test_tokens, &mut ctx);
+        println!("\n[shell] self-test complete; idling.");
         loop {
             yield_delay(Duration::from_millis(500));
         }

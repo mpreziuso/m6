@@ -1,0 +1,16 @@
+[package]
+name = "m6-starnix-rcu"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Starnix-fork shim: starnix_rcu (M6 no_std)"
+
+[lib]
+name = "starnix_rcu"
+
+[dependencies]
+fuchsia_rcu = { package = "m6-fuchsia-rcu", path = "../m6-fuchsia-rcu" }
+starnix_types = { package = "m6-starnix-types", path = "../m6-starnix-types" }
+spin = { workspace = true }
+hashbrown = { version = "0.15", default-features = false, features = ["allocator-api2", "default-hasher"] }

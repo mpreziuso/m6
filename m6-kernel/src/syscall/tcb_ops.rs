@@ -497,9 +497,12 @@ pub fn handle_tcb_exit(args: &SyscallArgs) -> SyscallResult {
     // Remove from scheduler
     sched::remove_task(tcb_ref);
 
-    // Signal bound notification with exit code as badge (if any)
+    // Signal the bound notification to release a waiter (e.g. the spawning
+    // shell). The marker bit makes the exit observable even for a 0 exit code;
+    // the code rides the low 32 bits.
     if bound_notification.is_valid() {
-        let _ = ipc::do_signal(bound_notification, exit_code as u64);
+        let exit_badge = (exit_code as u32 as u64) | m6_syscall::numbers::TCB_EXIT_NOTIFY_MARKER;
+        let _ = ipc::do_signal(bound_notification, exit_badge);
     }
 
     // Request reschedule - the kernel will switch to another task

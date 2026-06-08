@@ -12,6 +12,16 @@
 /// the kernel checks for this value before CPtr resolution.
 pub const SELF_CAP: u64 = u64::MAX;
 
+/// Maximum objects a single Retype call may create (a kernel latency cap).
+/// Larger requests must be split into batches; see [`crate::invoke::retype_batched`].
+pub const MAX_RETYPE_COUNT: u64 = 256;
+
+/// Marker bit OR'd into a TCB's bound-notification badge on thread exit. Signal
+/// words accumulate badges by OR, so a 0 exit code would read as "no signal";
+/// this bit makes the exit observable via `poll`/`wait`, with the exit code in
+/// the low 32 bits. Set by the kernel on `Exit`, checked by userspace waiters.
+pub const TCB_EXIT_NOTIFY_MARKER: u64 = 1 << 32;
+
 /// Method labels for the Invoke syscall.
 ///
 /// Each object type has its own label namespace. The same numeric label

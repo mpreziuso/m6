@@ -196,6 +196,19 @@ pub unsafe extern "C" fn _start(device_phys_addr: u64) -> ! {
         halt();
     }
 
+    // Map extended MMIO frames (BAR0 pages 1+) — xHCI doorbells, runtime
+    // registers, and extended capabilities all live past the first 4KB.
+    // Slot layout matches device-mgr (slots::driver::EXTENDED_MMIO_START = 64).
+    const EXTENDED_MMIO_START: u64 = 64;
+    const PAGE_SIZE: u64 = 4096;
+    for i in 0..16u64 {
+        let frame_cptr = cptr(EXTENDED_MMIO_START + i);
+        let vaddr = XHCI_MMIO_VADDR + (i + 1) * PAGE_SIZE;
+        if map_frame(ROOT_VSPACE, frame_cptr, vaddr, 0b011, 0).is_err() {
+            break;
+        }
+    }
+
     // Compute page offset for non-page-aligned devices (e.g., PCIe BARs)
     let page_offset = device_phys_addr & 0xFFF;
     let device_addr = XHCI_MMIO_VADDR + page_offset;

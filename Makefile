@@ -1,5 +1,5 @@
 .PHONY: clean check clippy run debug fmt fmt-check sysroot system user image test \
-        flash flash-full
+        linux-binaries busybox fat32-image flash flash-full
 
 all: boot kernel initrd-full
 
@@ -57,11 +57,28 @@ initrd-full: system user
 	@cp target/aarch64-unknown-m6/release/echo target/initrd/
 	@cp target/aarch64-unknown-m6/release/mkdir target/initrd/
 	@cp target/aarch64-unknown-m6/release/mkfs-fat32 target/initrd/
+	@cp target/aarch64-unknown-m6/release/svc-starnix target/initrd/
+	@# Bundle the Linux test binaries so svc-starnix can load them from the
+	@# initrd (the boot SD is not runtime-readable; see scripts/build-sysroot.sh).
+	@if [ -f linux/hello ]; then \
+	    cp linux/hello target/initrd/hello; \
+	    echo "Bundled linux/hello into initrd"; \
+	else \
+	    echo "Note: linux/hello not built (run 'make linux-binaries'); 'linux hello' will be unavailable"; \
+	fi
+	@if [ -f linux/busybox ]; then \
+	    cp linux/busybox target/initrd/busybox; \
+	    echo "Bundled linux/busybox into initrd"; \
+	else \
+	    echo "Note: linux/busybox not built (run 'make busybox'); 'linux busybox ls' will be unavailable"; \
+	fi
 	@# Create TAR archive
 	cd target/initrd && \
 		tar --format=ustar -cf INITRD \
 		init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme drv-usb-xhci drv-usb-dwc3 drv-usb-hid svc-fat32 \
-		shell ls cat cp echo mkdir mkfs-fat32
+		shell ls cat cp echo mkdir mkfs-fat32 svc-starnix \
+		$$([ -f hello ] && echo hello) \
+		$$([ -f busybox ] && echo busybox)
 	@echo "Created full initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
 	@echo "Contents:"
 	@tar -tvf target/initrd/INITRD
@@ -144,3 +161,38 @@ fmt:
 
 fmt-check:
 	cargo fmt --all -- --check
+
+# -- Linux test binaries (m6-starnix bring-up)
+#
+# Builds static aarch64 ELFs (e.g. linux/hello) that run under
+# svc-starnix. Requires aarch64-linux-musl-gcc or aarch64-linux-gnu-gcc.
+linux-binaries:
+	$(MAKE) -C linux all
+
+# -- busybox (static aarch64) for `linux busybox ls` under svc-starnix
+#
+# Fetches + cross-compiles a static, non-PIE busybox into linux/busybox, which
+# initrd-full then bundles. Separate from linux-binaries because it downloads
+# the busybox source.
+busybox:
+	$(MAKE) -C linux busybox
+
+# -- FAT32 virtio-blk disk image, pre-populated with Linux binaries
+#
+# Wipes target/disk.img and rebuilds it as a FAT32 volume. If
+# linux/hello exists, it is copied to the root. Run this after
+# `make linux-binaries` to make Linux test binaries available to
+# svc-starnix at runtime.
+#
+# Requires: mkfs.vfat, mtools (mcopy).
+fat32-image:
+	@mkdir -p target
+	dd if=/dev/zero of=target/disk.img bs=1M count=64 status=none
+	mkfs.vfat -F 32 target/disk.img >/dev/null 2>&1
+	@if [ -f linux/hello ]; then \
+	    mcopy -i target/disk.img linux/hello ::hello && \
+	    printf "FAT32 disk.img populated with linux/hello (%s bytes)\n" \
+	      "$$(stat -c%s linux/hello)"; \
+	else \
+	    echo "FAT32 disk.img created empty (run 'make linux-binaries' first)"; \
+	fi

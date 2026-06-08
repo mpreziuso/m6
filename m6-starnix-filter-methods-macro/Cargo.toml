@@ -1,0 +1,16 @@
+[package]
+name = "m6-starnix-filter-methods-macro"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "filter_methods! proc-macro shim for Starnix fork"
+
+[lib]
+name = "filter_methods_macro"
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "parsing"] }
+quote = "1"
+proc-macro2 = "1"

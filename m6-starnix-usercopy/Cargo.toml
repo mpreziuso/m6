@@ -1,0 +1,14 @@
+[package]
+name = "m6-starnix-usercopy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Starnix-fork shim: usercopy (M6 no_std)"
+
+[lib]
+name = "usercopy"
+
+[dependencies]
+# Crate-rename so the forked code's bare `zx::` resolves to the M6 shim.
+zx = { package = "m6-zx-shim", path = "../m6-zx-shim" }

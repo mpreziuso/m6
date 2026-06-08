@@ -164,26 +164,45 @@ struct DevMgrBootInfoLayout {
 /// is exhausted; init replies by transferring a copy of the next available untyped.
 fn serve_memory_requests(boot_info: &UserBootInfo, radix: u8, _next_slot: u64) -> ! {
     let cptr = |slot: u64| m6_syscall::slot_to_cptr(slot, radix);
-    // Start distributing from the second untyped (index 1); index 0 was already
-    // shared with children via initial_caps at spawn time.
-    let mut next_ut_idx = 1usize;
+    // Track which untypeds have been handed out. Index 0 was already shared with
+    // children via initial_caps at spawn time.
+    let mut used = [false; m6_syscall::boot_info::MAX_UNTYPED_REGIONS];
+    used[0] = true;
     let mut first = true;
+
+    // Pick the LARGEST unused RAM (non-device) untyped. Handing out big regions
+    // first lets a single requester back a large mapping (e.g. the ~1.6 MB
+    // svc-starnix binary) from one untyped instead of churning through dozens of
+    // small power-of-two remainders.
+    let pick_largest = |used: &[bool]| -> Option<usize> {
+        let mut best: Option<usize> = None;
+        let mut best_size = 0u64;
+        let count = boot_info.untyped_count as usize;
+        for i in 0..count {
+            if used[i] || boot_info.untyped_is_device(i) {
+                continue;
+            }
+            let size = boot_info.untyped_size(i);
+            if size > best_size {
+                best_size = size;
+                best = Some(i);
+            }
+        }
+        best
+    };
 
     loop {
         let result = if first {
             first = false;
             recv(cptr(MEM_SERVER_EP_SLOT))
         } else {
-            // Find the next RAM (non-device) untyped to hand out.
-            let ut_cptr = loop {
-                if next_ut_idx >= boot_info.untyped_count as usize {
-                    break None;
+            // Find the largest RAM (non-device) untyped to hand out.
+            let ut_cptr = match pick_largest(&used) {
+                Some(i) => {
+                    used[i] = true;
+                    Some(cptr(Slot::FirstUntyped as u64 + i as u64))
                 }
-                let i = next_ut_idx;
-                next_ut_idx += 1;
-                if !boot_info.untyped_is_device(i) {
-                    break Some(cptr(Slot::FirstUntyped as u64 + i as u64));
-                }
+                None => None,
             };
 
             if let Some(ut) = ut_cptr {

@@ -1,0 +1,13 @@
+[package]
+name = "m6-starnix-task-command"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "TaskCommand shim for Starnix fork (replaces Fuchsia starnix_task_command)"
+
+[lib]
+name = "starnix_task_command"
+
+[dependencies]
+bstr = { version = "1", default-features = false, features = ["alloc"] }

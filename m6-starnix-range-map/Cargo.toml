@@ -1,0 +1,13 @@
+[package]
+name = "m6-starnix-range-map"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Starnix-fork shim: range_map (M6 no_std)"
+
+[lib]
+name = "range_map"
+
+[dependencies]
+arrayvec = { version = "0.7", default-features = false }

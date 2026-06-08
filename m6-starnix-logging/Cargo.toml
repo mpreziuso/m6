@@ -1,0 +1,18 @@
+[package]
+name = "m6-starnix-logging"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Logging shim for Starnix fork (replaces Fuchsia starnix_logging)"
+
+[lib]
+name = "starnix_logging"
+
+[dependencies]
+starnix_uapi = { package = "m6-starnix-uapi", path = "../m6-starnix-uapi" }
+# zx::Status for `impossible_error` (matches upstream signature).
+zx = { package = "m6-zx-shim", path = "../m6-zx-shim" }
+starnix_task_command = { package = "m6-starnix-task-command", path = "../m6-starnix-task-command" }
+log = { workspace = true, features = ["kv"] }
+spin = { workspace = true }

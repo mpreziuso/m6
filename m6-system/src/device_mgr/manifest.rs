@@ -168,7 +168,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         binary_name: "drv-virtio-blk",
         needs_irq: true,
         needs_msix: false,
-        needs_iommu: true, // Block devices perform DMA
+        needs_iommu: true,
         needs_dma: true,
         is_platform: true,
         virtio_device_id: 2, // VirtIO block device

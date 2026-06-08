@@ -534,10 +534,11 @@ where
             let _ = self.vm.unmap_frame(page_vaddr);
         }
 
-        // Return pages to pool
+        // Return pages to pool (free path never maps, so slot_offset is unused)
         let pages = AllocatedPages {
             frame_cptr: entry.frame_cptr,
             count: entry.page_count,
+            slot_offset: 0,
         };
         let _ = self.pool.free_pages(pages);
 
@@ -619,6 +620,7 @@ mod tests {
             Ok(AllocatedPages {
                 frame_cptr: 1,
                 count,
+                slot_offset: 1 << 52,
             })
         }
         fn free_pages(&self, _pages: AllocatedPages) -> Result<(), ()> {

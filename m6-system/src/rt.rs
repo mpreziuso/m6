@@ -326,20 +326,14 @@ impl PagePool for M6PagePool {
         let slot = alloc_slot_range(count);
         let frame_cptr = slot_to_cptr(slot);
 
-        // Retype untyped into frames at the given slot
-        let result = m6_syscall::invoke::retype(
+        if let Err(e) = m6_syscall::invoke::retype_batched(
             untyped_cptr,
             ObjectType::Frame as u64,
             12, // size_bits: 4KB
             cnode_cptr,
             slot,
             count as u64,
-        );
-
-        if result.is_ok() {
-            Ok(AllocatedPages { frame_cptr, count })
-        } else {
-            // Only log on error
+        ) {
             for c in b"[rt] ERROR: alloc_pages failed slot=" {
                 debug_putc(*c);
             }
@@ -351,12 +345,19 @@ impl PagePool for M6PagePool {
             for c in b" error=" {
                 debug_putc(*c);
             }
-            if let Err(e) = result {
-                print_error(e);
-            }
+            print_error(e);
             debug_putc(b'\n');
-            Err(M6PoolError)
+            return Err(M6PoolError);
         }
+
+        Ok(AllocatedPages {
+            frame_cptr,
+            count,
+            // Consecutive frame slots differ by 1 << (64 - radix). The radix
+            // is per-process (10 for drivers, 12 for device-mgr), so derive
+            // it from the runtime-configured value rather than a constant.
+            slot_offset: 1u64 << (64 - cnode_radix() as u64),
+        })
     }
 
     fn free_pages(&self, pages: AllocatedPages) -> Result<(), Self::Error> {

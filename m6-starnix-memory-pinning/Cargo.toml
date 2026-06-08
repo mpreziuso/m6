@@ -1,0 +1,15 @@
+[package]
+name = "m6-starnix-memory-pinning"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Starnix-fork shim: memory_pinning (M6 no_std)"
+
+[lib]
+name = "memory_pinning"
+
+[dependencies]
+# Crate-rename so the forked code's bare `zx::` resolves to the M6 shim.
+zx = { package = "m6-zx-shim", path = "../m6-zx-shim" }
+starnix_uapi = { package = "m6-starnix-uapi", path = "../m6-starnix-uapi" }

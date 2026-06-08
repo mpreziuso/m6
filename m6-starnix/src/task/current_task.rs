@@ -1,0 +1,2145 @@
+// Forked from Fuchsia's Starnix for M6 (no_std, ARM64 only).
+// Original: Copyright 2024 The Fuchsia Authors. BSD license.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+#[allow(unused_imports)] use m6_starnix_std::prelude::*;
+use crate::arch::task::{decode_page_fault_exception_report, get_signal_for_general_exception};
+use crate::execution::{TaskInfo, create_zircon_process};
+use crate::mm_ref::{DumpPolicy, MemoryAccessor, MemoryAccessorExt, TaskMemoryAccessor};
+use crate::ptrace::{PtraceCoreState, PtraceEvent, PtraceEventData, PtraceOptions, StopState};
+use crate::security;
+use crate::signals::{RunState, SignalDetail, SignalInfo, send_signal_first, send_standard_signal};
+use crate::task::loader::{ResolvedElf, load_executable, resolve_executable};
+use crate::task::waiter::WaiterOptions;
+use crate::task::{
+    ExitStatus, RobustListHeadPtr, SeccompFilter, SeccompFilterContainer, SeccompNotifierHandle,
+    SeccompState, SeccompStateValue, Task, TaskFlags, ThreadState, Waiter,
+};
+use crate::vfs::{
+    CheckAccessReason, FdFlags, FdNumber, FileHandle, FsStr, LookupContext, MAX_SYMLINK_FOLLOWS,
+    NamespaceNode, ResolveBase, SymlinkMode, SymlinkTarget, new_pidfd,
+};
+use futures::FutureExt;
+use linux_uapi::CLONE_PIDFD;
+use starnix_logging::{log_error, log_warn, track_file_not_found, track_stub};
+use starnix_registers::{HeapRegs, RegisterStorageEnum};
+use starnix_stack::clean_stack;
+use starnix_sync::{
+    EventWaitGuard, FileOpsCore, LockBefore, LockEqualOrBefore, Locked, MmDumpable,
+    ProcessGroupState, TaskRelease, Unlocked, WakeReason,
+};
+use starnix_syscalls::SyscallResult;
+use starnix_syscalls::decls::Syscall;
+use starnix_task_command::TaskCommand;
+use starnix_types::futex_address::FutexAddress;
+use starnix_types::ownership::{OwnedRef, Releasable, TempRef, WeakRef, release_on_error};
+use starnix_uapi::auth::{
+    CAP_KILL, CAP_SYS_ADMIN, CAP_SYS_PTRACE, Credentials, FsCred, PTRACE_MODE_FSCREDS,
+    PTRACE_MODE_REALCREDS, PtraceAccessMode, UserAndOrGroupId,
+};
+use starnix_uapi::device_type::DeviceType;
+use starnix_uapi::errors::Errno;
+use starnix_uapi::file_mode::{Access, AccessCheck, FileMode};
+use starnix_uapi::open_flags::OpenFlags;
+use starnix_uapi::signals::{
+    SIGBUS, SIGCHLD, SIGCONT, SIGILL, SIGKILL, SIGSEGV, SIGSYS, SIGTRAP, SigSet, Signal,
+    UncheckedSignal,
+};
+use starnix_uapi::user_address::{ArchSpecific, UserAddress, UserRef};
+use starnix_uapi::vfs::ResolveFlags;
+use starnix_uapi::{
+    CLONE_CHILD_CLEARTID, CLONE_CHILD_SETTID, CLONE_FILES, CLONE_FS, CLONE_INTO_CGROUP,
+    CLONE_NEWUTS, CLONE_PARENT, CLONE_PARENT_SETTID, CLONE_PTRACE, CLONE_SETTLS, CLONE_SIGHAND,
+    CLONE_SYSVSEM, CLONE_THREAD, CLONE_VFORK, CLONE_VM, FUTEX_OWNER_DIED, FUTEX_TID_MASK,
+    ROBUST_LIST_LIMIT, SECCOMP_FILTER_FLAG_LOG, SECCOMP_FILTER_FLAG_NEW_LISTENER,
+    SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_FILTER_FLAG_TSYNC_ESRCH, clone_args, errno, error,
+    from_status_like_fdio, pid_t, sock_filter, ucred,
+};
+use m6_starnix_std::cell::{Ref, RefCell};
+use m6_starnix_std::collections::VecDeque;
+use m6_starnix_std::ffi::CString;
+use m6_starnix_std::fmt;
+use m6_starnix_std::marker::PhantomData;
+use m6_starnix_std::mem::MaybeUninit;
+use m6_starnix_std::sync::Arc;
+use zx::sys::zx_restricted_state_t;
+
+use super::ThreadGroupLifecycleWaitValue;
+
+pub struct TaskBuilder {
+    /// The underlying task object.
+    pub task: OwnedRef<Task>,
+
+    pub thread_state: ThreadState<HeapRegs>,
+}
+
+impl TaskBuilder {
+    pub fn new(task: OwnedRef<Task>) -> Self {
+        Self { task, thread_state: Default::default() }
+    }
+
+    #[inline(always)]
+    pub fn release<L>(self, locked: &mut Locked<L>)
+    where
+        L: LockBefore<TaskRelease>,
+    {
+        let locked = locked.cast_locked::<TaskRelease>();
+        Releasable::release(self, locked);
+    }
+}
+
+impl From<TaskBuilder> for CurrentTask {
+    fn from(builder: TaskBuilder) -> Self {
+        Self::new(builder.task, builder.thread_state.into())
+    }
+}
+
+impl Releasable for TaskBuilder {
+    type Context<'a> = &'a mut Locked<TaskRelease>;
+
+    fn release<'a>(self, locked: Self::Context<'a>) {
+        let kernel = Arc::clone(self.kernel());
+        let mut pids = kernel.pids.write();
+
+        // We remove from the thread group here because the WeakRef in the pid
+        // table to this task must be valid until this task is removed from the
+        // thread group, and the code below will invalidate it.
+        // Moreover, this requires a OwnedRef of the task to ensure the tasks of
+        // the thread group are always valid.
+        self.task.thread_group().remove(locked, &mut pids, &self.task);
+
+        let context = (self.thread_state.into(), locked, pids);
+        self.task.release(context);
+    }
+}
+
+impl m6_starnix_std::ops::Deref for TaskBuilder {
+    type Target = Task;
+    fn deref(&self) -> &Self::Target {
+        &self.task
+    }
+}
+
+/// The task object associated with the currently executing thread.
+///
+/// We often pass the `CurrentTask` as the first argument to functions if those functions need to
+/// know contextual information about the thread on which they are running. For example, we often
+/// use the `CurrentTask` to perform access checks, which ensures that the caller is authorized to
+/// perform the requested operation.
+///
+/// The `CurrentTask` also has state that can be referenced only on the currently executing thread,
+/// such as the register state for that thread. Syscalls are given a mutable references to the
+/// `CurrentTask`, which lets them manipulate this state.
+///
+/// See also `Task` for more information about tasks.
+pub struct CurrentTask {
+    /// The underlying task object.
+    pub task: OwnedRef<Task>,
+
+    pub thread_state: ThreadState<RegisterStorageEnum>,
+
+    /// The current subjective credentials of the task.
+    // TODO(https://fxbug.dev/433548348): Avoid interior mutability here by passing a
+    // &mut CurrentTask around instead of &CurrentTask.
+    pub current_creds: RefCell<CurrentCreds>,
+
+    /// Makes CurrentTask neither Sync not Send.
+    _local_marker: PhantomData<*mut u8>,
+}
+
+/// Represents the current state of the task's subjective credentials.
+pub enum CurrentCreds {
+    /// The task does not have overridden credentials, the subjective creds are identical to the
+    /// objective creds stored in the Task. Since credentials are often accessed from the current
+    /// task, we hold a reference here that does not necessitate going through the RCU machinery to
+    /// read.
+    Cached(Arc<Credentials>),
+    /// The task has overridden subjective credentials.
+    Overridden(Arc<Credentials>),
+}
+
+impl CurrentCreds {
+    fn creds(&self) -> &Arc<Credentials> {
+        match self {
+            CurrentCreds::Cached(creds) => creds,
+            CurrentCreds::Overridden(creds) => creds,
+        }
+    }
+}
+
+impl Releasable for CurrentTask {
+    type Context<'a> = &'a mut Locked<TaskRelease>;
+
+    fn release<'a>(self, locked: Self::Context<'a>) {
+        self.notify_robust_list();
+        let _ignored = self.clear_child_tid_if_needed(locked);
+
+        let kernel = Arc::clone(self.kernel());
+        let mut pids = kernel.pids.write();
+
+        // We remove from the thread group here because the WeakRef in the pid
+        // table to this task must be valid until this task is removed from the
+        // thread group, and the code below will invalidate it.
+        // Moreover, this requires a OwnedRef of the task to ensure the tasks of
+        // the thread group are always valid.
+        self.task.thread_group().remove(locked, &mut pids, &self.task);
+
+        let context = (self.thread_state, locked, pids);
+        self.task.release(context);
+    }
+}
+
+impl m6_starnix_std::ops::Deref for CurrentTask {
+    type Target = Task;
+    fn deref(&self) -> &Self::Target {
+        &self.task
+    }
+}
+
+impl fmt::Debug for CurrentTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.task.fmt(f)
+    }
+}
+
+impl CurrentTask {
+    pub fn new(task: OwnedRef<Task>, thread_state: ThreadState<RegisterStorageEnum>) -> Self {
+        let current_creds = RefCell::new(CurrentCreds::Cached(task.clone_creds()));
+        Self { task, thread_state, current_creds, _local_marker: Default::default() }
+    }
+
+    /// Returns the current subjective credentials of the task.
+    ///
+    /// The subjective credentials are the credentials that are used to check permissions for
+    /// actions performed by the task.
+    pub fn current_creds(&self) -> Ref<'_, Arc<Credentials>> {
+        Ref::map(self.current_creds.borrow(), CurrentCreds::creds)
+    }
+
+    pub fn current_fscred(&self) -> FsCred {
+        self.current_creds().as_fscred()
+    }
+
+    pub fn current_ucred(&self) -> ucred {
+        let creds = self.current_creds();
+        ucred { pid: self.get_pid(), uid: creds.uid, gid: creds.gid }
+    }
+
+    /// Save the current creds and security state, alter them by calling `alter_creds`, then call
+    /// `callback`.
+    /// The creds and security state will be restored to their original values at the end of the
+    /// call. Only the "subjective" state of the CurrentTask, accessed with `current_creds()` and
+    ///  used to check permissions for actions performed by the task, is altered. The "objective"
+    ///  state, accessed through `Task::real_creds()` by other tasks and used to check permissions
+    /// for actions performed on the task, is not altered, and changes to the credentials are not
+    /// externally visible.
+    pub async fn override_creds_async<R>(
+        &self,
+        new_creds: Arc<Credentials>,
+        callback: impl AsyncFnOnce() -> R,
+    ) -> R {
+        let saved = self.current_creds.replace(CurrentCreds::Overridden(new_creds));
+        let result = callback().await;
+        self.current_creds.replace(saved);
+        result
+    }
+
+    /// Save the current creds and security state, alter them by calling `alter_creds`, then call
+    /// `callback`.
+    /// The creds and security state will be restored to their original values at the end of the
+    /// call. Only the "subjective" state of the CurrentTask, accessed with `current_creds()` and
+    ///  used to check permissions for actions performed by the task, is altered. The "objective"
+    ///  state, accessed through `Task::real_creds()` by other tasks and used to check permissions
+    /// for actions performed on the task, is not altered, and changes to the credentials are not
+    /// externally visible.
+    pub fn override_creds<R>(
+        &self,
+        new_creds: Arc<Credentials>,
+        callback: impl FnOnce() -> R,
+    ) -> R {
+        self.override_creds_async(new_creds, async move || callback())
+            .now_or_never()
+            .expect("Future should be ready")
+    }
+
+    pub fn has_overridden_creds(&self) -> bool {
+        matches!(*self.current_creds.borrow(), CurrentCreds::Overridden(_))
+    }
+
+    pub fn trigger_delayed_releaser<L>(&self, locked: &mut Locked<L>)
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        let locked = locked.cast_locked::<FileOpsCore>();
+        self.kernel().delayed_releaser.apply(locked, self);
+    }
+
+    pub fn weak_task(&self) -> WeakRef<Task> {
+        WeakRef::from(&self.task)
+    }
+
+    pub fn temp_task(&self) -> TempRef<'_, Task> {
+        TempRef::from(&self.task)
+    }
+
+    /// Change the current and real creds of the task. This is invalid to call while temporary
+    /// credentials are present.
+    pub fn set_creds(&self, creds: Credentials) {
+        assert!(!self.has_overridden_creds());
+
+        let creds = Arc::new(creds);
+        let mut current_creds = self.current_creds.borrow_mut();
+        *current_creds = CurrentCreds::Cached(creds.clone());
+
+        // SAFETY: this is allowed because we are the CurrentTask.
+        unsafe {
+            self.persistent_info.write_creds().update(creds);
+        }
+        // The /proc/pid directory's ownership is updated when the task's euid
+        // or egid changes. See proc(5).
+        let maybe_node = self.proc_pid_directory_cache.lock();
+        if let Some(node) = &*maybe_node {
+            let creds = self.real_creds().euid_as_fscred();
+            // SAFETY: The /proc/pid directory held by `proc_pid_directory_cache` represents the
+            // current task. It's owner and group are supposed to track the current task's euid and
+            // egid.
+            unsafe {
+                node.force_chown(creds);
+            }
+        }
+    }
+
+    #[inline(always)]
+    pub fn release<L>(self, locked: &mut Locked<L>)
+    where
+        L: LockBefore<TaskRelease>,
+    {
+        let locked = locked.cast_locked::<TaskRelease>();
+        Releasable::release(self, locked);
+    }
+
+    pub fn set_syscall_restart_func<R: Into<SyscallResult>>(
+        &mut self,
+        f: impl FnOnce(&mut Locked<Unlocked>, &mut CurrentTask) -> Result<R, Errno>
+        + Send
+        + Sync
+        + 'static,
+    ) {
+        self.thread_state.syscall_restart_func =
+            Some(Box::new(|locked, current_task| Ok(f(locked, current_task)?.into())));
+    }
+
+    pub fn add_file<L>(
+        &self,
+        locked: &mut Locked<L>,
+        file: FileHandle,
+        flags: FdFlags,
+    ) -> Result<FdNumber, Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        self.files.add(locked, self, file, flags)
+    }
+
+    /// Sets the task's signal mask to `signal_mask` and runs `wait_function`.
+    ///
+    /// Signals are dequeued prior to the original signal mask being restored. This is done by the
+    /// signal machinery in the syscall dispatch loop.
+    ///
+    /// The returned result is the result returned from the wait function.
+    pub fn wait_with_temporary_mask<F, T, L>(
+        &mut self,
+        locked: &mut Locked<L>,
+        signal_mask: SigSet,
+        wait_function: F,
+    ) -> Result<T, Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+        F: FnOnce(&mut Locked<L>, &CurrentTask) -> Result<T, Errno>,
+    {
+        {
+            let mut state = self.write();
+            state.set_flags(TaskFlags::TEMPORARY_SIGNAL_MASK, true);
+            state.set_temporary_signal_mask(signal_mask);
+        }
+        wait_function(locked, self)
+    }
+
+    /// If waking, promotes from waking to awake.  If not waking, make waiter async
+    /// wait until woken.  Returns true if woken.
+    pub fn wake_or_wait_until_unstopped_async(&self, waiter: &Waiter) -> bool {
+        let group_state = self.thread_group().read();
+        let mut task_state = self.write();
+
+        // Wake up if
+        //   a) we should wake up, meaning:
+        //      i) we're in group stop, and the thread group has exited group stop, or
+        //      ii) we're waking up,
+        //   b) and ptrace isn't stopping us from waking up, but
+        //   c) always wake up if we got a SIGKILL.
+        let task_stop_state = self.load_stopped();
+        let group_stop_state = self.thread_group().load_stopped();
+        if ((task_stop_state == StopState::GroupStopped && group_stop_state.is_waking_or_awake())
+            || task_stop_state.is_waking_or_awake())
+            && (!task_state.is_ptrace_listening() || task_stop_state.is_force())
+        {
+            let new_state = if task_stop_state.is_waking_or_awake() {
+                task_stop_state.finalize()
+            } else {
+                group_stop_state.finalize()
+            };
+            if let Ok(new_state) = new_state {
+                task_state.set_stopped(new_state, None, Some(self), None);
+                drop(group_state);
+                drop(task_state);
+                // It is possible for the stop state to be changed by another
+                // thread between when it is checked above and the following
+                // invocation, but set_stopped does sufficient checking while
+                // holding the lock to make sure that such a change won't result
+                // in corrupted state.
+                self.thread_group().set_stopped(new_state, None, false);
+                return true;
+            }
+        }
+
+        // We will wait.
+        if self.thread_group().load_stopped().is_stopped() || task_stop_state.is_stopped() {
+            // If we've stopped or PTRACE_LISTEN has been sent, wait for a
+            // signal or instructions from the tracer.
+            group_state
+                .lifecycle_waiters
+                .wait_async_value(&waiter, ThreadGroupLifecycleWaitValue::Stopped);
+            task_state.wait_on_ptracer(&waiter);
+        } else if task_state.can_accept_ptrace_commands() {
+            // If we're stopped because a tracer has seen the stop and not taken
+            // further action, wait for further instructions from the tracer.
+            task_state.wait_on_ptracer(&waiter);
+        } else if task_state.is_ptrace_listening() {
+            // A PTRACE_LISTEN is a state where we can get signals and notify a
+            // ptracer, but otherwise remain blocked.
+            if let Some(ptrace) = &mut task_state.ptrace {
+                ptrace.set_last_signal(Some(SignalInfo::kernel(SIGTRAP)));
+                ptrace.set_last_event(Some(PtraceEventData::new_from_event(PtraceEvent::Stop, 0)));
+            }
+            task_state.wait_on_ptracer(&waiter);
+            task_state.notify_ptracers();
+        }
+        false
+    }
+
+    /// Set the RunState for the current task to the given value and then call the given callback.
+    ///
+    /// When the callback is done, the run_state is restored to `RunState::Running`.
+    ///
+    /// This function is typically used just before blocking the current task on some operation.
+    /// The given `run_state` registers the mechanism for interrupting the blocking operation with
+    /// the task and the given `callback` actually blocks the task.
+    ///
+    /// This function can only be called in the `RunState::Running` state and cannot set the
+    /// run state to `RunState::Running`. For this reason, this function cannot be reentered.
+    pub fn run_in_state<F, T>(&self, run_state: RunState, callback: F) -> Result<T, Errno>
+    where
+        F: FnOnce() -> Result<T, Errno>,
+    {
+        assert_ne!(run_state, RunState::Running);
+
+        // As an optimization, decommit unused pages of the stack to reduce memory pressure while
+        // the thread is blocked.
+        clean_stack();
+
+        {
+            let mut state = self.write();
+            assert!(!state.is_blocked());
+
+            if matches!(run_state, RunState::Frozen(_)) {
+                // Freeze is a kernel signal and is handled before other user signals. A frozen task
+                // ignores all other signals except SIGKILL until it is thawed.
+                if state.has_signal_pending(SIGKILL) {
+                    return error!(EINTR);
+                }
+            } else if state.is_any_signal_pending() && !state.is_ptrace_listening() {
+                // A note on PTRACE_LISTEN - the thread cannot be scheduled
+                // regardless of pending signals.
+                return error!(EINTR);
+            }
+            state.set_run_state(run_state.clone());
+        }
+
+        let result = callback();
+
+        {
+            let mut state = self.write();
+            assert_eq!(
+                state.run_state(),
+                run_state,
+                "SignalState run state changed while waiting!"
+            );
+            state.set_run_state(RunState::Running);
+        };
+
+        result
+    }
+
+    pub fn block_until(
+        &self,
+        guard: EventWaitGuard<'_>,
+        deadline: zx::MonotonicInstant,
+    ) -> Result<(), Errno> {
+        self.run_in_state(RunState::Event(guard.event().clone()), move || {
+            guard.block_until(None, deadline).map_err(|e| match e {
+                WakeReason::Interrupted => errno!(EINTR),
+                WakeReason::DeadlineExpired => errno!(ETIMEDOUT),
+            })
+        })
+    }
+
+    pub fn block_with_owner_until(
+        &self,
+        guard: EventWaitGuard<'_>,
+        new_owner: &zx::Thread,
+        deadline: zx::MonotonicInstant,
+    ) -> Result<(), Errno> {
+        self.run_in_state(RunState::Event(guard.event().clone()), move || {
+            guard.block_until(Some(new_owner), deadline).map_err(|e| match e {
+                WakeReason::Interrupted => errno!(EINTR),
+                WakeReason::DeadlineExpired => errno!(ETIMEDOUT),
+            })
+        })
+    }
+
+    /// Determine namespace node indicated by the dir_fd.
+    ///
+    /// Returns the namespace node and the path to use relative to that node.
+    pub fn resolve_dir_fd<'a, L>(
+        &self,
+        locked: &mut Locked<L>,
+        dir_fd: FdNumber,
+        mut path: &'a FsStr,
+        flags: ResolveFlags,
+    ) -> Result<(NamespaceNode, &'a FsStr), Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        let path_is_absolute = path.starts_with(b"/");
+        if path_is_absolute {
+            if flags.contains(ResolveFlags::BENEATH) {
+                return error!(EXDEV);
+            }
+            path = &path[1..];
+        }
+
+        let dir = if path_is_absolute && !flags.contains(ResolveFlags::IN_ROOT) {
+            self.fs().root()
+        } else if dir_fd == FdNumber::AT_FDCWD {
+            self.fs().cwd()
+        } else {
+            // O_PATH allowed for:
+            //
+            //   Passing the file descriptor as the dirfd argument of
+            //   openat() and the other "*at()" system calls.  This
+            //   includes linkat(2) with AT_EMPTY_PATH (or via procfs
+            //   using AT_SYMLINK_FOLLOW) even if the file is not a
+            //   directory.
+            //
+            // See https://man7.org/linux/man-pages/man2/open.2.html
+            let file = self.files.get_allowing_opath(dir_fd)?;
+            file.name.to_passive()
+        };
+
+        if !path.is_empty() {
+            if !dir.entry.node.is_dir() {
+                return error!(ENOTDIR);
+            }
+            dir.check_access(
+                locked,
+                self,
+                Access::EXEC,
+                CheckAccessReason::InternalPermissionChecks,
+            )?;
+        }
+        Ok((dir, path.into()))
+    }
+
+    /// A convenient wrapper for opening files relative to FdNumber::AT_FDCWD.
+    ///
+    /// Returns a FileHandle but does not install the FileHandle in the FdTable
+    /// for this task.
+    pub fn open_file(
+        &self,
+        locked: &mut Locked<Unlocked>,
+        path: &FsStr,
+        flags: OpenFlags,
+    ) -> Result<FileHandle, Errno> {
+        if flags.contains(OpenFlags::CREAT) {
+            // In order to support OpenFlags::CREAT we would need to take a
+            // FileMode argument.
+            return error!(EINVAL);
+        }
+        self.open_file_at(
+            locked,
+            FdNumber::AT_FDCWD,
+            path,
+            flags,
+            FileMode::default(),
+            ResolveFlags::empty(),
+            AccessCheck::default(),
+        )
+    }
+
+    /// Resolves a path for open.
+    ///
+    /// If the final path component points to a symlink, the symlink is followed (as long as
+    /// the symlink traversal limit has not been reached).
+    ///
+    /// If the final path component (after following any symlinks, if enabled) does not exist,
+    /// and `flags` contains `OpenFlags::CREAT`, a new node is created at the location of the
+    /// final path component.
+    ///
+    /// This returns the resolved node, and a boolean indicating whether the node has been created.
+    fn resolve_open_path<L>(
+        &self,
+        locked: &mut Locked<L>,
+        context: &mut LookupContext,
+        dir: &NamespaceNode,
+        path: &FsStr,
+        mode: FileMode,
+        flags: OpenFlags,
+    ) -> Result<(NamespaceNode, bool), Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        context.update_for_path(path);
+        let mut parent_content = context.with(SymlinkMode::Follow);
+        let (parent, basename) = self.lookup_parent(locked, &mut parent_content, dir, path)?;
+        context.remaining_follows = parent_content.remaining_follows;
+
+        let must_create = flags.contains(OpenFlags::CREAT) && flags.contains(OpenFlags::EXCL);
+
+        // Lookup the child, without following a symlink or expecting it to be a directory.
+        let mut child_context = context.with(SymlinkMode::NoFollow);
+        child_context.must_be_directory = false;
+
+        match parent.lookup_child(locked, self, &mut child_context, basename) {
+            Ok(name) => {
+                if name.entry.node.is_lnk() {
+                    if flags.contains(OpenFlags::PATH)
+                        && context.symlink_mode == SymlinkMode::NoFollow
+                    {
+                        // When O_PATH is specified in flags, if pathname is a symbolic link
+                        // and the O_NOFOLLOW flag is also specified, then the call returns
+                        // a file descriptor referring to the symbolic link.
+                        // See https://man7.org/linux/man-pages/man2/openat.2.html
+                        //
+                        // If the trailing component (i.e., basename) of
+                        // pathname is a symbolic link, how.resolve contains
+                        // RESOLVE_NO_SYMLINKS, and how.flags contains both
+                        // O_PATH and O_NOFOLLOW, then an O_PATH file
+                        // descriptor referencing the symbolic link will be
+                        // returned.
+                        // See https://man7.org/linux/man-pages/man2/openat2.2.html
+                        return Ok((name, false));
+                    }
+
+                    if (!flags.contains(OpenFlags::PATH)
+                        && context.symlink_mode == SymlinkMode::NoFollow)
+                        || context.resolve_flags.contains(ResolveFlags::NO_SYMLINKS)
+                        || context.remaining_follows == 0
+                    {
+                        if must_create {
+                            // Since `must_create` is set, and a node was found, this returns EEXIST
+                            // instead of ELOOP.
+                            return error!(EEXIST);
+                        }
+                        // A symlink was found, but one of the following is true:
+                        // * flags specified O_NOFOLLOW but not O_PATH.
+                        // * how.resolve contains RESOLVE_NO_SYMLINKS
+                        // * too many symlink traversals have been attempted
+                        return error!(ELOOP);
+                    }
+
+                    context.remaining_follows -= 1;
+                    match name.readlink(locked, self)? {
+                        SymlinkTarget::Path(path) => {
+                            let dir = if path[0] == b'/' { self.fs().root() } else { parent };
+                            self.resolve_open_path(
+                                locked,
+                                context,
+                                &dir,
+                                path.as_ref(),
+                                mode,
+                                flags,
+                            )
+                        }
+                        SymlinkTarget::Node(name) => {
+                            if context.resolve_flags.contains(ResolveFlags::NO_MAGICLINKS)
+                                || name.entry.node.is_lnk()
+                            {
+                                error!(ELOOP)
+                            } else {
+                                Ok((name, false))
+                            }
+                        }
+                    }
+                } else {
+                    if must_create {
+                        return error!(EEXIST);
+                    }
+                    Ok((name, false))
+                }
+            }
+            Err(e) if e == errno!(ENOENT) && flags.contains(OpenFlags::CREAT) => {
+                if context.must_be_directory {
+                    return error!(EISDIR);
+                }
+                Ok((
+                    parent.open_create_node(
+                        locked,
+                        self,
+                        basename,
+                        mode.with_type(FileMode::IFREG),
+                        DeviceType::NONE,
+                        flags,
+                    )?,
+                    true,
+                ))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The primary entry point for opening files relative to a task.
+    ///
+    /// Absolute paths are resolve relative to the root of the FsContext for
+    /// this task. Relative paths are resolve relative to dir_fd. To resolve
+    /// relative to the current working directory, pass FdNumber::AT_FDCWD for
+    /// dir_fd.
+    ///
+    /// Returns a FileHandle but does not install the FileHandle in the FdTable
+    /// for this task.
+    pub fn open_file_at(
+        &self,
+        locked: &mut Locked<Unlocked>,
+        dir_fd: FdNumber,
+        path: &FsStr,
+        flags: OpenFlags,
+        mode: FileMode,
+        resolve_flags: ResolveFlags,
+        access_check: AccessCheck,
+    ) -> Result<FileHandle, Errno> {
+        if path.is_empty() {
+            return error!(ENOENT);
+        }
+
+        let (dir, path) = self.resolve_dir_fd(locked, dir_fd, path, resolve_flags)?;
+        self.open_namespace_node_at(locked, dir, path, flags, mode, resolve_flags, access_check)
+    }
+
+    pub fn open_namespace_node_at(
+        &self,
+        locked: &mut Locked<Unlocked>,
+        dir: NamespaceNode,
+        path: &FsStr,
+        flags: OpenFlags,
+        mode: FileMode,
+        mut resolve_flags: ResolveFlags,
+        access_check: AccessCheck,
+    ) -> Result<FileHandle, Errno> {
+        // 64-bit kernels force the O_LARGEFILE flag to be on.
+        let mut flags = flags | OpenFlags::LARGEFILE;
+        let opath = flags.contains(OpenFlags::PATH);
+        if opath {
+            // When O_PATH is specified in flags, flag bits other than O_CLOEXEC,
+            // O_DIRECTORY, and O_NOFOLLOW are ignored.
+            const ALLOWED_FLAGS: OpenFlags = OpenFlags::from_bits_truncate(
+                OpenFlags::PATH.bits()
+                    | OpenFlags::CLOEXEC.bits()
+                    | OpenFlags::DIRECTORY.bits()
+                    | OpenFlags::NOFOLLOW.bits(),
+            );
+            flags &= ALLOWED_FLAGS;
+        }
+
+        if flags.contains(OpenFlags::TMPFILE) && !flags.can_write() {
+            return error!(EINVAL);
+        }
+
+        let nofollow = flags.contains(OpenFlags::NOFOLLOW);
+        let must_create = flags.contains(OpenFlags::CREAT) && flags.contains(OpenFlags::EXCL);
+
+        let symlink_mode =
+            if nofollow || must_create { SymlinkMode::NoFollow } else { SymlinkMode::Follow };
+
+        let resolve_base = match (
+            resolve_flags.contains(ResolveFlags::BENEATH),
+            resolve_flags.contains(ResolveFlags::IN_ROOT),
+        ) {
+            (false, false) => ResolveBase::None,
+            (true, false) => ResolveBase::Beneath(dir.clone()),
+            (false, true) => ResolveBase::InRoot(dir.clone()),
+            (true, true) => return error!(EINVAL),
+        };
+
+        // `RESOLVE_BENEATH` and `RESOLVE_IN_ROOT` imply `RESOLVE_NO_MAGICLINKS`. This matches
+        // Linux behavior. Strictly speaking it's is not really required, but it's hard to
+        // implement `BENEATH` and `IN_ROOT` flags correctly otherwise.
+        if resolve_base != ResolveBase::None {
+            resolve_flags.insert(ResolveFlags::NO_MAGICLINKS);
+        }
+
+        let mut context = LookupContext {
+            symlink_mode,
+            remaining_follows: MAX_SYMLINK_FOLLOWS,
+            must_be_directory: flags.contains(OpenFlags::DIRECTORY),
+            resolve_flags,
+            resolve_base,
+        };
+        let (name, created) =
+            match self.resolve_open_path(locked, &mut context, &dir, path, mode, flags) {
+                Ok((n, c)) => (n, c),
+                Err(e) => {
+                    let mut abs_path = dir.path(&self.task);
+                    abs_path.extend(&**path);
+                    track_file_not_found(abs_path);
+                    return Err(e);
+                }
+            };
+
+        let name = if flags.contains(OpenFlags::TMPFILE) {
+            // `O_TMPFILE` is incompatible with `O_CREAT`
+            if flags.contains(OpenFlags::CREAT) {
+                return error!(EINVAL);
+            }
+            name.create_tmpfile(locked, self, mode.with_type(FileMode::IFREG), flags)?
+        } else {
+            let mode = name.entry.node.info().mode;
+
+            // These checks are not needed in the `O_TMPFILE` case because `mode` refers to the
+            // file we are opening. With `O_TMPFILE`, that file is the regular file we just
+            // created rather than the node we found by resolving the path.
+            //
+            // For example, we do not need to produce `ENOTDIR` when `must_be_directory` is set
+            // because `must_be_directory` refers to the node we found by resolving the path.
+            // If that node was not a directory, then `create_tmpfile` will produce an error.
+            //
+            // Similarly, we never need to call `truncate` because `O_TMPFILE` is newly created
+            // and therefor already an empty file.
+
+            if !opath && nofollow && mode.is_lnk() {
+                return error!(ELOOP);
+            }
+
+            if mode.is_dir() {
+                if flags.can_write()
+                    || flags.contains(OpenFlags::CREAT)
+                    || flags.contains(OpenFlags::TRUNC)
+                {
+                    return error!(EISDIR);
+                }
+                if flags.contains(OpenFlags::DIRECT) {
+                    return error!(EINVAL);
+                }
+            } else if context.must_be_directory {
+                return error!(ENOTDIR);
+            }
+
+            if flags.contains(OpenFlags::TRUNC) && mode.is_reg() && !created {
+                // You might think we should check file.can_write() at this
+                // point, which is what the docs suggest, but apparently we
+                // are supposed to truncate the file if this task can write
+                // to the underlying node, even if we are opening the file
+                // as read-only. See OpenTest.CanTruncateReadOnly.
+                name.truncate(locked, self, 0)?;
+            }
+
+            name
+        };
+
+        // If the node has been created, the open operation should not verify access right:
+        // From <https://man7.org/linux/man-pages/man2/open.2.html>
+        //
+        // > Note that mode applies only to future accesses of the newly created file; the
+        // > open() call that creates a read-only file may well return a  read/write  file
+        // > descriptor.
+
+        let access_check = if created { AccessCheck::skip() } else { access_check };
+        name.open(locked, self, flags, access_check)
+    }
+
+    /// A wrapper for FsContext::lookup_parent_at that resolves the given
+    /// dir_fd to a NamespaceNode.
+    ///
+    /// Absolute paths are resolve relative to the root of the FsContext for
+    /// this task. Relative paths are resolve relative to dir_fd. To resolve
+    /// relative to the current working directory, pass FdNumber::AT_FDCWD for
+    /// dir_fd.
+    pub fn lookup_parent_at<'a, L>(
+        &self,
+        locked: &mut Locked<L>,
+        context: &mut LookupContext,
+        dir_fd: FdNumber,
+        path: &'a FsStr,
+    ) -> Result<(NamespaceNode, &'a FsStr), Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        let (dir, path) = self.resolve_dir_fd(locked, dir_fd, path, ResolveFlags::empty())?;
+        self.lookup_parent(locked, context, &dir, path)
+    }
+
+    /// Lookup the parent of a namespace node.
+    ///
+    /// Consider using Task::open_file_at or Task::lookup_parent_at rather than
+    /// calling this function directly.
+    ///
+    /// This function resolves all but the last component of the given path.
+    /// The function returns the parent directory of the last component as well
+    /// as the last component.
+    ///
+    /// If path is empty, this function returns dir and an empty path.
+    /// Similarly, if path ends with "." or "..", these components will be
+    /// returned along with the parent.
+    ///
+    /// The returned parent might not be a directory.
+    pub fn lookup_parent<'a, L>(
+        &self,
+        locked: &mut Locked<L>,
+        context: &mut LookupContext,
+        dir: &NamespaceNode,
+        path: &'a FsStr,
+    ) -> Result<(NamespaceNode, &'a FsStr), Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        context.update_for_path(path);
+
+        let mut current_node = dir.clone();
+        let mut it = path.split(|c| *c == b'/').filter(|p| !p.is_empty()).map(<&FsStr>::from);
+        let mut current_path_component = it.next().unwrap_or_default();
+        for next_path_component in it {
+            current_node =
+                current_node.lookup_child(locked, self, context, current_path_component)?;
+            current_path_component = next_path_component;
+        }
+        Ok((current_node, current_path_component))
+    }
+
+    /// Lookup a namespace node.
+    ///
+    /// Consider using Task::open_file_at or Task::lookup_parent_at rather than
+    /// calling this function directly.
+    ///
+    /// This function resolves the component of the given path.
+    pub fn lookup_path<L>(
+        &self,
+        locked: &mut Locked<L>,
+        context: &mut LookupContext,
+        dir: NamespaceNode,
+        path: &FsStr,
+    ) -> Result<NamespaceNode, Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        let (parent, basename) = self.lookup_parent(locked, context, &dir, path)?;
+        parent.lookup_child(locked, self, context, basename)
+    }
+
+    /// Lookup a namespace node starting at the root directory.
+    ///
+    /// Resolves symlinks.
+    pub fn lookup_path_from_root<L>(
+        &self,
+        locked: &mut Locked<L>,
+        path: &FsStr,
+    ) -> Result<NamespaceNode, Errno>
+    where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        let mut context = LookupContext::default();
+        self.lookup_path(locked, &mut context, self.fs().root(), path)
+    }
+
+    pub fn exec(
+        &mut self,
+        locked: &mut Locked<Unlocked>,
+        executable: FileHandle,
+        path: CString,
+        argv: Vec<CString>,
+        environ: Vec<CString>,
+    ) -> Result<(), Errno> {
+        // Executable must be a regular file
+        if !executable.name.entry.node.is_reg() {
+            return error!(EACCES);
+        }
+
+        // File node must have EXEC mode permissions.
+        // Note that the ability to execute a file is unrelated to the flags
+        // used in the `open` call.
+        executable.name.check_access(locked, self, Access::EXEC, CheckAccessReason::Exec)?;
+
+        let elf_security_state = security::bprm_creds_for_exec(self, &executable.name)?;
+
+        let resolved_elf = resolve_executable(
+            locked,
+            self,
+            executable,
+            path.clone(),
+            argv,
+            environ,
+            elf_security_state,
+        )?;
+
+        let maybe_set_id = if self.kernel().features.enable_suid {
+            resolved_elf.file.name.suid_and_sgid(&self)?
+        } else {
+            Default::default()
+        };
+
+        if self.thread_group().read().tasks_count() > 1 {
+            // TODO(track_stub)
+            return error!(EINVAL);
+        }
+
+        if let Err(err) = self.finish_exec(locked, path, resolved_elf, maybe_set_id) {
+            log_warn!("unrecoverable error in exec: {err:?}");
+
+            send_standard_signal(locked, self, SignalInfo::forced(SIGSEGV));
+            return Err(err);
+        }
+
+        self.ptrace_event(locked, PtraceOptions::TRACEEXEC, self.task.tid as u64);
+        self.signal_vfork();
+        self.task.thread_group.sync_syscall_log_level();
+
+        Ok(())
+    }
+
+    /// After the memory is unmapped, any failure in exec is unrecoverable and results in the
+    /// process crashing. This function is for that second half; any error returned from this
+    /// function will be considered unrecoverable.
+    fn finish_exec(
+        &mut self,
+        locked: &mut Locked<Unlocked>,
+        path: CString,
+        resolved_elf: ResolvedElf,
+        mut maybe_set_id: UserAndOrGroupId,
+    ) -> Result<(), Errno> {
+        // Now that the exec will definitely finish (or crash), notify owners of
+        // locked futexes for the current process, which will be impossible to
+        // update after process image is replaced.  See get_robust_list(2).
+        self.notify_robust_list();
+
+        // Passing arch32 information here ensures the replacement memory
+        // layout matches the elf being executed.
+        let mm = {
+            let mm = self.mm()?;
+            let new_mm = mm
+                .exec(resolved_elf.file.name.to_passive(), resolved_elf.arch_width)
+                .map_err(|status| from_status_like_fdio!(status))?;
+            self.mm.update(Some(new_mm.clone()));
+            new_mm
+        };
+
+        {
+            let mut state = self.write();
+
+            // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
+            //
+            //   The aforementioned transformations of the effective IDs are not
+            //   performed (i.e., the set-user-ID and set-group-ID bits are
+            //   ignored) if any of the following is true:
+            //
+            //   * the no_new_privs attribute is set for the calling thread (see
+            //      prctl(2));
+            //
+            //   *  the underlying filesystem is mounted nosuid (the MS_NOSUID
+            //      flag for mount(2)); or
+            //
+            //   *  the calling process is being ptraced.
+            //
+            // The MS_NOSUID check is in `NamespaceNode::suid_and_sgid()`.
+            if state.no_new_privs() || state.is_ptraced() {
+                maybe_set_id.clear();
+            }
+
+            // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
+            //
+            //   The process's "dumpable" attribute is set to the value 1,
+            //   unless a set-user-ID program, a set-group-ID program, or a
+            //   program with capabilities is being executed, in which case the
+            //   dumpable flag may instead be reset to the value in
+            //   /proc/sys/fs/suid_dumpable, in the circumstances described
+            //   under PR_SET_DUMPABLE in prctl(2).
+            let dumpable =
+                if maybe_set_id.is_none() { DumpPolicy::User } else { DumpPolicy::Disable };
+            *mm.dumpable.lock(locked) = dumpable;
+
+            // TODO(https://fxbug.dev/433463756): Figure out whether this is the right place to
+            // take the lock.
+            // SAFETY: this is allowed because we are the CurrentTask.
+            let mut writable_creds = unsafe { self.persistent_info.write_creds() };
+            state.set_sigaltstack(None);
+            state.robust_list_head = RobustListHeadPtr::null(self);
+
+            // From <https://man7.org/linux/man-pages/man2/execve.2.html>:
+            //
+            //   If a set-user-ID or set-group-ID
+            //   program is being executed, then the parent death signal set by
+            //   prctl(2) PR_SET_PDEATHSIG flag is cleared.
+            //
+            // TODO(https://fxbug.dev/356684424): Implement the behavior above once we support
+            // the PR_SET_PDEATHSIG flag.
+
+            // TODO(tbodt): Check whether capability xattrs are set on the file, and grant/limit
+            // capabilities accordingly.
+            let mut new_creds = Credentials::clone(&self.current_creds());
+            new_creds.exec(maybe_set_id);
+            let new_creds = Arc::new(new_creds);
+            writable_creds.update(new_creds.clone());
+            *self.current_creds.borrow_mut() = CurrentCreds::Cached(new_creds);
+        }
+
+        let security_state = resolved_elf.security_state.clone();
+
+        let start_info = load_executable(self, resolved_elf, &path)?;
+
+        let regs: zx_restricted_state_t = start_info.into();
+        self.thread_state.registers.load(regs);
+        self.thread_state.extended_pstate.reset();
+        self.thread_group().signal_actions.reset_for_exec();
+
+        // The exit signal (and that of the children) is reset to SIGCHLD.
+        let mut thread_group_state = self.thread_group().write();
+        thread_group_state.exit_signal = Some(SIGCHLD);
+        for (_, weak_child) in &mut thread_group_state.children {
+            if let Some(child) = weak_child.upgrade() {
+                let mut child_state = child.write();
+                child_state.exit_signal = Some(SIGCHLD);
+            }
+        }
+
+        m6_starnix_std::mem::drop(thread_group_state);
+
+        // TODO(https://fxbug.dev/42082680): All threads other than the calling thread are destroyed.
+
+        // TODO: POSIX timers are not preserved.
+
+        // TODO: Ensure that the filesystem context is un-shared, undoing the effect of CLONE_FS.
+
+        // The file descriptor table is unshared, undoing the effect of the CLONE_FILES flag of
+        // clone(2).
+        self.files.unshare();
+        self.files.exec(locked, self);
+
+        // If SELinux is enabled, enforce permissions related to inheritance of file descriptors
+        // and resource limits. Then update the current task's SID.
+        //
+        // TODO: https://fxbug.dev/378655436 - After the above, enforce permissions related to
+        // signal state inheritance.
+        //
+        // This needs to be called after closing any files marked "close-on-exec".
+        security::exec_binprm(locked, self, &security_state)?;
+
+        self.thread_group().write().did_exec = true;
+
+        self.set_command_name(TaskCommand::from_path_bytes(path.to_bytes()));
+
+        Ok(())
+    }
+
+    pub fn set_command_name(&self, new_name: TaskCommand) {
+        // set_command_name needs to run before leader_command() in cases where self is the leader.
+        self.task.set_command_name(new_name.clone());
+        let leader_command = self.thread_group().read().leader_command();
+        starnix_logging::set_current_task_info(
+            new_name,
+            leader_command,
+            self.thread_group().leader,
+            self.tid,
+        );
+    }
+
+    pub fn add_seccomp_filter(
+        &mut self,
+        locked: &mut Locked<Unlocked>,
+        code: Vec<sock_filter>,
+        flags: u32,
+    ) -> Result<SyscallResult, Errno> {
+        let new_filter = Arc::new(SeccompFilter::from_cbpf(
+            &code,
+            self.thread_group().next_seccomp_filter_id.add(1),
+            flags & SECCOMP_FILTER_FLAG_LOG != 0,
+        )?);
+
+        let mut maybe_fd: Option<FdNumber> = None;
+
+        if flags & SECCOMP_FILTER_FLAG_NEW_LISTENER != 0 {
+            maybe_fd = Some(SeccompFilterContainer::create_listener(locked, self)?);
+        }
+
+        // We take the process lock here because we can't change any of the threads
+        // while doing a tsync.  So, you hold the process lock while making any changes.
+        let state = self.thread_group().write();
+
+        if flags & SECCOMP_FILTER_FLAG_TSYNC != 0 {
+            // TSYNC synchronizes all filters for all threads in the current process to
+            // the current thread's
+
+            // We collect the filters for the current task upfront to save us acquiring
+            // the task's lock a lot of times below.
+            let mut filters: SeccompFilterContainer = self.read().seccomp_filters.clone();
+
+            // For TSYNC to work, all of the other thread filters in this process have to
+            // be a prefix of this thread's filters, and none of them can be in
+            // strict mode.
+            let tasks = state.tasks().collect::<Vec<_>>();
+            for task in &tasks {
+                if task.tid == self.tid {
+                    continue;
+                }
+                let other_task_state = task.read();
+
+                // Target threads cannot be in SECCOMP_MODE_STRICT
+                if task.seccomp_filter_state.get() == SeccompStateValue::Strict {
+                    return Self::seccomp_tsync_error(task.tid, flags);
+                }
+
+                // Target threads' filters must be a subsequence of this thread's
+                if !other_task_state.seccomp_filters.can_sync_to(&filters) {
+                    return Self::seccomp_tsync_error(task.tid, flags);
+                }
+            }
+
+            // Now that we're sure we're allowed to do so, add the filter to all threads.
+            filters.add_filter(new_filter, code.len() as u16)?;
+
+            for task in &tasks {
+                let mut other_task_state = task.write();
+
+                other_task_state.enable_no_new_privs();
+                other_task_state.seccomp_filters = filters.clone();
+                task.set_seccomp_state(SeccompStateValue::UserDefined)?;
+            }
+        } else {
+            let mut task_state = self.task.write();
+
+            task_state.seccomp_filters.add_filter(new_filter, code.len() as u16)?;
+            self.set_seccomp_state(SeccompStateValue::UserDefined)?;
+        }
+
+        if let Some(fd) = maybe_fd { Ok(fd.into()) } else { Ok(().into()) }
+    }
+
+    pub fn run_seccomp_filters(
+        &mut self,
+        locked: &mut Locked<Unlocked>,
+        syscall: &Syscall,
+    ) -> Option<Result<SyscallResult, Errno>> {
+        // Implementation of SECCOMP_FILTER_STRICT, which has slightly different semantics
+        // from user-defined seccomp filters.
+        if self.seccomp_filter_state.get() == SeccompStateValue::Strict {
+            return SeccompState::do_strict(locked, self, syscall);
+        }
+
+        // Run user-defined seccomp filters
+        let result = self.task.read().seccomp_filters.run_all(self, syscall);
+
+        SeccompState::do_user_defined(locked, result, self, syscall)
+    }
+
+    fn seccomp_tsync_error(id: i32, flags: u32) -> Result<SyscallResult, Errno> {
+        // By default, TSYNC indicates failure state by returning the first thread
+        // id not to be able to sync, rather than by returning -1 and setting
+        // errno.  However, if TSYNC_ESRCH is set, it returns ESRCH.  This
+        // prevents conflicts with fact that SECCOMP_FILTER_FLAG_NEW_LISTENER
+        // makes seccomp return an fd.
+        if flags & SECCOMP_FILTER_FLAG_TSYNC_ESRCH != 0 { error!(ESRCH) } else { Ok(id.into()) }
+    }
+
+    // Notify all futexes in robust list.  The robust list is in user space, so we
+    // are very careful about walking it, and there are a lot of quiet returns if
+    // we fail to walk it.
+    // TODO(https://fxbug.dev/42079081): This only sets the FUTEX_OWNER_DIED bit; it does
+    // not wake up a waiter.
+    pub fn notify_robust_list(&self) {
+        let task_state = self.write();
+        let robust_list_addr = task_state.robust_list_head.addr();
+        if robust_list_addr == UserAddress::NULL {
+            // No one has called set_robust_list.
+            return;
+        }
+        let robust_list_res = self.read_multi_arch_object(task_state.robust_list_head);
+
+        let head = if let Ok(head) = robust_list_res {
+            head
+        } else {
+            return;
+        };
+
+        let offset = head.futex_offset;
+
+        let mut entries_count = 0;
+        let mut curr_ptr = head.list.next;
+        while curr_ptr.addr() != robust_list_addr.into() && entries_count < ROBUST_LIST_LIMIT {
+            let curr_ref = self.read_multi_arch_object(curr_ptr);
+
+            let curr = if let Ok(curr) = curr_ref {
+                curr
+            } else {
+                return;
+            };
+
+            let Some(futex_base) = curr_ptr.addr().checked_add_signed(offset) else {
+                return;
+            };
+
+            let futex_addr = match FutexAddress::try_from(futex_base) {
+                Ok(addr) => addr,
+                Err(_) => {
+                    return;
+                }
+            };
+
+            let Ok(mm) = self.mm() else {
+                log_error!("Asked to notify robust list futexes in system task.");
+                return;
+            };
+            let futex = if let Ok(futex) = mm.atomic_load_u32_relaxed(futex_addr) {
+                futex
+            } else {
+                return;
+            };
+
+            if (futex & FUTEX_TID_MASK) as i32 == self.tid {
+                let owner_died = FUTEX_OWNER_DIED | futex;
+                if mm.atomic_store_u32_relaxed(futex_addr, owner_died).is_err() {
+                    return;
+                }
+            }
+            curr_ptr = curr.next;
+            entries_count += 1;
+        }
+    }
+
+    /// Returns a ref to this thread's SeccompNotifier.
+    pub fn get_seccomp_notifier(&mut self) -> Option<SeccompNotifierHandle> {
+        self.task.write().seccomp_filters.notifier.clone()
+    }
+
+    pub fn set_seccomp_notifier(&mut self, notifier: Option<SeccompNotifierHandle>) {
+        self.task.write().seccomp_filters.notifier = notifier;
+    }
+
+    /// Processes a Zircon exception associated with this task.
+    pub fn process_exception(
+        &self,
+        locked: &mut Locked<Unlocked>,
+        report: &zx::ExceptionReport,
+    ) -> ExceptionResult {
+        match report.ty {
+            zx::ExceptionType::General => match get_signal_for_general_exception(&report.arch) {
+                Some(sig) => ExceptionResult::Signal(SignalInfo::kernel(sig)),
+                None => {
+                    log_error!("Unrecognized general exception: {:?}", report);
+                    ExceptionResult::Signal(SignalInfo::kernel(SIGILL))
+                }
+            },
+            zx::ExceptionType::FatalPageFault { status } => {
+                let report = decode_page_fault_exception_report(&report.arch);
+                if let Ok(mm) = self.mm() {
+                    mm.handle_page_fault(locked, report, status)
+                } else {
+                    panic!(
+                        "system task is handling a major page fault status={:?}, report={:?}",
+                        status, report
+                    );
+                }
+            }
+            zx::ExceptionType::UndefinedInstruction => {
+                ExceptionResult::Signal(SignalInfo::kernel(SIGILL))
+            }
+            zx::ExceptionType::UnalignedAccess => {
+                ExceptionResult::Signal(SignalInfo::kernel(SIGBUS))
+            }
+            zx::ExceptionType::SoftwareBreakpoint | zx::ExceptionType::HardwareBreakpoint => {
+                ExceptionResult::Signal(SignalInfo::kernel(SIGTRAP))
+            }
+            zx::ExceptionType::ProcessNameChanged => {
+                log_error!("Received unexpected process name changed exception");
+                ExceptionResult::Handled
+            }
+            zx::ExceptionType::ProcessStarting
+            | zx::ExceptionType::ThreadStarting
+            | zx::ExceptionType::ThreadExiting => {
+                log_error!("Received unexpected task lifecycle exception");
+                ExceptionResult::Signal(SignalInfo::kernel(SIGSYS))
+            }
+            zx::ExceptionType::PolicyError(policy_code) => {
+                log_error!(policy_code:?; "Received Zircon policy error exception");
+                ExceptionResult::Signal(SignalInfo::kernel(SIGSYS))
+            }
+            zx::ExceptionType::UnknownUserGenerated { code, data } => {
+                log_error!(code:?, data:?; "Received unexpected unknown user generated exception");
+                ExceptionResult::Signal(SignalInfo::kernel(SIGSYS))
+            }
+            zx::ExceptionType::Unknown { ty, code, data } => {
+                log_error!(ty:?, code:?, data:?; "Received unexpected exception");
+                ExceptionResult::Signal(SignalInfo::kernel(SIGSYS))
+            }
+        }
+    }
+
+    /// Clone this task.
+    ///
+    /// Creates a new task object that shares some state with this task
+    /// according to the given flags.
+    ///
+    /// Used by the clone() syscall to create both processes and threads.
+    ///
+    /// The exit signal is broken out from the flags parameter like clone3() rather than being
+    /// bitwise-ORed like clone().
+    pub fn clone_task<L>(
+        &self,
+        locked: &mut Locked<L>,
+        flags: u64,
+        child_exit_signal: Option<Signal>,
+        user_parent_tid: UserRef<pid_t>,
+        user_child_tid: UserRef<pid_t>,
+        user_pidfd: UserRef<FdNumber>,
+    ) -> Result<TaskBuilder, Errno>
+    where
+        L: LockBefore<MmDumpable>,
+        L: LockBefore<TaskRelease>,
+        L: LockBefore<ProcessGroupState>,
+    {
+        const IMPLEMENTED_FLAGS: u64 = (CLONE_VM
+            | CLONE_FS
+            | CLONE_FILES
+            | CLONE_SIGHAND
+            | CLONE_THREAD
+            | CLONE_SYSVSEM
+            | CLONE_SETTLS
+            | CLONE_PARENT
+            | CLONE_PARENT_SETTID
+            | CLONE_PIDFD
+            | CLONE_CHILD_CLEARTID
+            | CLONE_CHILD_SETTID
+            | CLONE_VFORK
+            | CLONE_NEWUTS
+            | CLONE_PTRACE) as u64;
+
+        // A mask with all valid flags set, because we want to return a different error code for an
+        // invalid flag vs an unimplemented flag. Subtracting 1 from the largest valid flag gives a
+        // mask with all flags below it set. Shift up by one to make sure the largest flag is also
+        // set.
+        const VALID_FLAGS: u64 = (CLONE_INTO_CGROUP << 1) - 1;
+
+        // CLONE_SETTLS is implemented by sys_clone.
+
+        let clone_files = flags & (CLONE_FILES as u64) != 0;
+        let clone_fs = flags & (CLONE_FS as u64) != 0;
+        let clone_parent = flags & (CLONE_PARENT as u64) != 0;
+        let clone_parent_settid = flags & (CLONE_PARENT_SETTID as u64) != 0;
+        let clone_pidfd = flags & (CLONE_PIDFD as u64) != 0;
+        let clone_child_cleartid = flags & (CLONE_CHILD_CLEARTID as u64) != 0;
+        let clone_child_settid = flags & (CLONE_CHILD_SETTID as u64) != 0;
+        let clone_sysvsem = flags & (CLONE_SYSVSEM as u64) != 0;
+        let clone_ptrace = flags & (CLONE_PTRACE as u64) != 0;
+        let clone_thread = flags & (CLONE_THREAD as u64) != 0;
+        let clone_vm = flags & (CLONE_VM as u64) != 0;
+        let clone_sighand = flags & (CLONE_SIGHAND as u64) != 0;
+        let clone_vfork = flags & (CLONE_VFORK as u64) != 0;
+        let clone_newuts = flags & (CLONE_NEWUTS as u64) != 0;
+        let clone_into_cgroup = flags & CLONE_INTO_CGROUP != 0;
+
+        if clone_ptrace {
+            // TODO(track_stub)
+        }
+
+        if clone_sysvsem {
+            // TODO(track_stub)
+        }
+
+        if clone_into_cgroup {
+            // TODO(track_stub)
+        }
+
+        if clone_sighand && !clone_vm {
+            return error!(EINVAL);
+        }
+        if clone_thread && !clone_sighand {
+            return error!(EINVAL);
+        }
+
+        if clone_pidfd && clone_thread {
+            return error!(EINVAL);
+        }
+        if clone_pidfd && clone_parent_settid && user_parent_tid.addr() == user_pidfd.addr() {
+            // `clone()` uses the same out-argument for these, so error out if they have the same
+            // user address.
+            return error!(EINVAL);
+        }
+
+        if flags & !VALID_FLAGS != 0 {
+            return error!(EINVAL);
+        }
+
+        if clone_vm && !clone_thread {
+            // TODO(https://fxbug.dev/42066087) Implement CLONE_VM for child processes (not just child
+            // threads). Currently this executes CLONE_VM (explicitly passed to clone() or as
+            // used by vfork()) as a fork (the VM in the child is copy-on-write) which is almost
+            // always OK.
+            //
+            // CLONE_VM is primarily as an optimization to avoid making a copy-on-write version of a
+            // process' VM that will be immediately replaced with a call to exec(). The main users
+            // (libc and language runtimes) don't actually rely on the memory being shared between
+            // the two processes. And the vfork() man page explicitly allows vfork() to be
+            // implemented as fork() which is what we do here.
+            if !clone_vfork {
+                track_stub!(
+                    TODO("https://fxbug.dev/322875227"),
+                    "CLONE_VM without CLONE_THREAD or CLONE_VFORK"
+                );
+            }
+        } else if clone_thread && !clone_vm {
+            // TODO(track_stub)
+            return error!(ENOSYS);
+        }
+
+        if flags & !IMPLEMENTED_FLAGS != 0 {
+            track_stub!(
+                TODO("https://fxbug.dev/322875130"),
+                "clone unknown flags",
+                flags & !IMPLEMENTED_FLAGS
+            );
+            return error!(ENOSYS);
+        }
+
+        let fs = if clone_fs { self.fs() } else { self.fs().fork() };
+        let files = if clone_files { self.files.clone() } else { self.files.fork() };
+
+        let kernel = self.kernel();
+
+        let mut pids = kernel.pids.write();
+
+        // Lock the cgroup process hierarchy so that the parent process cannot move to a different
+        // cgroup while a new task or thread_group is created. This may be unnecessary if
+        // CLONE_INTO_CGROUP is implemented and passed in.
+        //
+        // M6 minimal core: cgroups are a gated subsystem, so there is no cgroup
+        // freeze state — the new child starts with no pending kernel signals.
+        #[cfg(feature = "fuchsia")]
+        let child_kernel_signals = {
+            let mut cgroup2_pid_table = kernel.cgroups.lock_cgroup2_pid_table();
+            // Create a `KernelSignal::Freeze` to put onto the new task, if the cgroup is frozen.
+            cgroup2_pid_table
+                .maybe_create_freeze_signal(self.thread_group())
+                .into_iter()
+                .collect::<VecDeque<_>>()
+        };
+        #[cfg(not(feature = "fuchsia"))]
+        let child_kernel_signals: VecDeque<crate::signals::KernelSignal> = VecDeque::new();
+
+        let pid;
+        let command;
+        let creds;
+        let scheduler_state;
+        let no_new_privs;
+        let seccomp_filters;
+        let robust_list_head = RobustListHeadPtr::null(self);
+        let child_signal_mask;
+        let timerslack_ns;
+        let uts_ns;
+
+        let TaskInfo { thread, thread_group, memory_manager } = {
+            // These variables hold the original parent in case we need to switch the parent of the
+            // new task because of CLONE_PARENT.
+            let weak_original_parent;
+            let original_parent;
+
+            // Make sure to drop these locks ASAP to avoid inversion
+            let thread_group_state = {
+                let thread_group_state = self.thread_group().write();
+                if clone_parent {
+                    // With the CLONE_PARENT flag, the parent of the new task is our parent
+                    // instead of ourselves.
+                    weak_original_parent =
+                        thread_group_state.parent.clone().ok_or_else(|| errno!(EINVAL))?;
+                    m6_starnix_std::mem::drop(thread_group_state);
+                    original_parent = weak_original_parent.upgrade();
+                    original_parent.write()
+                } else {
+                    thread_group_state
+                }
+            };
+
+            let state = self.read();
+
+            no_new_privs = state.no_new_privs();
+            seccomp_filters = state.seccomp_filters.clone();
+            child_signal_mask = state.signal_mask();
+
+            pid = pids.allocate_pid();
+            command = self.command();
+            creds = self.current_creds().clone();
+            scheduler_state = state.scheduler_state.fork();
+            timerslack_ns = state.timerslack_ns;
+
+            uts_ns = if clone_newuts {
+                security::check_task_capable(self, CAP_SYS_ADMIN)?;
+                state.uts_ns.read().fork()
+            } else {
+                state.uts_ns.clone()
+            };
+
+            if clone_thread {
+                TaskInfo {
+                    thread: None,
+                    thread_group: self.thread_group().clone(),
+                    memory_manager: self.mm().ok(),
+                }
+            } else {
+                // Drop the lock on this task before entering `create_zircon_process`, because it will
+                // take a lock on the new thread group, and locks on thread groups have a higher
+                // priority than locks on the task in the thread group.
+                m6_starnix_std::mem::drop(state);
+                let signal_actions = if clone_sighand {
+                    self.thread_group().signal_actions.clone()
+                } else {
+                    self.thread_group().signal_actions.fork()
+                };
+                let process_group = thread_group_state.process_group.clone();
+
+                let task_info = create_zircon_process(
+                    locked,
+                    kernel,
+                    Some(thread_group_state),
+                    pid,
+                    child_exit_signal,
+                    process_group,
+                    signal_actions,
+                    command.clone(),
+                    self.thread_state.arch_width(),
+                )?;
+
+                #[cfg(feature = "fuchsia")]
+                cgroup2_pid_table.inherit_cgroup(self.thread_group(), &task_info.thread_group);
+
+                task_info
+            }
+        };
+
+        // Drop the lock on the cgroup pid_table before creating the TaskBuilder.
+        // If the TaskBuilder creation fails, the TaskBuilder is dropped, which calls
+        // ThreadGroup::remove. ThreadGroup::remove takes the cgroup pid_table lock, causing
+        // a cyclic lock dependency.
+        #[cfg(feature = "fuchsia")]
+        m6_starnix_std::mem::drop(cgroup2_pid_table);
+
+        // Only create the vfork event when the caller requested CLONE_VFORK.
+        let vfork_event = if clone_vfork { Some(Arc::new(zx::Event::create())) } else { None };
+
+        let mut child = TaskBuilder::new(Task::new(
+            pid,
+            command,
+            thread_group,
+            thread,
+            files,
+            memory_manager,
+            fs,
+            creds,
+            self.abstract_socket_namespace.clone(),
+            self.abstract_vsock_namespace.clone(),
+            child_signal_mask,
+            child_kernel_signals,
+            vfork_event,
+            scheduler_state,
+            uts_ns,
+            no_new_privs,
+            SeccompState::from(&self.seccomp_filter_state),
+            seccomp_filters,
+            robust_list_head,
+            timerslack_ns,
+        ));
+
+        release_on_error!(child, locked, {
+            let child_task = TempRef::from(&child.task);
+            // Drop the pids lock as soon as possible after creating the child. Destroying the child
+            // and removing it from the pids table itself requires the pids lock, so if an early exit
+            // takes place we have a self deadlock.
+            pids.add_task(&child_task);
+            m6_starnix_std::mem::drop(pids);
+
+            // Child lock must be taken before this lock. Drop the lock on the task, take a writable
+            // lock on the child and take the current state back.
+
+            #[cfg(any(test, debug_assertions))]
+            {
+                // Take the lock on the thread group and its child in the correct order to ensure any wrong ordering
+                // will trigger the tracing-mutex at the right call site.
+                if !clone_thread {
+                    let _l1 = self.thread_group().read();
+                    let _l2 = child.thread_group().read();
+                }
+            }
+
+            if clone_thread {
+                self.thread_group().add(&child_task)?;
+            } else {
+                child.thread_group().add(&child_task)?;
+
+                // These manipulations of the signal handling state appear to be related to
+                // CLONE_SIGHAND and CLONE_VM rather than CLONE_THREAD. However, we do not support
+                // all the combinations of these flags, which means doing these operations here
+                // might actually be correct. However, if you find a test that fails because of the
+                // placement of this logic here, we might need to move it.
+                let mut child_state = child.write();
+                let state = self.read();
+                child_state.set_sigaltstack(state.sigaltstack());
+                child_state.set_signal_mask(state.signal_mask());
+            }
+
+            if !clone_vm {
+                // We do not support running threads in the same process with different
+                // MemoryManagers.
+                assert!(!clone_thread);
+                self.mm()?.snapshot_to(locked, &child.mm()?)?;
+            }
+
+            if clone_parent_settid {
+                self.write_object(user_parent_tid, &child.tid)?;
+            }
+
+            if clone_child_cleartid {
+                child.write().clear_child_tid = user_child_tid;
+            }
+
+            if clone_child_settid {
+                child.write_object(user_child_tid, &child.tid)?;
+            }
+
+            if clone_pidfd {
+                let locked = locked.cast_locked::<TaskRelease>();
+                let file = new_pidfd(
+                    locked,
+                    self,
+                    child.thread_group(),
+                    &*child.mm()?,
+                    OpenFlags::empty(),
+                );
+                let pidfd = self.add_file(locked, file, FdFlags::CLOEXEC)?;
+                self.write_object(user_pidfd, &pidfd)?;
+            }
+
+            // TODO(https://fxbug.dev/42066087): We do not support running different processes with
+            // the same MemoryManager. Instead, we implement a rough approximation of that behavior
+            // by making a copy-on-write clone of the memory from the original process.
+            if clone_vm && !clone_thread {
+                self.mm()?.snapshot_to(locked, &child.mm()?)?;
+            }
+
+            child.thread_state = self.thread_state.snapshot::<HeapRegs>();
+            Ok(())
+        });
+
+        // Take the lock on thread group and task in the correct order to ensure any wrong ordering
+        // will trigger the tracing-mutex at the right call site.
+        #[cfg(any(test, debug_assertions))]
+        {
+            let _l1 = child.thread_group().read();
+            let _l2 = child.read();
+        }
+
+        Ok(child)
+    }
+
+    /// Sets the stop state (per set_stopped), and also notifies all listeners,
+    /// including the parent process and the tracer if appropriate.
+    pub fn set_stopped_and_notify(&self, stopped: StopState, siginfo: Option<SignalInfo>) {
+        let maybe_signal_info = {
+            let mut state = self.write();
+            state.copy_state_from(self);
+            state.set_stopped(stopped, siginfo, Some(self), None);
+            state.prepare_signal_info(stopped)
+        };
+
+        if let Some((tracer, signal_info)) = maybe_signal_info {
+            if let Some(tracer) = tracer.upgrade() {
+                tracer.write().send_signal(signal_info);
+            }
+        }
+
+        if !stopped.is_in_progress() {
+            let parent = self.thread_group().read().parent.clone();
+            if let Some(parent) = parent {
+                parent
+                    .upgrade()
+                    .write()
+                    .lifecycle_waiters
+                    .notify_value(ThreadGroupLifecycleWaitValue::ChildStatus);
+            }
+        }
+    }
+
+    /// If the task is stopping, set it as stopped. return whether the caller
+    /// should stop.  The task might also be waking up.
+    pub fn finalize_stop_state(&mut self) -> bool {
+        let stopped = self.load_stopped();
+
+        if !stopped.is_stopping_or_stopped() {
+            // If we are waking up, potentially write back state a tracer may have modified.
+            let captured_state = self.write().take_captured_state();
+            if let Some(captured) = captured_state {
+                if captured.dirty {
+                    self.thread_state.replace_registers(&captured.thread_state);
+                }
+            }
+        }
+
+        // Stopping because the thread group is stopping.
+        // Try to flip to GroupStopped - will fail if we shouldn't.
+        if self.thread_group().set_stopped(StopState::GroupStopped, None, true)
+            == StopState::GroupStopped
+        {
+            let signal = self.thread_group().read().last_signal.clone();
+            // stopping because the thread group has stopped
+            let event = Some(PtraceEventData::new_from_event(PtraceEvent::Stop, 0));
+            self.write().set_stopped(StopState::GroupStopped, signal, Some(self), event);
+            return true;
+        }
+
+        // Stopping because the task is stopping
+        if stopped.is_stopping_or_stopped() {
+            if let Ok(stopped) = stopped.finalize() {
+                self.set_stopped_and_notify(stopped, None);
+            }
+            return true;
+        }
+
+        false
+    }
+
+    /// Block the execution of `current_task` as long as the task is stopped and
+    /// not terminated.
+    pub fn block_while_stopped(&mut self, locked: &mut Locked<Unlocked>) {
+        // Upgrade the state from stopping to stopped if needed. Return if the task
+        // should not be stopped.
+        if !self.finalize_stop_state() {
+            return;
+        }
+
+        let waiter = Waiter::with_options(WaiterOptions::IGNORE_SIGNALS);
+        loop {
+            // If we've exited, unstop the threads and return without notifying
+            // waiters.
+            if self.is_exitted() {
+                self.thread_group().set_stopped(StopState::ForceAwake, None, false);
+                self.write().set_stopped(StopState::ForceAwake, None, Some(self), None);
+                return;
+            }
+
+            if self.wake_or_wait_until_unstopped_async(&waiter) {
+                return;
+            }
+
+            // Do the wait. Result is not needed, as this is not in a syscall.
+            let _: Result<(), Errno> = waiter.wait(locked, self);
+
+            // Maybe go from stopping to stopped, if we are currently stopping
+            // again.
+            self.finalize_stop_state();
+        }
+    }
+
+    /// For traced tasks, this will return the data neceessary for a cloned task
+    /// to attach to the same tracer.
+    pub fn get_ptrace_core_state_for_clone(
+        &mut self,
+        clone_args: &clone_args,
+    ) -> (PtraceOptions, Option<PtraceCoreState>) {
+        let state = self.write();
+        if let Some(ptrace) = &state.ptrace {
+            ptrace.get_core_state_for_clone(clone_args)
+        } else {
+            (PtraceOptions::empty(), None)
+        }
+    }
+
+    /// If currently being ptraced with the given option, emit the appropriate
+    /// event.  PTRACE_EVENTMSG will return the given message.  Also emits the
+    /// appropriate event for execve in the absence of TRACEEXEC.
+    ///
+    /// Note that the Linux kernel has a documented bug where, if TRACEEXIT is
+    /// enabled, SIGKILL will trigger an event.  We do not exhibit this
+    /// behavior.
+    pub fn ptrace_event(
+        &mut self,
+        locked: &mut Locked<Unlocked>,
+        trace_kind: PtraceOptions,
+        msg: u64,
+    ) {
+        if !trace_kind.is_empty() {
+            {
+                let mut state = self.write();
+                if let Some(ptrace) = &mut state.ptrace {
+                    if !ptrace.has_option(trace_kind) {
+                        // If this would be a TRACEEXEC, but TRACEEXEC is not
+                        // turned on, then send a SIGTRAP.
+                        if trace_kind == PtraceOptions::TRACEEXEC && !ptrace.is_seized() {
+                            // Send a SIGTRAP so that the parent can gain control.
+                            send_signal_first(locked, self, state, SignalInfo::kernel(SIGTRAP));
+                        }
+
+                        return;
+                    }
+                    let ptrace_event = PtraceEvent::from_option(&trace_kind) as u32;
+                    let siginfo = SignalInfo::with_detail(
+                        SIGTRAP,
+                        ((ptrace_event << 8) | SIGTRAP.number()) as i32,
+                        SignalDetail::None,
+                    );
+                    state.set_stopped(
+                        StopState::PtraceEventStopping,
+                        Some(siginfo),
+                        None,
+                        Some(PtraceEventData::new(trace_kind, msg)),
+                    );
+                } else {
+                    return;
+                }
+            }
+            self.block_while_stopped(locked);
+        }
+    }
+
+    /// Causes the current thread's thread group to exit, notifying any ptracer
+    /// of this task first.
+    pub fn thread_group_exit(&mut self, locked: &mut Locked<Unlocked>, exit_status: ExitStatus) {
+        self.ptrace_event(
+            locked,
+            PtraceOptions::TRACEEXIT,
+            exit_status.signal_info_status() as u64,
+        );
+        self.thread_group().exit(locked, exit_status, None);
+    }
+
+    /// The flags indicates only the flags as in clone3(), and does not use the low 8 bits for the
+    /// exit signal as in clone().
+    #[cfg(test)]
+    pub fn clone_task_for_test<L>(
+        &self,
+        locked: &mut Locked<L>,
+        flags: u64,
+        exit_signal: Option<Signal>,
+    ) -> crate::testing::AutoReleasableTask
+    where
+        L: LockBefore<MmDumpable>,
+        L: LockBefore<TaskRelease>,
+        L: LockBefore<ProcessGroupState>,
+    {
+        let result = self
+            .clone_task(
+                locked,
+                flags,
+                exit_signal,
+                UserRef::default(),
+                UserRef::default(),
+                UserRef::default(),
+            )
+            .expect("failed to create task in test");
+
+        result.into()
+    }
+
+    // See "Ptrace access mode checking" in https://man7.org/linux/man-pages/man2/ptrace.2.html
+    pub fn check_ptrace_access_mode<L>(
+        &self,
+        locked: &mut Locked<L>,
+        mode: PtraceAccessMode,
+        target: &Task,
+    ) -> Result<(), Errno>
+    where
+        L: LockBefore<MmDumpable>,
+    {
+        // (1)  If the calling thread and the target thread are in the same
+        //      thread group, access is always allowed.
+        if self.thread_group().leader == target.thread_group().leader {
+            return Ok(());
+        }
+
+        // (2)  If the access mode specifies PTRACE_MODE_FSCREDS, then, for
+        //      the check in the next step, employ the caller's filesystem
+        //      UID and GID.  (As noted in credentials(7), the filesystem
+        //      UID and GID almost always have the same values as the
+        //      corresponding effective IDs.)
+        //
+        //      Otherwise, the access mode specifies PTRACE_MODE_REALCREDS,
+        //      so use the caller's real UID and GID for the checks in the
+        //      next step.  (Most APIs that check the caller's UID and GID
+        //      use the effective IDs.  For historical reasons, the
+        //      PTRACE_MODE_REALCREDS check uses the real IDs instead.)
+        let (uid, gid) = if mode.contains(PTRACE_MODE_FSCREDS) {
+            let fscred = self.current_creds().as_fscred();
+            (fscred.uid, fscred.gid)
+        } else if mode.contains(PTRACE_MODE_REALCREDS) {
+            let creds = self.current_creds();
+            (creds.uid, creds.gid)
+        } else {
+            unreachable!();
+        };
+
+        // (3)  Deny access if neither of the following is true:
+        //
+        //      -  The real, effective, and saved-set user IDs of the target
+        //         match the caller's user ID, and the real, effective, and
+        //         saved-set group IDs of the target match the caller's
+        //         group ID.
+        //
+        //      -  The caller has the CAP_SYS_PTRACE capability in the user
+        //         namespace of the target.
+        let target_creds = target.real_creds();
+        if !(target_creds.uid == uid
+            && target_creds.euid == uid
+            && target_creds.saved_uid == uid
+            && target_creds.gid == gid
+            && target_creds.egid == gid
+            && target_creds.saved_gid == gid)
+        {
+            security::check_task_capable(self, CAP_SYS_PTRACE)?;
+        }
+
+        // (4)  Deny access if the target process "dumpable" attribute has a
+        //      value other than 1 (SUID_DUMP_USER; see the discussion of
+        //      PR_SET_DUMPABLE in prctl(2)), and the caller does not have
+        //      the CAP_SYS_PTRACE capability in the user namespace of the
+        //      target process.
+        let dumpable = *target.mm()?.dumpable.lock(locked);
+        match dumpable {
+            DumpPolicy::User => (),
+            DumpPolicy::Disable => security::check_task_capable(self, CAP_SYS_PTRACE)?,
+        }
+
+        // (5)  The kernel LSM security_ptrace_access_check() interface is
+        //      invoked to see if ptrace access is permitted.
+        security::ptrace_access_check(self, target, mode)?;
+
+        // (6)  If access has not been denied by any of the preceding steps,
+        //      then access is allowed.
+        Ok(())
+    }
+
+    pub fn can_signal(
+        &self,
+        target: &Task,
+        unchecked_signal: UncheckedSignal,
+    ) -> Result<(), Errno> {
+        // If both the tasks share a thread group the signal can be sent. This is not documented
+        // in kill(2) because kill does not support task-level granularity in signal sending.
+        if self.thread_group == target.thread_group {
+            return Ok(());
+        }
+
+        let self_creds = self.current_creds();
+        let target_creds = target.real_creds();
+        // From https://man7.org/linux/man-pages/man2/kill.2.html:
+        //
+        // > For a process to have permission to send a signal, it must either be
+        // > privileged (under Linux: have the CAP_KILL capability in the user
+        // > namespace of the target process), or the real or effective user ID of
+        // > the sending process must equal the real or saved set- user-ID of the
+        // > target process.
+        //
+        // Returns true if the credentials are considered to have the same user ID.
+        if self_creds.euid == target_creds.saved_uid
+            || self_creds.euid == target_creds.uid
+            || self_creds.uid == target_creds.uid
+            || self_creds.uid == target_creds.saved_uid
+        {
+            return Ok(());
+        }
+
+        if Signal::try_from(unchecked_signal) == Ok(SIGCONT) {
+            let target_session = target.thread_group().read().process_group.session.leader;
+            let self_session = self.thread_group().read().process_group.session.leader;
+            if target_session == self_session {
+                return Ok(());
+            }
+        }
+
+        security::check_task_capable(self, CAP_KILL)
+    }
+}
+
+impl ArchSpecific for CurrentTask {
+    fn is_arch32(&self) -> bool {
+        self.thread_state.is_arch32()
+    }
+}
+
+impl MemoryAccessor for CurrentTask {
+    fn read_memory<'a>(
+        &self,
+        addr: UserAddress,
+        bytes: &'a mut [MaybeUninit<u8>],
+    ) -> Result<&'a mut [u8], Errno> {
+        self.mm()?.unified_read_memory(self, addr, bytes)
+    }
+
+    fn read_memory_partial_until_null_byte<'a>(
+        &self,
+        addr: UserAddress,
+        bytes: &'a mut [MaybeUninit<u8>],
+    ) -> Result<&'a mut [u8], Errno> {
+        self.mm()?.unified_read_memory_partial_until_null_byte(self, addr, bytes)
+    }
+
+    fn read_memory_partial<'a>(
+        &self,
+        addr: UserAddress,
+        bytes: &'a mut [MaybeUninit<u8>],
+    ) -> Result<&'a mut [u8], Errno> {
+        self.mm()?.unified_read_memory_partial(self, addr, bytes)
+    }
+
+    fn write_memory(&self, addr: UserAddress, bytes: &[u8]) -> Result<usize, Errno> {
+        self.mm()?.unified_write_memory(self, addr, bytes)
+    }
+
+    fn write_memory_partial(&self, addr: UserAddress, bytes: &[u8]) -> Result<usize, Errno> {
+        self.mm()?.unified_write_memory_partial(self, addr, bytes)
+    }
+
+    fn zero(&self, addr: UserAddress, length: usize) -> Result<usize, Errno> {
+        self.mm()?.unified_zero(self, addr, length)
+    }
+}
+
+impl TaskMemoryAccessor for CurrentTask {
+    fn maximum_valid_address(&self) -> Option<UserAddress> {
+        self.mm().ok().map(|mm| mm.maximum_valid_user_address)
+    }
+}
+
+pub enum ExceptionResult {
+    /// The exception was handled and no further action is required.
+    Handled,
+
+    // The exception generated a signal that should be delivered.
+    Signal(SignalInfo),
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::testing::spawn_kernel_and_run;
+    use starnix_uapi::auth::Credentials;
+
+    // This test will run `override_creds` and check it doesn't crash. This ensures that the
+    // delegation to `override_creds_async` is correct.
+    #[::fuchsia::test]
+    async fn test_override_creds_can_delegate_to_async_version() {
+        spawn_kernel_and_run(async move |_, current_task| {
+            assert_eq!(current_task.override_creds(Credentials::root(), || 0), 0);
+        })
+        .await;
+    }
+}

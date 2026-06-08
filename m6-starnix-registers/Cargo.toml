@@ -1,0 +1,16 @@
+[package]
+name = "m6-starnix-registers"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Starnix-fork shim: starnix_registers (M6 no_std)"
+
+[lib]
+name = "starnix_registers"
+
+[dependencies]
+zx = { package = "m6-zx-shim", path = "../m6-zx-shim" }
+starnix_uapi = { package = "m6-starnix-uapi", path = "../m6-starnix-uapi" }
+memoffset = "0.9"
+static_assertions = "1"

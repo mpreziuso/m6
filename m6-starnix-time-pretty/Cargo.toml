@@ -1,0 +1,13 @@
+[package]
+name = "m6-starnix-time-pretty"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Starnix-fork shim: time_pretty (M6 no_std)"
+
+[lib]
+name = "time_pretty"
+
+[dependencies]
+zx = { package = "m6-zx-shim", path = "../m6-zx-shim" }

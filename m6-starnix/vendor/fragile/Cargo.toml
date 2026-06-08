@@ -1,0 +1,10 @@
+[package]
+name = "m6-fragile-shim"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Minimal no_std fragile::Fragile shim for the M6 Starnix fork"
+
+[lib]
+name = "fragile"
+path = "src/lib.rs"

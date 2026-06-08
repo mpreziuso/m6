@@ -278,7 +278,12 @@ fn read_node_phandle(node: &fdt::node::FdtNode) -> u32 {
         if let Some(prop) = node.property(name)
             && prop.value.len() >= 4
         {
-            return u32::from_be_bytes([prop.value[0], prop.value[1], prop.value[2], prop.value[3]]);
+            return u32::from_be_bytes([
+                prop.value[0],
+                prop.value[1],
+                prop.value[2],
+                prop.value[3],
+            ]);
         }
     }
     0
