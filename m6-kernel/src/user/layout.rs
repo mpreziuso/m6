@@ -60,6 +60,16 @@ pub const BOOTSTRAP_STACK_SIZE: u64 = 64 * 1024;
 /// Stack top address (initial SP value, stack grows down).
 pub const STACK_TOP: u64 = STACK_BASE + BOOTSTRAP_STACK_SIZE;
 
+/// ASLR window for the root task's stack (4 MiB).
+///
+/// The stack is placed at a random page-aligned offset below [`STACK_BASE`]
+/// within this window. The slack below the stack region down to the heap top
+/// is multiple GiB, so the window never collides with another mapping. Yields
+/// up to log2(STACK_ASLR_WINDOW / 4 KiB) = 10 bits of stack-base entropy. The
+/// actual stack top is reported to the thread via its initial SP, so this is
+/// transparent to userspace.
+pub const STACK_ASLR_WINDOW: u64 = 0x0040_0000;
+
 /// IPC buffer region base.
 pub const IPC_BUFFER_BASE: u64 = 0x0000_7FFF_C000_0000;
 

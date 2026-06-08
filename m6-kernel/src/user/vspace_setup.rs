@@ -201,26 +201,42 @@ pub fn setup_bootstrap_stack(l0_phys: PhysAddr) -> Result<u64, VSpaceSetupError>
     let mut l0 = unsafe { get_l0_table(l0_phys) };
     let mut allocator = KernelPageAllocator;
 
-    // Note: Guard page at STACK_GUARD_ADDR is NOT mapped (will cause fault on access)
+    // ASLR: place the stack at a random page-aligned offset below STACK_BASE,
+    // within STACK_ASLR_WINDOW. The slack down to the heap top is multiple GiB,
+    // so this never collides with another mapping. The chosen top is returned
+    // and installed as the thread's initial SP, so it is transparent to
+    // userspace. An always-unmapped guard page sits immediately below the stack.
+    let window_pages = layout::STACK_ASLR_WINDOW / 0x1000;
+    let entropy = m6_arch::cpu::read_random().unwrap_or_else(m6_pal::timer::read_counter);
+    let offset_pages = if window_pages > 0 {
+        entropy % window_pages
+    } else {
+        0
+    };
+    let stack_base = layout::STACK_BASE - offset_pages * 0x1000;
+    let stack_top = stack_base + layout::BOOTSTRAP_STACK_SIZE;
+
+    // Note: the guard page at stack_base - 0x1000 is NOT mapped (faults on access)
 
     // Map stack pages (RW, no execute)
     let stack_perms = PtePermissions::rw(true); // user=true
 
     for i in 0..layout::BOOTSTRAP_STACK_PAGES {
         let frame_phys = alloc_frame_zeroed().ok_or(VSpaceSetupError::FrameAllocationFailed)?;
-        let va = layout::STACK_BASE + (i * 0x1000) as u64;
+        let va = stack_base + (i * 0x1000) as u64;
 
         map_user_page(&mut l0, &mut allocator, frame_phys, va, stack_perms)?;
     }
 
     log::debug!(
-        "Mapped bootstrap stack: {:#x}..{:#x} ({} pages)",
-        layout::STACK_BASE,
-        layout::STACK_TOP,
-        layout::BOOTSTRAP_STACK_PAGES
+        "Mapped bootstrap stack: {:#x}..{:#x} ({} pages, ASLR offset {:#x})",
+        stack_base,
+        stack_top,
+        layout::BOOTSTRAP_STACK_PAGES,
+        offset_pages * 0x1000
     );
 
-    Ok(layout::STACK_TOP)
+    Ok(stack_top)
 }
 
 /// Map the UserBootInfo page into the user VSpace.
