@@ -245,3 +245,80 @@ pub fn map_frame_into(
     }
     Ok(())
 }
+
+// -- Demand-paging fault registry, keyed by VSpace.
+//
+// A mapping created *without* `VmarFlags::MAP_RANGE` (the forked core's
+// non-populated case — Fuchsia relies on its kernel to fault those pages in) is
+// recorded here by [`Vmar::map`](crate::Vmar::map) instead of being committed at
+// map time. On a not-present fault, [`commit_fault_page`] looks up the mapping
+// covering the faulting address, commits the one backing VMO page and installs
+// it into the VSpace. Each entry holds an `Arc` clone of the backing VMO, so the
+// pages stay reachable while the mapping is registered.
+
+struct LazyMapping {
+    /// Backing VMO (shares pages with the original via its inner `Arc`).
+    vmo: crate::Vmo,
+    /// Base virtual address of the mapping (page-aligned).
+    base: u64,
+    /// Byte offset into the VMO corresponding to `base`.
+    vmo_offset: u64,
+    /// Length of the mapping in bytes (page-aligned).
+    len: u64,
+    /// M6 rights bitmap (R=1, W=2, X=4) to install the page with.
+    rights: u64,
+}
+
+// vspace_cptr → (base vaddr → mapping). The inner map is keyed by base so the
+// covering mapping for an address is the greatest base ≤ that address.
+static LAZY_REGISTRY: Mutex<BTreeMap<u64, BTreeMap<u64, LazyMapping>>> =
+    Mutex::new(BTreeMap::new());
+
+/// Register a lazily-mapped region. Pages are committed on first fault by
+/// [`commit_fault_page`]; nothing is mapped into the VSpace yet.
+pub fn register_lazy_mapping(
+    vspace_cptr: u64,
+    base: u64,
+    vmo: &crate::Vmo,
+    vmo_offset: u64,
+    len: u64,
+    rights: u64,
+) {
+    let mut reg = LAZY_REGISTRY.lock();
+    reg.entry(vspace_cptr).or_default().insert(
+        base,
+        LazyMapping { vmo: vmo.clone(), base, vmo_offset, len, rights },
+    );
+}
+
+/// Commit the page covering `fault_vaddr` if it belongs to a registered lazy
+/// mapping in `vspace_cptr`.
+///
+/// Returns `Ok(true)` if the page was committed and installed (the faulting
+/// instruction should be retried), `Ok(false)` if no lazy mapping covers the
+/// address (the caller should treat it as a genuine fault → SIGSEGV).
+pub fn commit_fault_page(vspace_cptr: u64, fault_vaddr: u64) -> Result<bool, Status> {
+    let page_vaddr = fault_vaddr & !0xFFF;
+
+    // Resolve the covering mapping and clone out what we need, then drop the
+    // registry lock before issuing the commit/map syscalls.
+    let (vmo, vmo_page_idx, rights) = {
+        let reg = LAZY_REGISTRY.lock();
+        let Some(vmaps) = reg.get(&vspace_cptr) else {
+            return Ok(false);
+        };
+        let Some((_, m)) = vmaps.range(..=page_vaddr).next_back() else {
+            return Ok(false);
+        };
+        if page_vaddr >= m.base + m.len {
+            return Ok(false);
+        }
+        let page_in_mapping = (page_vaddr - m.base) / 4096;
+        let vmo_page_idx = (m.vmo_offset / 4096 + page_in_mapping) as usize;
+        (m.vmo.clone(), vmo_page_idx, m.rights)
+    };
+
+    let frame_cptr = vmo.commit_and_get_frame(vmo_page_idx)?;
+    map_frame_into(vspace_cptr, frame_cptr, page_vaddr, rights, 0, false)?;
+    Ok(true)
+}

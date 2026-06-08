@@ -120,27 +120,49 @@ impl Vmar {
         // Convert VmarFlags to M6 rights bitmap
         let rights = vmar_flags_to_rights(flags);
 
-        // Map each page of the requested range: commit the corresponding VMO
-        // page (allocating a frame if needed) and install it in this VSpace,
-        // creating intermediate page tables on demand. Only attempted once the
-        // M6 allocator context is installed; otherwise the mapping is left
-        // address-reserved (the previous behaviour) so the native bring-up path
-        // — which never installs the context — is unaffected.
+        // Place the mapping. Only attempted once the M6 allocator context is
+        // installed; otherwise the mapping is left address-reserved (the previous
+        // behaviour) so the native bring-up path — which never installs the
+        // context — is unaffected.
+        //
+        // Two regimes:
+        //   * Eager — commit every page now and install it in this VSpace,
+        //     creating intermediate page tables on demand. Used when the caller
+        //     asked to populate (`MAP_RANGE`) or placed the mapping at a fixed
+        //     address (`SPECIFIC`/`SPECIFIC_OVERWRITE` — ELF segments, the vDSO
+        //     block, anything the service may read before the guest faults it).
+        //   * Lazy (demand paging) — register the mapping and commit nothing;
+        //     `mem_context::commit_fault_page` faults pages in on first access.
+        //     This is the non-fixed, non-populated case = anonymous `mmap`.
         if crate::mem_context::is_initialised() {
-            let overwrite = flags.contains(VmarFlags::SPECIFIC_OVERWRITE);
-            let n_pages = (len as usize).div_ceil(4096);
-            let base_page = (vmo_offset / 4096) as usize;
-            for i in 0..n_pages {
-                let frame_cptr = vmo.commit_and_get_frame(base_page + i)?;
-                let page_vaddr = vaddr + (i as u64) * 4096;
-                crate::mem_context::map_frame_into(
+            let specific = flags.contains(VmarFlags::SPECIFIC)
+                || flags.contains(VmarFlags::SPECIFIC_OVERWRITE);
+            let eager = flags.contains(VmarFlags::MAP_RANGE) || specific;
+            if eager {
+                let overwrite = flags.contains(VmarFlags::SPECIFIC_OVERWRITE);
+                let n_pages = (len as usize).div_ceil(4096);
+                let base_page = (vmo_offset / 4096) as usize;
+                for i in 0..n_pages {
+                    let frame_cptr = vmo.commit_and_get_frame(base_page + i)?;
+                    let page_vaddr = vaddr + (i as u64) * 4096;
+                    crate::mem_context::map_frame_into(
+                        self.vspace_cptr,
+                        frame_cptr,
+                        page_vaddr,
+                        rights,
+                        0,
+                        overwrite,
+                    )?;
+                }
+            } else {
+                crate::mem_context::register_lazy_mapping(
                     self.vspace_cptr,
-                    frame_cptr,
-                    page_vaddr,
+                    vaddr,
+                    vmo,
+                    vmo_offset,
+                    len,
                     rights,
-                    0,
-                    overwrite,
-                )?;
+                );
             }
         }
 
