@@ -17,7 +17,7 @@ ifeq ($(CROSS_GCC),)
 $(error No aarch64 cross toolchain found. Install aarch64-linux-musl-gcc or aarch64-linux-gnu-gcc.)
 endif
 
-BINARIES := hello
+BINARIES := hello hellopie
 
 .PHONY: all clean busybox
 
@@ -25,6 +25,12 @@ all: $(BINARIES)
 
 hello: hello.S
 	$(CROSS_GCC) -nostdlib -static -no-pie -Wl,--build-id=none -o $@ $<
+	@printf "Built %s (%s bytes)\n" "$@" "$$(stat -c%s $@)"
+
+# Static-PIE (ET_DYN, no PT_INTERP): the loader places it at an ASLR base and
+# the libc startup self-relocates. Exercises the PIE / load-bias path.
+hellopie: hellopie.c
+	$(CROSS_GCC) -static-pie -Wl,--build-id=none -o $@ $<
 	@printf "Built %s (%s bytes)\n" "$@" "$$(stat -c%s $@)"
 
 # busybox is fetched + cross-compiled (static, non-PIE) by a helper script

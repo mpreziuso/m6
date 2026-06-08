@@ -66,6 +66,12 @@ initrd-full: system user
 	else \
 	    echo "Note: linux/hello not built (run 'make linux-binaries'); 'linux hello' will be unavailable"; \
 	fi
+	@if [ -f linux/hellopie ]; then \
+	    cp linux/hellopie target/initrd/hellopie; \
+	    echo "Bundled linux/hellopie into initrd"; \
+	else \
+	    echo "Note: linux/hellopie not built (run 'make linux-binaries'); 'linux hellopie' will be unavailable"; \
+	fi
 	@if [ -f linux/busybox ]; then \
 	    cp linux/busybox target/initrd/busybox; \
 	    echo "Bundled linux/busybox into initrd"; \
@@ -78,6 +84,7 @@ initrd-full: system user
 		init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme drv-usb-xhci drv-usb-dwc3 drv-usb-hid svc-fat32 \
 		shell ls cat cp echo mkdir mkfs-fat32 svc-starnix \
 		$$([ -f hello ] && echo hello) \
+		$$([ -f hellopie ] && echo hellopie) \
 		$$([ -f busybox ] && echo busybox)
 	@echo "Created full initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
 	@echo "Contents:"
