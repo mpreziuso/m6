@@ -26,6 +26,7 @@ pub mod mem_ops;
 pub mod misc_ops;
 pub mod numbers;
 pub mod restricted;
+pub mod sched_ops;
 pub mod tcb_ops;
 pub mod timer_ops;
 pub mod user_ptr;

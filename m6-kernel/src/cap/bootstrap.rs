@@ -287,8 +287,21 @@ fn create_asid_control() -> BootstrapResult<ObjectRef> {
 }
 
 /// Create the scheduling control object (singleton).
+///
+/// SchedControl is the root authority for creating CPU-time budgets (MCS). It
+/// is minted into the root task's CSpace and never created via retype. The
+/// `max_allocatable` ceiling bounds the sum of configured context budgets; a
+/// generous default keeps it from artificially rejecting legitimate budgets
+/// while still providing accounting.
 fn create_sched_control() -> BootstrapResult<ObjectRef> {
-    object_table::alloc(KernelObjectType::SchedControl).ok_or(BootstrapError::NoObjectSlots)
+    let obj_ref =
+        object_table::alloc(KernelObjectType::SchedControl).ok_or(BootstrapError::NoObjectSlots)?;
+    object_table::with_object_mut(obj_ref, |obj| {
+        obj.data.sched_control =
+            ManuallyDrop::new(m6_cap::objects::SchedControlObject::new(u64::MAX));
+    })
+    .ok_or(BootstrapError::NoObjectSlots)?;
+    Ok(obj_ref)
 }
 
 /// Create the timer control object (singleton).

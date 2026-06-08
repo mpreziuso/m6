@@ -12,6 +12,7 @@ use m6_pal::timer;
 
 use super::run_queue::{with_tcb, with_tcb_mut};
 use super::{PerCpuSched, VCLOCK_EPSILON, VT_FIXED_SHIFT};
+use crate::cap::object_table;
 use crate::cap::tcb_storage::TcbFull;
 use crate::task::{DEFAULT_TIME_SLICE_MS, priority_to_weight};
 
@@ -58,23 +59,49 @@ pub fn is_eligible(tcb: &TcbFull, vclock: u128) -> bool {
     tcb.v_eligible.saturating_sub(vclock) <= VCLOCK_EPSILON
 }
 
-/// Check if a task has available SchedContext budget.
+/// Convert a counter delta into microseconds using the timer frequency.
+#[inline]
+fn ticks_to_us(delta_ticks: u64) -> u64 {
+    let freq = timer::frequency();
+    if freq == 0 {
+        return 0;
+    }
+    ((delta_ticks as u128 * 1_000_000) / freq as u128) as u64
+}
+
+/// Check (and lazily replenish) the CPU budget of a SchedContext (MCS).
 ///
-/// Note: this function is called from within a `with_tcb` closure (which
-/// holds the global object-table lock). It must NOT call `with_object` or
-/// any other function that re-acquires the same lock, as `IrqSpinMutex` is
-/// non-reentrant and would deadlock.
-pub fn has_budget(tcb: &TcbFull) -> bool {
-    let sched_ctx_ref = tcb.tcb.sched_context;
-    if !sched_ctx_ref.is_valid() {
-        // No SchedContext — assume unlimited budget (for idle task, etc.)
+/// Returns true if the thread bound to `sched_ctx` is allowed to run. A
+/// NULL/invalid context means "no budget limit" — this covers the idle thread,
+/// kernel-internal threads, and any task not placed under a budget, so existing
+/// behaviour is preserved and budgets are opt-in per thread.
+///
+/// When the context's period has elapsed since the last replenishment, the
+/// budget is refilled before the check. This bounds a bound thread's CPU share
+/// to `budget/period`, providing the §1 DoS-isolation guarantee.
+///
+/// IMPORTANT: this acquires the object-table lock to reach the SchedContext, so
+/// it MUST be called OUTSIDE any `with_tcb`/`with_object` closure (the lock is
+/// non-reentrant and would otherwise deadlock).
+pub fn has_budget_for(sched_ctx: ObjectRef) -> bool {
+    if !sched_ctx.is_valid() {
         return true;
     }
-
-    // TODO: Check SchedContext budget when storage is fully implemented.
-    // The check must read the budget from the TcbFull or from a field
-    // accessible without re-acquiring the object-table lock.
-    true
+    let now = timer::read_counter();
+    object_table::with_sched_context_mut(sched_ctx, |ctx| {
+        if ctx.period > 0 {
+            if ctx.period_start == 0 {
+                // First evaluation since bind/configure: start the period now.
+                ctx.remaining = ctx.budget;
+                ctx.period_start = now;
+            } else if ticks_to_us(now.saturating_sub(ctx.period_start)) >= ctx.period {
+                ctx.replenish(now);
+            }
+        }
+        ctx.has_budget()
+    })
+    // If the context object is gone (freed/reused), don't wedge the thread.
+    .unwrap_or(true)
 }
 
 /// Check if a task's state allows it to be scheduled.
@@ -155,20 +182,23 @@ pub fn find_next_runnable(sched: &PerCpuSched) -> Option<ObjectRef> {
     let mut current = sched.run_queue.head();
 
     while current.is_valid() {
-        let is_candidate = with_tcb(current, |tcb| {
-            let r = is_runnable(tcb);
-            let e = is_eligible(tcb, vclock);
-            let b = has_budget(tcb);
-            r && e && b
+        // Read schedulability and the bound SchedContext under the TCB lock,
+        // then release it before checking the budget (has_budget_for locks the
+        // SchedContext object, so it must not run nested inside with_tcb).
+        let (runnable_eligible, sched_ctx, next) = with_tcb(current, |tcb| {
+            (
+                is_runnable(tcb) && is_eligible(tcb, vclock),
+                tcb.tcb.sched_context,
+                tcb.sched_next,
+            )
         })
-        .unwrap_or(false);
+        .unwrap_or((false, ObjectRef::NULL, ObjectRef::NULL));
 
-        if is_candidate {
+        if runnable_eligible && has_budget_for(sched_ctx) {
             return Some(current);
         }
 
-        // Move to next task
-        current = with_tcb(current, |tcb| tcb.sched_next).unwrap_or(ObjectRef::NULL);
+        current = next;
     }
 
     None
@@ -192,11 +222,14 @@ pub fn switch_to(sched: &mut PerCpuSched, next: ObjectRef) {
             return;
         }
 
-        with_tcb_mut(prev, |tcb| {
+        // Capture the bound SchedContext and consumed microseconds so the MCS
+        // budget can be charged after the TCB lock is released.
+        let (prev_ctx, prev_charged_us) = with_tcb_mut(prev, |tcb| {
             // Record last run time
             tcb.last_run_ticks = now_ticks;
 
             // Compute virtual time consumed
+            let mut charged_us = 0u64;
             if tcb.exec_start_ticks > 0 {
                 let freq = timer::frequency();
                 if freq > 0 {
@@ -212,15 +245,19 @@ pub fn switch_to(sched: &mut PerCpuSched, next: ObjectRef) {
                     let q_ns: u128 = (DEFAULT_TIME_SLICE_MS as u128) * 1_000_000;
                     let v_delta = (q_ns << VT_FIXED_SHIFT) / weight;
                     tcb.v_deadline = tcb.v_eligible.saturating_add(v_delta);
+
+                    charged_us = ((delta_ticks as u128 * 1_000_000) / freq as u128) as u64;
                 }
             }
             tcb.exec_start_ticks = 0;
 
-            // Mark as runnable if it was running
-            if tcb.tcb.state == ThreadState::Running {
-                // Keep it running (schedulable) - actual queue state is separate
-            }
-        });
+            (tcb.tcb.sched_context, charged_us)
+        })
+        .unwrap_or((ObjectRef::NULL, 0));
+
+        if prev_charged_us > 0 {
+            consume_budget(prev_ctx, prev_charged_us);
+        }
     }
 
     // Set up next task
@@ -292,7 +329,11 @@ pub fn yield_task(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
 pub fn charge_time(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
     let now_ticks = timer::read_counter();
 
-    with_tcb_mut(tcb_ref, |tcb| {
+    // Update virtual runtime and report (a) the bound SchedContext and (b) the
+    // microseconds consumed this interval, so the budget can be charged AFTER
+    // the TCB lock is released (consume_budget locks the SchedContext object).
+    let (sched_ctx, charged_us) = with_tcb_mut(tcb_ref, |tcb| {
+        let mut charged_us = 0u64;
         if tcb.exec_start_ticks > 0 {
             let freq = timer::frequency();
             if freq > 0 {
@@ -302,24 +343,36 @@ pub fn charge_time(sched: &mut PerCpuSched, tcb_ref: ObjectRef) {
                 let dv = (delta_ns << VT_FIXED_SHIFT) / weight;
 
                 tcb.v_runtime = tcb.v_runtime.saturating_add(dv);
+                charged_us = ((delta_ticks as u128 * 1_000_000) / freq as u128) as u64;
 
                 // Reset exec_start for next interval
                 tcb.exec_start_ticks = now_ticks;
             }
         }
-    });
+        (tcb.tcb.sched_context, charged_us)
+    })
+    .unwrap_or((ObjectRef::NULL, 0));
+
+    // Charge the MCS budget outside the TCB lock.
+    if charged_us > 0 {
+        consume_budget(sched_ctx, charged_us);
+    }
 
     // Also advance the virtual clock
     advance_vclock(sched);
 }
 
-/// Consume budget from a task's SchedContext.
-pub fn consume_budget(tcb_ref: ObjectRef, _microseconds: u64) {
-    let sched_ctx_ref = with_tcb(tcb_ref, |tcb| tcb.tcb.sched_context).unwrap_or(ObjectRef::NULL);
-
-    if sched_ctx_ref.is_valid() {
-        // TODO: Update SchedContextObject when storage is implemented
+/// Consume `microseconds` of CPU time from a SchedContext's budget (MCS).
+///
+/// No-op for a NULL/invalid context. MUST be called OUTSIDE any
+/// `with_tcb`/`with_object` closure (it locks the SchedContext object).
+pub fn consume_budget(sched_ctx: ObjectRef, microseconds: u64) {
+    if !sched_ctx.is_valid() {
+        return;
     }
+    object_table::with_sched_context_mut(sched_ctx, |ctx| {
+        ctx.consume(microseconds);
+    });
 }
 
 // -- Preemption
@@ -338,6 +391,13 @@ pub fn should_preempt(sched: &PerCpuSched) -> bool {
             return find_next_runnable(sched).is_some();
         }
     };
+
+    // MCS: if the current thread has exhausted its CPU budget, preempt it so a
+    // different (or idle) thread can run until its budget replenishes.
+    let cur_ctx = with_tcb(current, |tcb| tcb.tcb.sched_context).unwrap_or(ObjectRef::NULL);
+    if !has_budget_for(cur_ctx) {
+        return true;
+    }
 
     // Check if there's a higher-priority task
     let next = match find_next_runnable(sched) {

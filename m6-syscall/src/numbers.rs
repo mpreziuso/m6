@@ -141,6 +141,20 @@ pub mod method {
         pub const ALLOC: u64 = 0;
         pub const FREE: u64 = 1;
     }
+
+    /// SchedControl operations (MCS CPU-budget authority).
+    pub mod sched_control {
+        /// Configure a SchedContext's budget and period.
+        pub const CONFIGURE: u64 = 0;
+    }
+
+    /// SchedContext operations (MCS CPU-budget binding).
+    pub mod sched_context {
+        /// Bind this SchedContext to a TCB.
+        pub const BIND: u64 = 0;
+        /// Unbind this SchedContext from its TCB.
+        pub const UNBIND: u64 = 1;
+    }
 }
 
 /// Syscall numbers following seL4 conventions.

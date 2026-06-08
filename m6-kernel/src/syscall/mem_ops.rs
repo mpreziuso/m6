@@ -10,7 +10,8 @@ use core::mem::ManuallyDrop;
 
 use m6_cap::objects::untyped::{object_alignment, object_size};
 use m6_cap::objects::{
-    EndpointObject, FrameObject, NotificationObject, PageTableLevel, UntypedObject, VSpaceObject,
+    EndpointObject, FrameObject, NotificationObject, PageTableLevel, SchedContextObject,
+    UntypedObject, VSpaceObject,
 };
 use m6_cap::{Badge, CapRights, CapSlot, ObjectRef, ObjectType, SlotFlags};
 use m6_common::PhysAddr;
@@ -613,6 +614,13 @@ fn init_kernel_object(
                 };
                 let page_table = PageTableObject::new(phys_addr, level, ObjectRef::NULL);
                 obj.data.page_table = ManuallyDrop::new(page_table);
+            }
+            KernelObjectType::SchedContext => {
+                // Created unconfigured (budget/period 0 => is_valid() == false).
+                // SchedControl.Configure must set a budget/period before the
+                // context can be bound to a TCB. Explicit init avoids stale
+                // union bytes on slot reuse.
+                obj.data.sched_context = ManuallyDrop::new(SchedContextObject::new(0, 0));
             }
             _ => {
                 // Other objects: zeroed is valid initial state

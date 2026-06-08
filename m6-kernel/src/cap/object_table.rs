@@ -22,7 +22,8 @@ use m6_cap::{
     objects::{
         AsidPoolObject, DmaPoolObject, EndpointObject, EndpointState, FrameObject, IOSpaceObject,
         IrqControlObject, IrqHandlerObject, NotificationObject, PageTableObject, ReplyObject,
-        SmmuControlObject, TimerControlObject, TimerObject, UntypedObject, VSpaceObject,
+        SchedContextObject, SchedControlObject, SmmuControlObject, TimerControlObject, TimerObject,
+        UntypedObject, VSpaceObject,
     },
 };
 use spin::Once;
@@ -128,6 +129,10 @@ pub union KernelObjectData {
     pub timer: ManuallyDrop<TimerObject>,
     /// Timer control metadata.
     pub timer_control: ManuallyDrop<TimerControlObject>,
+    /// Scheduling context metadata (CPU time budget, MCS).
+    pub sched_context: ManuallyDrop<SchedContextObject>,
+    /// Scheduling control metadata (CPU time authority, MCS).
+    pub sched_control: ManuallyDrop<SchedControlObject>,
 }
 
 // SAFETY: Pointers are only accessed with object table lock held.
@@ -1043,6 +1048,57 @@ where
     {
         // SAFETY: We verified the object type, so dma_pool is the active variant.
         return Some(f(unsafe { &mut obj.data.dma_pool }));
+    }
+    None
+}
+
+/// Access a SchedContext with a closure (read-only).
+///
+/// Does nothing if the object is not a valid SchedContext.
+pub fn with_sched_context<F, R>(ctx_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&SchedContextObject) -> R,
+{
+    let table = get_table().lock();
+    if let Some(obj) = table.get(ctx_ref)
+        && obj.obj_type == KernelObjectType::SchedContext
+    {
+        // SAFETY: We verified the object type, so sched_context is the active variant.
+        return Some(f(unsafe { &obj.data.sched_context }));
+    }
+    None
+}
+
+/// Access a SchedContext with a closure (mutable).
+///
+/// Does nothing if the object is not a valid SchedContext.
+pub fn with_sched_context_mut<F, R>(ctx_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut SchedContextObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(ctx_ref)
+        && obj.obj_type == KernelObjectType::SchedContext
+    {
+        // SAFETY: We verified the object type, so sched_context is the active variant.
+        return Some(f(unsafe { &mut obj.data.sched_context }));
+    }
+    None
+}
+
+/// Access a SchedControl with a closure (mutable).
+///
+/// Does nothing if the object is not a valid SchedControl.
+pub fn with_sched_control_mut<F, R>(ctrl_ref: ObjectRef, f: F) -> Option<R>
+where
+    F: FnOnce(&mut SchedControlObject) -> R,
+{
+    let mut table = get_table().lock();
+    if let Some(obj) = table.get_mut(ctrl_ref)
+        && obj.obj_type == KernelObjectType::SchedControl
+    {
+        // SAFETY: We verified the object type, so sched_control is the active variant.
+        return Some(f(unsafe { &mut obj.data.sched_control }));
     }
     None
 }

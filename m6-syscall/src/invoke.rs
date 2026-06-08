@@ -677,6 +677,63 @@ pub fn retype(
     ))
 }
 
+/// Configure a SchedContext's CPU-time budget (MCS).
+///
+/// Sets the `budget_us`/`period_us` (microseconds) of `sched_context` using the
+/// `sched_control` authority. The thread bound to the context may consume up to
+/// `budget_us` of CPU time per `period_us` window; once exhausted it is not
+/// scheduled until the period replenishes. Requires `budget_us <= period_us`,
+/// `budget_us >= 10`, and `period_us >= 100`.
+#[inline]
+pub fn sched_control_configure(
+    sched_control: u64,
+    sched_context: u64,
+    budget_us: u64,
+    period_us: u64,
+) -> SyscallResult {
+    check_result(invoke(
+        sched_control,
+        method::sched_control::CONFIGURE,
+        sched_context,
+        budget_us,
+        period_us,
+        0,
+        0,
+    ))
+}
+
+/// Bind a configured SchedContext to a TCB, enforcing its CPU budget.
+///
+/// The context must already be configured (see [`sched_control_configure`]).
+/// While bound, the kernel charges the thread's CPU time against the budget and
+/// withholds it from scheduling once the budget is exhausted.
+#[inline]
+pub fn sched_context_bind(sched_context: u64, tcb: u64) -> SyscallResult {
+    check_result(invoke(
+        sched_context,
+        method::sched_context::BIND,
+        tcb,
+        0,
+        0,
+        0,
+        0,
+    ))
+}
+
+/// Unbind a SchedContext from its TCB, removing CPU-budget enforcement.
+#[inline]
+pub fn sched_context_unbind(sched_context: u64) -> SyscallResult {
+    check_result(invoke(
+        sched_context,
+        method::sched_context::UNBIND,
+        0,
+        0,
+        0,
+        0,
+        0,
+    ))
+}
+
 /// Retype `count` objects, splitting into batches that respect the kernel's
 /// per-call limit ([`crate::numbers::MAX_RETYPE_COUNT`]). Objects land in
 /// consecutive destination slots from `dest_index`, forming one contiguous run.

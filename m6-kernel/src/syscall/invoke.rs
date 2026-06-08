@@ -22,7 +22,7 @@ use crate::ipc;
 use crate::syscall::error::{SyscallError, SyscallResult};
 use crate::syscall::{
     SyscallArgs, asid_ops, cache_ops, cap_ops, iommu_ops, irq_ops, mem_ops, misc_ops, restricted,
-    tcb_ops, timer_ops,
+    sched_ops, tcb_ops, timer_ops,
 };
 
 /// Handle Invoke syscall.
@@ -59,6 +59,8 @@ pub fn handle_invoke(args: &SyscallArgs, ctx: &mut ExceptionContext) -> SyscallR
         ObjectType::SmmuControl => dispatch_smmu_control(label, args),
         ObjectType::IOSpace => dispatch_iospace(label, args),
         ObjectType::DmaPool => dispatch_dma_pool(label, args),
+        ObjectType::SchedControl => dispatch_sched_control(label, args),
+        ObjectType::SchedContext => dispatch_sched_context(label, args),
         _ => Err(SyscallError::TypeMismatch),
     }
 }
@@ -88,6 +90,7 @@ fn minimum_invoke_rights(obj_type: ObjectType, label: u64) -> CapRights {
         // Singleton control caps require full authority
         ObjectType::IRQControl => CapRights::ALL,
         ObjectType::TimerControl => CapRights::ALL,
+        ObjectType::SchedControl => CapRights::ALL,
 
         // All other types and methods: WRITE
         _ => CapRights::WRITE,
@@ -292,6 +295,23 @@ fn dispatch_dma_pool(label: u64, args: &SyscallArgs) -> SyscallResult {
     match label {
         method::dma_pool::ALLOC => iommu_ops::handle_dma_pool_alloc(&shift_args(args)),
         method::dma_pool::FREE => iommu_ops::handle_dma_pool_free(&shift_args(args)),
+        _ => Err(SyscallError::InvalidArg),
+    }
+}
+
+fn dispatch_sched_control(label: u64, args: &SyscallArgs) -> SyscallResult {
+    match label {
+        method::sched_control::CONFIGURE => {
+            sched_ops::handle_sched_control_configure(&shift_args(args))
+        }
+        _ => Err(SyscallError::InvalidArg),
+    }
+}
+
+fn dispatch_sched_context(label: u64, args: &SyscallArgs) -> SyscallResult {
+    match label {
+        method::sched_context::BIND => sched_ops::handle_sched_context_bind(&shift_args(args)),
+        method::sched_context::UNBIND => sched_ops::handle_sched_context_unbind(&shift_args(args)),
         _ => Err(SyscallError::InvalidArg),
     }
 }
