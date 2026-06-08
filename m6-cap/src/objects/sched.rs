@@ -19,6 +19,15 @@ use crate::slot::ObjectRef;
 /// Time in microseconds.
 pub type Microseconds = u64;
 
+/// CPU utilisation, in parts-per-million. One full CPU's worth of CPU time is
+/// [`FULL_CPU_PPM`]; admission accounting in [`SchedControlObject`] is expressed
+/// in these units so that budgets with *different periods* can be summed
+/// meaningfully (a raw budget-microsecond sum is dimensionless across periods).
+pub type UtilisationPpm = u64;
+
+/// Parts-per-million representing one fully-utilised CPU (`budget == period`).
+pub const FULL_CPU_PPM: UtilisationPpm = 1_000_000;
+
 /// Scheduling context object metadata.
 ///
 /// A scheduling context provides CPU time budget to threads.
@@ -44,6 +53,14 @@ pub struct SchedContextObject {
     pub is_active: bool,
     /// Number of TCBs that can use this context.
     pub refcount: u16,
+    /// Utilisation (parts-per-million) this context currently contributes to
+    /// its admitting [`SchedControlObject`], or 0 if not yet admitted. Tracked
+    /// so that reconfigure/destroy can adjust the control's running total by
+    /// the right delta. See [`SchedContextObject::utilisation_ppm`].
+    pub admitted_ppm: UtilisationPpm,
+    /// The SchedControl this context's budget was admitted against (NULL until
+    /// first configured). Lets destroy release the utilisation symmetrically.
+    pub admitting_control: ObjectRef,
 }
 
 impl SchedContextObject {
@@ -72,6 +89,8 @@ impl SchedContextObject {
             core_affinity: -1,
             is_active: false,
             refcount: 0,
+            admitted_ppm: 0,
+            admitting_control: ObjectRef::NULL,
         }
     }
 
@@ -146,6 +165,20 @@ impl SchedContextObject {
         ((self.budget * 100) / self.period) as u8
     }
 
+    /// Utilisation in parts-per-million (`budget / period`, [`FULL_CPU_PPM`] ==
+    /// one full CPU). This is the unit used for SchedControl admission so that
+    /// budgets with different periods compose correctly. Returns 0 for an
+    /// unconfigured context (`period == 0`). Computed in `u128` to avoid
+    /// overflow on large budgets.
+    #[inline]
+    #[must_use]
+    pub const fn utilisation_ppm(&self) -> UtilisationPpm {
+        if self.period == 0 {
+            return 0;
+        }
+        ((self.budget as u128 * FULL_CPU_PPM as u128) / self.period as u128) as UtilisationPpm
+    }
+
     /// Check if the scheduling parameters are valid.
     #[inline]
     #[must_use]
@@ -164,17 +197,31 @@ impl Default for SchedContextObject {
 
 /// Scheduling control object metadata.
 ///
-/// There is exactly one SchedControl capability in the system,
-/// given to the root task at boot.
+/// There is exactly one SchedControl capability in the system, given to the
+/// root task at boot. It is the admission authority for CPU-time budgets: the
+/// sum of the utilisations ([`SchedContextObject::utilisation_ppm`]) of all
+/// contexts configured through it may not exceed [`Self::capacity_ppm`]. This
+/// is what bounds aggregate CPU demand and prevents over-subscription — the
+/// "time partitioning for security domains" guarantee.
+///
+/// Accounting is in utilisation (parts-per-million), not raw budget
+/// microseconds, so contexts with different periods compose correctly.
+///
+/// Limitation: there is a single global SchedControl, so admission bounds the
+/// *aggregate* utilisation across all CPUs. Contexts pinned to one core via
+/// `core_affinity` are not separately bounded per-core (that would need
+/// per-CPU SchedControl caps, as in seL4 MCS). The default `core_affinity`
+/// (-1, any core) is the case this protects.
 #[derive(Clone, Debug, Default)]
 #[repr(C)]
 pub struct SchedControlObject {
-    /// Total CPU time allocated (sum of all context budgets).
-    pub total_allocated: Microseconds,
-    /// Number of scheduling contexts created.
+    /// Sum of the utilisations of all admitted contexts, in parts-per-million.
+    pub allocated_ppm: UtilisationPpm,
+    /// Number of scheduling contexts currently admitted.
     pub context_count: u32,
-    /// Maximum allocatable time per period (platform-dependent).
-    pub max_allocatable: Microseconds,
+    /// Maximum admissible aggregate utilisation, in parts-per-million
+    /// (typically `cpu_count * FULL_CPU_PPM`).
+    pub capacity_ppm: UtilisationPpm,
 }
 
 impl SchedControlObject {
@@ -182,43 +229,54 @@ impl SchedControlObject {
     ///
     /// # Parameters
     ///
-    /// - `max_allocatable`: Maximum allocatable time per period
+    /// - `capacity_ppm`: maximum admissible aggregate utilisation (ppm)
     #[inline]
     #[must_use]
-    pub const fn new(max_allocatable: Microseconds) -> Self {
+    pub const fn new(capacity_ppm: UtilisationPpm) -> Self {
         Self {
-            total_allocated: 0,
+            allocated_ppm: 0,
             context_count: 0,
-            max_allocatable,
+            capacity_ppm,
         }
     }
 
-    /// Check if more time can be allocated.
+    /// Check whether `util_ppm` more utilisation can be admitted without
+    /// exceeding the capacity ceiling.
     #[inline]
     #[must_use]
-    pub const fn can_allocate(&self, budget: Microseconds) -> bool {
-        self.total_allocated.saturating_add(budget) <= self.max_allocatable
+    pub const fn can_admit(&self, util_ppm: UtilisationPpm) -> bool {
+        self.allocated_ppm.saturating_add(util_ppm) <= self.capacity_ppm
     }
 
-    /// Record allocation of a new scheduling context.
+    /// Admit a newly-configured context contributing `util_ppm` utilisation.
+    /// Callers must have checked [`Self::can_admit`] first when growing.
     #[inline]
-    pub fn record_allocation(&mut self, budget: Microseconds) {
-        self.total_allocated = self.total_allocated.saturating_add(budget);
+    pub fn admit(&mut self, util_ppm: UtilisationPpm) {
+        self.allocated_ppm = self.allocated_ppm.saturating_add(util_ppm);
         self.context_count = self.context_count.saturating_add(1);
     }
 
-    /// Record deallocation of a scheduling context.
+    /// Adjust an already-admitted context's contribution from `old_ppm` to
+    /// `new_ppm` without changing the admitted-context count (reconfigure).
+    /// Callers must have checked [`Self::can_admit`] for any positive delta.
     #[inline]
-    pub fn record_deallocation(&mut self, budget: Microseconds) {
-        self.total_allocated = self.total_allocated.saturating_sub(budget);
+    pub fn reconfigure(&mut self, old_ppm: UtilisationPpm, new_ppm: UtilisationPpm) {
+        self.allocated_ppm = self.allocated_ppm.saturating_sub(old_ppm).saturating_add(new_ppm);
+    }
+
+    /// Release an admitted context's `util_ppm` contribution (on destroy),
+    /// decrementing the admitted-context count.
+    #[inline]
+    pub fn release(&mut self, util_ppm: UtilisationPpm) {
+        self.allocated_ppm = self.allocated_ppm.saturating_sub(util_ppm);
         self.context_count = self.context_count.saturating_sub(1);
     }
 
-    /// Remaining allocatable time.
+    /// Remaining admissible utilisation (ppm).
     #[inline]
     #[must_use]
-    pub const fn remaining_allocatable(&self) -> Microseconds {
-        self.max_allocatable.saturating_sub(self.total_allocated)
+    pub const fn remaining_ppm(&self) -> UtilisationPpm {
+        self.capacity_ppm.saturating_sub(self.allocated_ppm)
     }
 }
 
@@ -254,11 +312,39 @@ mod tests {
     }
 
     #[test_case]
-    fn test_sched_control() {
-        let mut ctrl = SchedControlObject::new(100_000);
-        assert!(ctrl.can_allocate(50_000));
-        ctrl.record_allocation(50_000);
-        assert!(ctrl.can_allocate(50_000));
-        assert!(!ctrl.can_allocate(50_001));
+    fn test_sched_context_utilisation_ppm() {
+        // 50% of one CPU.
+        assert_eq!(SchedContextObject::new(5_000, 10_000).utilisation_ppm(), 500_000);
+        // 100%.
+        assert_eq!(SchedContextObject::new(10_000, 10_000).utilisation_ppm(), FULL_CPU_PPM);
+        // Same utilisation, different period: still 50%.
+        assert_eq!(SchedContextObject::new(500, 1_000).utilisation_ppm(), 500_000);
+        // Unconfigured context contributes nothing.
+        assert_eq!(SchedContextObject::new(0, 0).utilisation_ppm(), 0);
+    }
+
+    #[test_case]
+    fn test_sched_control_admission() {
+        // Capacity = one full CPU.
+        let mut ctrl = SchedControlObject::new(FULL_CPU_PPM);
+        assert!(ctrl.can_admit(500_000));
+        ctrl.admit(500_000);
+        assert_eq!(ctrl.context_count, 1);
+        assert_eq!(ctrl.remaining_ppm(), 500_000);
+        // The other half still fits, but one ppm more does not.
+        assert!(ctrl.can_admit(500_000));
+        assert!(!ctrl.can_admit(500_001));
+
+        // Reconfigure the admitted context up to 80% — count unchanged.
+        ctrl.reconfigure(500_000, 800_000);
+        assert_eq!(ctrl.context_count, 1);
+        assert_eq!(ctrl.allocated_ppm, 800_000);
+        assert!(!ctrl.can_admit(200_001));
+
+        // Release frees the capacity and decrements the count.
+        ctrl.release(800_000);
+        assert_eq!(ctrl.context_count, 0);
+        assert_eq!(ctrl.allocated_ppm, 0);
+        assert!(ctrl.can_admit(FULL_CPU_PPM));
     }
 }

@@ -356,6 +356,9 @@ impl RevocationCallback for SlotClearCallback {
         if obj_ref.is_valid() {
             object_table::with_table(|t| {
                 if t.dec_ref(obj_ref) {
+                    // Utilisation to release back to a SchedControl, captured
+                    // below and applied after the immutable borrow ends.
+                    let mut sched_release: Option<(m6_cap::ObjectRef, u64)> = None;
                     // Ref count hit zero — free any heap-allocated resources.
                     if let Some(obj) = t.get(obj_ref) {
                         match obj.obj_type {
@@ -374,8 +377,27 @@ impl RevocationCallback for SlotClearCallback {
                                     unsafe { crate::cap::cnode_storage::destroy_cnode(ptr) };
                                 }
                             }
+                            KernelObjectType::SchedContext => {
+                                // SAFETY: type checked; sched_context is the active variant.
+                                let ctx = unsafe { &obj.data.sched_context };
+                                if ctx.admitting_control.is_valid() && ctx.admitted_ppm > 0 {
+                                    sched_release = Some((ctx.admitting_control, ctx.admitted_ppm));
+                                }
+                            }
                             _ => {}
                         }
+                    }
+                    // Release the destroyed context's admitted CPU utilisation
+                    // back to its SchedControl, so admission budget isn't leaked
+                    // by create/destroy churn.
+                    if let Some((control, util)) = sched_release
+                        && let Some(cobj) = t.get_mut(control)
+                        && cobj.obj_type == KernelObjectType::SchedControl
+                    {
+                        // SAFETY: type checked; sched_control is the active variant.
+                        let ctrl: &mut m6_cap::objects::SchedControlObject =
+                            unsafe { &mut cobj.data.sched_control };
+                        ctrl.release(util);
                     }
                     // SAFETY: ref count is zero and heap resources freed above.
                     unsafe { t.free(obj_ref) };

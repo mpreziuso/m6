@@ -38,23 +38,74 @@ pub fn handle_sched_control_configure(args: &SyscallArgs) -> SyscallResult {
     let period_us = args.arg3;
 
     // SchedControl is a singleton control authority: require full rights.
-    let _ctrl_cap =
-        ipc::lookup_cap(sched_control_cptr, ObjectType::SchedControl, CapRights::ALL)?;
+    let ctrl_cap = ipc::lookup_cap(sched_control_cptr, ObjectType::SchedControl, CapRights::ALL)?;
     let ctx_cap = ipc::lookup_cap(sched_context_cptr, ObjectType::SchedContext, CapRights::WRITE)?;
+    let ctrl_ref = ctrl_cap.obj_ref;
+    let ctx_ref = ctx_cap.obj_ref;
 
     // Validate the requested parameters against the object's invariants
     // (budget >= MIN_BUDGET, period >= MIN_PERIOD, budget <= period).
-    if !SchedContextObject::new(budget_us, period_us).is_valid() {
+    let requested = SchedContextObject::new(budget_us, period_us);
+    if !requested.is_valid() {
         return Err(SyscallError::InvalidArg);
     }
+    let new_util = requested.utilisation_ppm();
 
-    object_table::with_sched_context_mut(ctx_cap.obj_ref, |ctx| {
+    // -- Admission control.
+    //
+    // The SchedControl authority bounds the aggregate CPU utilisation of every
+    // context configured through it. This is what makes the "prevent denial of
+    // service through CPU exhaustion / time partitioning" guarantee real across
+    // multiple contexts, not just per-context. Accounting is in utilisation
+    // (ppm), so budgets with different periods compose correctly.
+
+    // What this context currently contributes, and to which control.
+    let (cur_ctrl, cur_util) =
+        object_table::with_sched_context(ctx_ref, |c| (c.admitting_control, c.admitted_ppm))
+            .ok_or(SyscallError::InvalidCap)?;
+
+    let already_here = cur_ctrl == ctrl_ref;
+    // Utilisation this context already counts for against *this* control (0 if
+    // it was unadmitted or admitted against a different control).
+    let prev_util = if already_here { cur_util } else { 0 };
+
+    // Apply the admission decision atomically under the object-table lock:
+    // reject if growing the utilisation would exceed the control's capacity.
+    let admitted = object_table::with_sched_control_mut(ctrl_ref, |ctrl| {
+        if new_util > prev_util && !ctrl.can_admit(new_util - prev_util) {
+            return false;
+        }
+        if already_here {
+            ctrl.reconfigure(prev_util, new_util);
+        } else {
+            ctrl.admit(new_util);
+        }
+        true
+    })
+    .ok_or(SyscallError::InvalidCap)?;
+    if !admitted {
+        return Err(SyscallError::QuotaExceeded);
+    }
+
+    // Admission to this control succeeded. If the context had been admitted
+    // against a *different* control (only possible with multiple SchedControls;
+    // defensive for the current singleton), release it there now — never before
+    // the new admission is granted, so a denial leaves all totals untouched.
+    if cur_ctrl.is_valid() && !already_here {
+        object_table::with_sched_control_mut(cur_ctrl, |ctrl| ctrl.release(cur_util));
+    }
+
+    object_table::with_sched_context_mut(ctx_ref, |ctx| {
         ctx.budget = budget_us;
         ctx.period = period_us;
         ctx.remaining = budget_us;
         ctx.extra_budget = 0;
         // Period starts when the context is next bound/replenished.
         ctx.period_start = 0;
+        // Record what we just admitted so reconfigure/destroy adjust by the
+        // right delta.
+        ctx.admitted_ppm = new_util;
+        ctx.admitting_control = ctrl_ref;
     })
     .ok_or(SyscallError::InvalidCap)?;
 

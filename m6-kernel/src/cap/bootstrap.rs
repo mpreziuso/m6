@@ -289,16 +289,24 @@ fn create_asid_control() -> BootstrapResult<ObjectRef> {
 /// Create the scheduling control object (singleton).
 ///
 /// SchedControl is the root authority for creating CPU-time budgets (MCS). It
-/// is minted into the root task's CSpace and never created via retype. The
-/// `max_allocatable` ceiling bounds the sum of configured context budgets; a
-/// generous default keeps it from artificially rejecting legitimate budgets
-/// while still providing accounting.
+/// is minted into the root task's CSpace and never created via retype. Its
+/// capacity ceiling bounds the aggregate CPU utilisation that may be admitted
+/// across all SchedContexts configured through it — this is what prevents CPU
+/// over-subscription / temporal-isolation failure. The ceiling is the total
+/// CPU time the machine actually has: one full CPU's worth per online core
+/// (`cpu_count * FULL_CPU_PPM`).
 fn create_sched_control() -> BootstrapResult<ObjectRef> {
+    let cpu_count = m6_pal::platform::platform()
+        .cpu_count()
+        .unwrap_or(1)
+        .max(1) as u64;
+    let capacity_ppm = cpu_count.saturating_mul(m6_cap::objects::sched::FULL_CPU_PPM);
+
     let obj_ref =
         object_table::alloc(KernelObjectType::SchedControl).ok_or(BootstrapError::NoObjectSlots)?;
     object_table::with_object_mut(obj_ref, |obj| {
         obj.data.sched_control =
-            ManuallyDrop::new(m6_cap::objects::SchedControlObject::new(u64::MAX));
+            ManuallyDrop::new(m6_cap::objects::SchedControlObject::new(capacity_ppm));
     })
     .ok_or(BootstrapError::NoObjectSlots)?;
     Ok(obj_ref)
@@ -798,13 +806,15 @@ fn create_user_boot_info(_boot_info: &BootInfo) -> BootstrapResult<PhysAddr> {
     } else {
         0 // Unknown
     };
-    info.cpu_count = 1; // Single CPU for now
+    info.cpu_count = m6_pal::platform::platform().cpu_count().unwrap_or(1).max(1);
 
     // SMMU availability
     info.has_smmu = if crate::smmu::is_available() { 1 } else { 0 };
     info.smmu_count = crate::smmu::get_smmu_count() as u8;
 
-    // Untyped regions - zeroed by default, TODO: populate with actual regions
+    // Untyped region descriptors (untyped_count/size_bits/phys_base/is_device)
+    // are filled in afterwards by update_user_boot_info_all_untyped, once the
+    // untyped capabilities have been created; they are left zeroed here.
 
     log::debug!(
         "Created UserBootInfo: phys={:#x}, platform={}, mem={}/{}",

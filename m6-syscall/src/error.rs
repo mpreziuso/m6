@@ -55,6 +55,8 @@ pub enum SyscallError {
     AlreadyMapped = -21,
     /// Address not mapped.
     NotMapped = -22,
+    /// Resource quota exceeded (e.g. SchedControl CPU-budget admission).
+    QuotaExceeded = -23,
 }
 
 impl SyscallError {
@@ -102,6 +104,7 @@ impl SyscallError {
             -20 => Some(Self::CircularDependency),
             -21 => Some(Self::AlreadyMapped),
             -22 => Some(Self::NotMapped),
+            -23 => Some(Self::QuotaExceeded),
             _ => None,
         }
     }
@@ -132,6 +135,7 @@ impl SyscallError {
             Self::CircularDependency => "CircularDependency",
             Self::AlreadyMapped => "AlreadyMapped",
             Self::NotMapped => "NotMapped",
+            Self::QuotaExceeded => "QuotaExceeded",
         }
     }
 }
@@ -139,7 +143,7 @@ impl SyscallError {
 /// The minimum (most negative) syscall error code. Used by IPC recv/call
 /// to distinguish kernel error codes from valid IPC message labels.
 /// Must be kept in sync with the last variant of `SyscallError`.
-pub const MIN_SYSCALL_ERROR: i64 = SyscallError::NotMapped as i64; // -22
+pub const MIN_SYSCALL_ERROR: i64 = SyscallError::QuotaExceeded as i64; // -23
 
 /// Syscall result type for userspace.
 pub type SyscallResult<T = i64> = Result<T, SyscallError>;
@@ -182,6 +186,7 @@ mod tests {
         (-20, SyscallError::CircularDependency),
         (-21, SyscallError::AlreadyMapped),
         (-22, SyscallError::NotMapped),
+        (-23, SyscallError::QuotaExceeded),
     ];
 
     #[test_case]
@@ -201,7 +206,7 @@ mod tests {
     #[test_case]
     fn test_from_i64_unmapped_values() {
         assert_eq!(SyscallError::from_i64(1), None);
-        assert_eq!(SyscallError::from_i64(-23), None);
+        assert_eq!(SyscallError::from_i64(-24), None);
         assert_eq!(SyscallError::from_i64(-100), None);
         assert_eq!(SyscallError::from_i64(i64::MIN), None);
         assert_eq!(SyscallError::from_i64(i64::MAX), None);
