@@ -591,7 +591,27 @@ pub fn run_starnix_task_loop(
                 let decl = SyscallDecl::from_number(nr, current_task.thread_state.arch_width());
                 let syscall = crate::arch::execution::new_syscall(decl, current_task);
 
-                match crate::syscall_table::dispatch_syscall(locked, current_task, &syscall) {
+                let result = crate::syscall_table::dispatch_syscall(locked, current_task, &syscall);
+
+                #[cfg(feature = "starnix-debug")]
+                {
+                    let rv = match &result {
+                        Ok(v) => v.value() as i64,
+                        Err(e) => e.return_value() as i64,
+                    };
+                    let msg = m6_starnix_std::format!(
+                        "[starnix] syscall {} {} ({:#x}, {:#x}, {:#x}) -> {:#x}\n",
+                        nr,
+                        decl.name(),
+                        syscall.arg0.raw(),
+                        syscall.arg1.raw(),
+                        syscall.arg2.raw(),
+                        rv,
+                    );
+                    debug_puts(&msg);
+                }
+
+                match result {
                     Ok(rv) => {
                         current_task
                             .thread_state
