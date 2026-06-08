@@ -2,7 +2,7 @@
 name = "m6-process-builder-shim"
 version = "0.1.0"
 edition = "2024"
-license = "BSD-3-Clause"
+license = "BSD-2-Clause"
 description = "Minimal no_std process_builder::elf_load shim for the M6 Starnix fork"
 
 [lib]

@@ -2,7 +2,7 @@
 name = "m6-fuchsia-trace-shim"
 version = "0.1.0"
 edition = "2024"
-license = "BSD-3-Clause"
+license = "BSD-2-Clause"
 description = "Minimal no-op fuchsia_trace shim for the M6 Starnix fork"
 
 [lib]

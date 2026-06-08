@@ -3,7 +3,7 @@ name = "m6-starnix-uapi"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "BSD-2-Clause"
 description = "Linux UAPI wrappers for Starnix (fork of Fuchsia starnix_uapi, adapted for M6)"
 
 [lib]

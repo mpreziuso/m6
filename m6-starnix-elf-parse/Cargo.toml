@@ -3,7 +3,7 @@ name = "m6-starnix-elf-parse"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "BSD-2-Clause"
 description = "Starnix-fork shim: elf_parse (M6 no_std)"
 
 [lib]

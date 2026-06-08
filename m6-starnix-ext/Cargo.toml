@@ -3,7 +3,7 @@ name = "m6-starnix-ext"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "BSD-2-Clause"
 description = "Std-ext shims for Starnix fork (replaces Fuchsia starnix_ext)"
 
 [lib]

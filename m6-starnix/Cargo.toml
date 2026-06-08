@@ -3,7 +3,7 @@ name = "m6-starnix"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "BSD-2-Clause"
 description = "Linux binary compatibility layer (Starnix fork adapted for M6)"
 
 [features]

@@ -19,3 +19,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+This repository also contains code forked from the Google Fuchsia project,
+which is licensed under the 2-Clause BSD License with an additional patent
+grant. See LICENSE.fuchsia and PATENTS.fuchsia for the full texts, and
+THIRD_PARTY_NOTICES.md for the list of affected components.

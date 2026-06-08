@@ -3,7 +3,7 @@ name = "m6-starnix-time-pretty"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "BSD-2-Clause"
 description = "Starnix-fork shim: time_pretty (M6 no_std)"
 
 [lib]

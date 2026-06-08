@@ -3,7 +3,7 @@ name = "m6-starnix-expando"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "BSD-2-Clause"
 description = "Lazy per-type storage shim for Starnix fork (replaces Fuchsia expando)"
 
 [lib]

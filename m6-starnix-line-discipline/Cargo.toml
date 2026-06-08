@@ -3,7 +3,7 @@ name = "m6-starnix-line-discipline"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "BSD-2-Clause"
 description = "Starnix-fork shim: line_discipline (M6 no_std)"
 
 [lib]

@@ -3,7 +3,7 @@ name = "m6-starnix-filter-methods-macro"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "BSD-2-Clause"
 description = "filter_methods! proc-macro shim for Starnix fork"
 
 [lib]

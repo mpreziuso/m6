@@ -3,7 +3,7 @@ name = "m6-starnix-atomic-bitflags"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
-license.workspace = true
+license = "BSD-2-Clause"
 description = "Atomic bitflags macro shim for Starnix fork (no_std: core::sync::atomic)"
 
 [lib]
