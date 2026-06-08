@@ -137,6 +137,9 @@ pub enum SpawnError {
     DeviceUntypedNotFound,
     /// IOMMU required but not available (security violation)
     IommuRequired,
+    /// DMA-capable driver lacks IOMMU protection and is not an audited,
+    /// platform-justified carve-out (§3 deny-by-default DMA policy).
+    DmaWithoutIommu,
     /// Failed to allocate MSI vectors
     MsiAllocateFailed(SyscallError),
     /// Failed to setup MSI-X interrupts
@@ -333,6 +336,44 @@ pub fn spawn_driver(
         return Err(SpawnError::DeviceUntypedNotFound);
     }
 
+    // -- SECURITY (§3): no unprotected DMA by default.
+    //
+    // A DMA-capable driver must route through an IOMMU (`needs_iommu`) unless it
+    // carries an explicit, audited acknowledgement (`dma_without_iommu`). Failing
+    // to declare either is a configuration error and is refused here — never
+    // silently granted physical-addressed DMA. The carve-out is only honoured on
+    // RK3588, whose PHP SMMU (mmu600_php) is disabled in silicon; on any other
+    // platform (or if the SoC can't be positively identified) it is denied.
+    if config.manifest.needs_dma && !config.manifest.needs_iommu {
+        if !config.manifest.dma_without_iommu {
+            log::error!(
+                "SECURITY: refusing DMA-capable driver '{}' without IOMMU protection \
+                 (needs_dma=true, needs_iommu=false, no audited carve-out)",
+                config.manifest.binary_name
+            );
+            return Err(SpawnError::DmaWithoutIommu);
+        }
+        // SAFETY: dtb_slice reads the init-provided, read-only DTB mapping that
+        // remains valid for device-mgr's lifetime.
+        let on_rk3588 = unsafe { boot_info.dtb_slice() }
+            .map(crate::dtb::is_rk3588)
+            .unwrap_or(false);
+        if !on_rk3588 {
+            log::error!(
+                "SECURITY: refusing IOMMU-less DMA carve-out for '{}' — platform is not \
+                 RK3588, so there is no SMMU-disabled-in-silicon justification",
+                config.manifest.binary_name
+            );
+            return Err(SpawnError::DmaWithoutIommu);
+        }
+        log::warn!(
+            "SECURITY AUDIT: spawning '{}' with physical-addressed DMA and NO IOMMU \
+             protection (RK3588 PHP SMMU disabled in silicon). This driver is fully \
+             trusted for memory safety and is part of the system TCB.",
+            config.manifest.binary_name
+        );
+    }
+
     // Parse ELF binary
     let elf = Elf64::parse(config.elf_data)?;
 
@@ -366,7 +407,8 @@ pub fn spawn_driver(
     let has_smmu_control = config.manifest.needs_iommu;
 
     // Allocate DMA buffer frames for DMA-capable drivers (USB, NVMe, VirtIO, etc.)
-    // Note: needs_dma can be true even when needs_iommu is false (e.g., when SMMU is broken)
+    // A driver reaching this point with needs_dma && !needs_iommu has already
+    // passed the audited `dma_without_iommu` carve-out check above.
     let dma_buffer_slots: Option<[u64; slots::driver::DMA_BUFFER_COUNT]> =
         if config.manifest.needs_dma || config.manifest.needs_iommu {
             let mut dma_slots = [0u64; slots::driver::DMA_BUFFER_COUNT];

@@ -301,6 +301,20 @@ pub fn get_platform_name(fdt_data: &[u8]) -> Option<&str> {
     root.compatible().all().next()
 }
 
+/// Return true if the device tree identifies an RK3588 SoC.
+///
+/// Scans the root node's `compatible` list (rather than the board `model`) so
+/// it matches every RK3588 board regardless of vendor. Used to gate the
+/// IOMMU-less DMA carve-out: RK3588 is the only platform where a DMA-capable
+/// driver may legitimately bypass the SMMU, because its PHP SMMU (mmu600_php)
+/// is disabled in silicon. Returns false if the DTB cannot be parsed.
+pub fn is_rk3588(fdt_data: &[u8]) -> bool {
+    let Ok(fdt) = fdt::Fdt::new(fdt_data) else {
+        return false;
+    };
+    fdt.root().compatible().all().any(|c| c.contains("rk3588"))
+}
+
 /// Get memory information from DTB.
 pub fn get_memory_info(fdt_data: &[u8]) -> Option<(u64, u64)> {
     let fdt = fdt::Fdt::new(fdt_data).ok()?;

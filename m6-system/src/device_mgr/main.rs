@@ -1694,6 +1694,9 @@ fn spawn_driver_for_device(registry: &mut Registry, device_idx: usize) -> u64 {
                 spawn::SpawnError::TooManyDrivers => "too many drivers",
                 spawn::SpawnError::DeviceUntypedNotFound => "device untyped not found",
                 spawn::SpawnError::IommuRequired => "IOMMU required but not available",
+                spawn::SpawnError::DmaWithoutIommu => {
+                    "DMA-capable driver refused: no IOMMU and no audited carve-out"
+                }
                 spawn::SpawnError::MsiAllocateFailed(err) => err.name(),
                 spawn::SpawnError::MsixSetupFailed => "MSI-X setup failed",
                 spawn::SpawnError::InvalidDeviceConfig => "invalid device config (no MMIO address)",

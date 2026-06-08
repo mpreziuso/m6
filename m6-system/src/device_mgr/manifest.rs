@@ -34,6 +34,17 @@ pub struct DriverManifest {
     pub needs_iommu: bool,
     /// Whether driver needs DMA buffers (can be true even with needs_iommu=false)
     pub needs_dma: bool,
+    /// Explicit, audited acknowledgement that this driver performs DMA WITHOUT
+    /// IOMMU protection (physical-addressed DMA).
+    ///
+    /// The design's §3 security policy is deny-by-default: a `needs_dma` driver
+    /// must route through an IOMMU (`needs_iommu`) unless this flag is set. The
+    /// only legitimate use is a device whose SMMU is disabled in silicon (e.g.
+    /// the RK3588 PHP SMMU, `mmu600_php`), so the spawner additionally gates this
+    /// on RK3588 and logs every such spawn. A driver with `needs_dma == true`,
+    /// `needs_iommu == false`, and this flag `false` is refused, never silently
+    /// granted unprotected DMA.
+    pub dma_without_iommu: bool,
     /// Whether this is a platform device (vs PCIe)
     pub is_platform: bool,
     /// VirtIO device ID filter (0 = match any/non-virtio device)
@@ -120,6 +131,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: false, // SMMU doesn't use itself
         needs_dma: false,
+        dma_without_iommu: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -133,6 +145,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
+        dma_without_iommu: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -145,6 +158,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
+        dma_without_iommu: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -157,6 +171,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
+        dma_without_iommu: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -170,6 +185,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: true,
         needs_dma: true,
+        dma_without_iommu: false,
         is_platform: true,
         virtio_device_id: 2, // VirtIO block device
         additional_frames: &[],
@@ -183,6 +199,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
+        dma_without_iommu: false,
         is_platform: true,
         virtio_device_id: 0, // Match any (fallback)
         additional_frames: &[],
@@ -198,6 +215,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: true,
         needs_iommu: true,
         needs_dma: true,
+        dma_without_iommu: false,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -211,6 +229,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: true,
         needs_iommu: true,
         needs_dma: true,
+        dma_without_iommu: false,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -224,6 +243,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: true,
         needs_iommu: true,
         needs_dma: true,
+        dma_without_iommu: false,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -238,6 +258,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: true,
         needs_iommu: true,
         needs_dma: true,
+        dma_without_iommu: false,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -251,6 +272,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: true,
         needs_dma: true,
+        dma_without_iommu: false,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -270,6 +292,10 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         // SMMU at the SoC interconnect, so physical addresses are used directly.
         needs_iommu: false,
         needs_dma: true,
+        // Audited carve-out: physically-addressed DMA without IOMMU protection.
+        // Honoured only on RK3588 (PHP SMMU disabled in silicon) and logged at
+        // spawn time — see spawn_driver's deny-by-default DMA policy check.
+        dma_without_iommu: true,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: DWC3_ADDITIONAL_FRAMES,
@@ -283,6 +309,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
+        dma_without_iommu: false,
         is_platform: false,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -296,6 +323,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
+        dma_without_iommu: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -308,6 +336,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
+        dma_without_iommu: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
@@ -320,6 +349,7 @@ pub static DRIVER_MANIFEST: &[DriverManifest] = &[
         needs_msix: false,
         needs_iommu: false,
         needs_dma: false,
+        dma_without_iommu: false,
         is_platform: true,
         virtio_device_id: 0,
         additional_frames: &[],
