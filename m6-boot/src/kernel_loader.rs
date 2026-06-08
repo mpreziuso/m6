@@ -13,8 +13,12 @@ use elf_rs::{Elf, ElfFile, ProgramType};
 use uefi::boot::{self, AllocateType, MemoryType};
 use uefi::proto::rng::Rng;
 
-/// Maximum number of loadable segments we track
-pub const MAX_SEGMENTS: usize = 8;
+/// Maximum number of loadable segments we track.
+///
+/// A PIE kernel can emit more PT_LOAD segments than a static one (dynamic
+/// metadata), so this is sized with margin. If the kernel ever exceeds it,
+/// load_kernel logs and refuses rather than silently dropping segments.
+pub const MAX_SEGMENTS: usize = 24;
 
 /// Information about a loadable kernel segment
 #[derive(Clone, Copy, Default)]
@@ -257,19 +261,26 @@ pub fn load_kernel(cpu_count: u32) -> uefi::Result<LoadedKernel> {
             min_vaddr = min_vaddr.min(vaddr);
             max_vaddr = max_vaddr.max(vaddr + memsz);
 
-            // Collect segment permission information
-            if segment_count < MAX_SEGMENTS {
-                let flags = phdr.flags();
-                use elf_rs::ProgramHeaderFlags;
-                segments[segment_count] = KernelSegment {
-                    virt_offset: vaddr, // Will adjust after finding min_vaddr
-                    size: memsz,
-                    read: flags.contains(ProgramHeaderFlags::READ),
-                    write: flags.contains(ProgramHeaderFlags::WRITE),
-                    execute: flags.contains(ProgramHeaderFlags::EXECUTE),
-                };
-                segment_count += 1;
+            // Collect segment permission information. Refuse loudly rather than
+            // silently dropping segments — an unmapped .data/.bss would fault
+            // the kernel the instant it touches a global.
+            if segment_count >= MAX_SEGMENTS {
+                log::error!(
+                    "Kernel has more than {} PT_LOAD segments; increase MAX_SEGMENTS",
+                    MAX_SEGMENTS
+                );
+                return Err(uefi::Status::LOAD_ERROR.into());
             }
+            let flags = phdr.flags();
+            use elf_rs::ProgramHeaderFlags;
+            segments[segment_count] = KernelSegment {
+                virt_offset: vaddr, // Will adjust after finding min_vaddr
+                size: memsz,
+                read: flags.contains(ProgramHeaderFlags::READ),
+                write: flags.contains(ProgramHeaderFlags::WRITE),
+                execute: flags.contains(ProgramHeaderFlags::EXECUTE),
+            };
+            segment_count += 1;
         }
     }
 

@@ -40,8 +40,12 @@ SECTIONS
         __rodata_end = .;
     }
 
-    /* PIE dynamic-linker metadata (unused at runtime; kept contiguous so it
-       doesn't perturb the segment layout). */
+    /* PIE dynamic-linker metadata. These have special section types
+       (SHT_DYNSYM/SHT_RELA/SHT_DYNAMIC) so they cannot be folded into a
+       PROGBITS section; lld emits a small PT_LOAD per section. The bootloader
+       therefore tracks up to MAX_SEGMENTS (>= the count here) and reads
+       .rela.dyn via its section header. The kernel never dynamic-links: these
+       are consumed by the bootloader's relocation pass only. */
     .dynsym   : AT(ADDR(.dynsym)   - KERNEL_VIRT_BASE) { *(.dynsym) }
     .dynstr   : AT(ADDR(.dynstr)   - KERNEL_VIRT_BASE) { *(.dynstr) }
     .hash     : AT(ADDR(.hash)     - KERNEL_VIRT_BASE) { *(.hash) }
@@ -49,8 +53,7 @@ SECTIONS
     .dynamic  : AT(ADDR(.dynamic)  - KERNEL_VIRT_BASE) { *(.dynamic) }
     .got      : AT(ADDR(.got)      - KERNEL_VIRT_BASE) { *(.got) *(.got.plt) }
 
-    /* Dynamic relocations — the KASLR self-relocation loop walks
-       [__rela_start, __rela_end) applying R_AARCH64_RELATIVE entries. */
+    /* Dynamic relocations applied by the bootloader (all R_AARCH64_RELATIVE). */
     . = ALIGN(8);
     .rela.dyn : AT(ADDR(.rela.dyn) - KERNEL_VIRT_BASE)
     {
