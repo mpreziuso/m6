@@ -85,6 +85,49 @@ pub struct TcbFull {
     pub restricted_normal_ctx: ExceptionContext,
     /// Kick-pending flag: set by another thread to force restricted exit.
     pub restricted_kick_pending: bool,
+
+    /// Per-thread Pointer Authentication keys, reloaded on context switch so
+    /// PAC-signed pointers cannot be forged across thread boundaries. Inert on
+    /// CPUs without FEAT_PAuth (kept zeroed and never loaded).
+    pub pac_keys: m6_arch::cpu::PacKeys,
+}
+
+/// Generate per-thread PAC keys.
+///
+/// Returns all-zero keys on CPUs without FEAT_PAuth (they are never loaded
+/// there). Otherwise fills all five 128-bit keys with entropy from the
+/// hardware RNG, falling back to the generic-timer counter run through a
+/// SplitMix64 step so the keys differ per thread even without FEAT_RNG.
+fn generate_pac_keys() -> m6_arch::cpu::PacKeys {
+    let mut keys = m6_arch::cpu::PacKeys::default();
+    if !m6_arch::cpu::features::has_pac() {
+        return keys;
+    }
+    for word in [
+        &mut keys.apia,
+        &mut keys.apib,
+        &mut keys.apda,
+        &mut keys.apdb,
+        &mut keys.apga,
+    ] {
+        word[0] = pac_key_entropy();
+        word[1] = pac_key_entropy();
+    }
+    keys
+}
+
+/// One 64-bit unit of PAC-key entropy.
+fn pac_key_entropy() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    // Monotonic salt so timer-fallback reads decorrelate across calls.
+    static SALT: AtomicU64 = AtomicU64::new(0x9E37_79B9_7F4A_7C15);
+    let base = m6_arch::cpu::read_random().unwrap_or_else(m6_pal::timer::read_counter);
+    let s = SALT.fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+    // SplitMix64 finaliser to spread weak timer entropy across all bits.
+    let mut z = base.wrapping_add(s);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 impl TcbFull {
@@ -123,6 +166,7 @@ impl TcbFull {
             // SAFETY: ExceptionContext is repr(C) with only integer fields.
             restricted_normal_ctx: unsafe { core::mem::zeroed() },
             restricted_kick_pending: false,
+            pac_keys: generate_pac_keys(),
         }
     }
 
@@ -169,6 +213,8 @@ impl TcbFull {
             (*tcb).restricted_normal_vspace = ObjectRef::NULL;
             // restricted_normal_ctx: already zeroed by alloc_zeroed
             (*tcb).restricted_kick_pending = false;
+            // Per-thread PAC keys (zeroed by alloc_zeroed if FEAT_PAuth absent).
+            (*tcb).pac_keys = generate_pac_keys();
         }
 
         NonNull::new(tcb)

@@ -36,6 +36,19 @@ use crate::cap::object_table::{self, KernelObjectType};
 ///
 /// When the IRQ handler returns via `eret`, the CPU will resume
 /// executing the NEW task.
+/// Load a thread's per-thread PAC keys into the EL1 key registers.
+///
+/// No-op on CPUs without FEAT_PAuth (the keys are zero and the registers do not
+/// exist). Reloading whenever a thread is switched in gives per-thread PAC key
+/// isolation so signed pointers cannot be forged across thread boundaries.
+#[inline]
+fn load_thread_pac_keys(tcb: &crate::cap::tcb_storage::TcbFull) {
+    if m6_arch::cpu::features::has_pac() {
+        // SAFETY: gated on FEAT_PAuth support.
+        unsafe { tcb.pac_keys.load() };
+    }
+}
+
 pub fn context_switch(sched: &mut PerCpuSched, ctx: &mut ExceptionContext) {
     // Save current task's context from exception frame
     if let Some(current_ref) = sched.current() {
@@ -93,6 +106,9 @@ pub fn context_switch(sched: &mut PerCpuSched, ctx: &mut ExceptionContext) {
 
             log::trace!("context_switch: applied pending IPC msg for {:?}", next);
         }
+
+        // Load this thread's PAC keys for the upcoming run.
+        load_thread_pac_keys(tcb);
     });
 }
 
@@ -212,6 +228,7 @@ pub fn switch_to_task(sched: &mut PerCpuSched, tcb_ref: ObjectRef, ctx: &mut Exc
     // Restore context
     with_tcb(tcb_ref, |tcb| {
         *ctx = tcb.context.clone();
+        load_thread_pac_keys(tcb);
     });
 
     // Switch VSpace
@@ -241,8 +258,9 @@ pub fn enter_userspace() -> ! {
 
     switch_vspace(vspace_ref);
 
-    // Get context and perform eret
+    // Get context (and load this thread's PAC keys) before the eret
     let (elr, sp, spsr, x0) = with_tcb(tcb_ref, |tcb| {
+        load_thread_pac_keys(tcb);
         (
             tcb.context.elr,
             tcb.context.sp,

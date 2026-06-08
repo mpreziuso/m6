@@ -193,6 +193,72 @@ pub fn read_random() -> Option<u64> {
     if success != 0 { Some(val) } else { None }
 }
 
+/// Per-thread Pointer Authentication (PAC) keys.
+///
+/// Five 128-bit keys — instruction A/B, data A/B, and generic — stored per
+/// thread and reloaded on every context switch so PAC-signed pointers cannot be
+/// forged across thread boundaries (spec §1 "PAC key management per thread").
+///
+/// The key registers only exist on CPUs implementing FEAT_PAuth; accessing them
+/// is UNDEFINED otherwise (e.g. the QEMU cortex-a72 dev target), so every load
+/// is gated on [`features::has_pac`]. Raw S-register encodings are used so the
+/// assembler accepts them regardless of the build's target-feature set.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct PacKeys {
+    /// Instruction key A (Lo, Hi).
+    pub apia: [u64; 2],
+    /// Instruction key B (Lo, Hi).
+    pub apib: [u64; 2],
+    /// Data key A (Lo, Hi).
+    pub apda: [u64; 2],
+    /// Data key B (Lo, Hi).
+    pub apdb: [u64; 2],
+    /// Generic key (Lo, Hi).
+    pub apga: [u64; 2],
+}
+
+impl PacKeys {
+    /// Load these keys into the EL1 PAC key registers.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must implement FEAT_PAuth — check [`features::has_pac`] first.
+    /// On a CPU without it, the key-register accesses are UNDEFINED.
+    #[inline]
+    pub unsafe fn load(&self) {
+        // SAFETY: caller guarantees FEAT_PAuth is present. The S-encodings are
+        // APIAKey/APIBKey (C2_C1), APDAKey/APDBKey (C2_C2), APGAKey (C2_C3),
+        // Lo = op2 0/2, Hi = op2 1/3.
+        unsafe {
+            asm!(
+                "msr s3_0_c2_c1_0, {ialo}", // APIAKeyLo_EL1
+                "msr s3_0_c2_c1_1, {iahi}", // APIAKeyHi_EL1
+                "msr s3_0_c2_c1_2, {iblo}", // APIBKeyLo_EL1
+                "msr s3_0_c2_c1_3, {ibhi}", // APIBKeyHi_EL1
+                "msr s3_0_c2_c2_0, {dalo}", // APDAKeyLo_EL1
+                "msr s3_0_c2_c2_1, {dahi}", // APDAKeyHi_EL1
+                "msr s3_0_c2_c2_2, {dblo}", // APDBKeyLo_EL1
+                "msr s3_0_c2_c2_3, {dbhi}", // APDBKeyHi_EL1
+                "msr s3_0_c2_c3_0, {galo}", // APGAKeyLo_EL1
+                "msr s3_0_c2_c3_1, {gahi}", // APGAKeyHi_EL1
+                "isb",
+                ialo = in(reg) self.apia[0],
+                iahi = in(reg) self.apia[1],
+                iblo = in(reg) self.apib[0],
+                ibhi = in(reg) self.apib[1],
+                dalo = in(reg) self.apda[0],
+                dahi = in(reg) self.apda[1],
+                dblo = in(reg) self.apdb[0],
+                dbhi = in(reg) self.apdb[1],
+                galo = in(reg) self.apga[0],
+                gahi = in(reg) self.apga[1],
+                options(nomem, nostack),
+            );
+        }
+    }
+}
+
 /// Physical Address Range detection
 pub mod pa_range {
     use aarch64_cpu::registers::{ID_AA64MMFR0_EL1, Readable};
