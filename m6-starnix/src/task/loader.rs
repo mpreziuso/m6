@@ -590,6 +590,16 @@ pub fn load_executable(
     // even though entry points would normally all be in the lower 1Gb.
     let entry = UserAddress::from_ptr(entry_addr);
 
+    #[cfg(feature = "starnix-debug")]
+    {
+        let (ib, il) = interp_elf.as_ref().map_or((0, 0), |i| (i.file_base, i.length));
+        let msg = m6_starnix_std::format!(
+            "[starnix] exec: entry={:#x} main_base={:#x} main_entry={:#x} phdr={:#x} interp_base={:#x} interp_len={:#x}\n",
+            entry_addr, main_elf.file_base, main_elf_entry, main_phdr, ib, il,
+        );
+        m6_syscall::invoke::debug_puts(&msg);
+    }
+
     let vdso_memory = if main_elf.arch_width.is_arch32() {
         &current_task.kernel().vdso_arch32.as_ref().expect("an arch32 VDSO").memory
     } else {
@@ -684,7 +694,20 @@ pub fn load_executable(
         } else {
             current_task.kernel().hwcaps.arch64
         };
-        vec![
+        // Only advertise the vDSO (AT_SYSINFO_EHDR) if it is a real ELF image.
+        // The M6 bring-up vDSO is a zeroed stub (`Vdso::new` on the non-fuchsia
+        // path creates a blank page, not an ELF). A *dynamic* linker reads the
+        // advertised header, adds it as a DSO, finds no PT_DYNAMIC (e_phnum == 0),
+        // leaves its `dynv` NULL, and later faults decoding that NULL dynamic
+        // section (musl `decode_vec`). Without AT_SYSINFO_EHDR the program just
+        // falls back to real syscalls for clock_gettime/getcpu/etc. Static musl
+        // tolerated the stub (it never built a DSO list), which is why busybox and
+        // the static-PIE test ran with it advertised.
+        let vdso_is_elf = vdso_memory
+            .read_to_array::<u8, 4>(0)
+            .map(|m| m == [0x7f, b'E', b'L', b'F'])
+            .unwrap_or(false);
+        let mut auxv = vec![
             (AT_PAGESZ, *PAGE_SIZE),
             (AT_CLKTCK, SCHEDULER_CLOCK_HZ as u64),
             (AT_UID, creds.uid as u64),
@@ -696,11 +719,14 @@ pub fn load_executable(
             (AT_PHNUM, main_elf.headers.file_header().phnum as u64),
             (AT_BASE, interp_elf.map_or(0, |interp| interp.file_base as u64)),
             (AT_ENTRY, main_elf_entry as u64),
-            (AT_SYSINFO_EHDR, vdso_base_address.into()),
             (AT_SECURE, secure),
             (AT_HWCAP, hwcap.hwcap as u64),
             (AT_HWCAP2, hwcap.hwcap2 as u64),
-        ]
+        ];
+        if vdso_is_elf {
+            auxv.push((AT_SYSINFO_EHDR, vdso_base_address.into()));
+        }
+        auxv
     };
 
     // TODO(tbodt): implement MAP_GROWSDOWN and then reset this to 1 page. The current value of
