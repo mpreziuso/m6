@@ -116,6 +116,40 @@ pub fn handle_timer_control_get(args: &SyscallArgs) -> SyscallResult {
     Ok(0)
 }
 
+/// Handle SetTime syscall.
+///
+/// Establishes the system wall clock from a userspace time service. The clock
+/// source (RTC, NTP, ...) is policy and lives in userspace; the kernel only
+/// records the offset between the monotonic counter and the Unix epoch.
+///
+/// Authority is the TimerControl capability — the singleton that grants control
+/// over system timekeeping — so unprivileged tasks cannot tamper with the
+/// clock. Reading it back (GetTime) is unprivileged.
+///
+/// # ABI
+///
+/// - x0: TimerControl capability pointer
+/// - x1: Wall-clock time in nanoseconds since the Unix epoch
+///
+/// # Returns
+///
+/// - 0 on success
+/// - Negative error code on failure
+pub fn handle_set_time(args: &SyscallArgs) -> SyscallResult {
+    let timer_control_cptr = args.arg0;
+    let wall_ns = args.arg1;
+
+    // TimerControl WRITE authority is required to set the system clock.
+    let _control_cap = ipc::lookup_cap(
+        timer_control_cptr,
+        ObjectType::TimerControl,
+        CapRights::WRITE,
+    )?;
+
+    m6_pal::timer::set_wall_clock_ns(wall_ns);
+    Ok(0)
+}
+
 /// Handle TimerBind syscall.
 ///
 /// Binds a timer to a notification object.

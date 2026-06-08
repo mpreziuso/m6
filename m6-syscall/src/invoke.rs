@@ -1590,6 +1590,54 @@ pub fn get_random(buf: &mut [u8]) -> SyscallResult {
     ))
 }
 
+// -- Wall clock (real time)
+
+/// Read the system wall clock.
+///
+/// Returns the current real-world time as nanoseconds since the Unix epoch
+/// (1970-01-01T00:00:00Z). This is a self-invocation and requires no
+/// capability — reading the clock is unprivileged.
+///
+/// # Returns
+///
+/// Nanoseconds since the Unix epoch.
+///
+/// # Errors
+///
+/// * `InvalidState` - No time service has set the wall clock yet.
+#[inline]
+pub fn get_time() -> SyscallResult<u64> {
+    check_result(invoke2(SELF_CAP, method::current::GET_TIME)).map(|ns| ns as u64)
+}
+
+/// Set the system wall clock.
+///
+/// Establishes real-world time for the whole system. Requires the TimerControl
+/// capability — the timekeeping authority — so only a privileged time service
+/// (RTC or NTP policy) can call it.
+///
+/// # Arguments
+///
+/// * `timer_control` - Capability pointer to the TimerControl object.
+/// * `wall_ns` - Current real time as nanoseconds since the Unix epoch.
+///
+/// # Returns
+///
+/// 0 on success.
+///
+/// # Errors
+///
+/// * `InvalidCap` / `NoRights` - The capability is not a TimerControl with
+///   write authority.
+#[inline]
+pub fn set_time(timer_control: u64, wall_ns: u64) -> SyscallResult {
+    check_result(invoke3(
+        timer_control,
+        method::timer_control::SET_TIME,
+        wall_ns,
+    ))
+}
+
 // -- Cache Maintenance Operations
 
 /// DMA transfer direction for cache maintenance.

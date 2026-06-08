@@ -4,7 +4,7 @@
 //! - Time measurement
 //! - Periodic interrupts for preemption
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use aarch64_cpu::registers::{CNTFRQ_EL0, CNTV_CTL_EL0, CNTV_CVAL_EL0, CNTVCT_EL0};
 use tock_registers::interfaces::{Readable, Writeable};
@@ -123,6 +123,50 @@ pub fn now_ms() -> u64 {
     let secs = count / freq;
     let frac = count % freq;
     secs * 1_000 + (frac * 1_000) / freq
+}
+
+// -- Wall clock (real time)
+//
+// The generic timer only measures a monotonic count since boot. Real-world
+// (UTC) time is policy: a userspace time service (RTC or NTP) establishes it
+// via the SetTime syscall. The kernel keeps only the mechanism — the offset
+// between the monotonic counter and the Unix epoch — and derives the current
+// wall time on demand. Until a time service sets it, the wall clock is
+// unavailable.
+
+/// Wall-clock time, in nanoseconds since the Unix epoch, that corresponds to
+/// monotonic time zero (boot). Adding `now_ns()` to this yields the current
+/// wall-clock time. Only meaningful once `WALL_CLOCK_SET` is true.
+static WALL_CLOCK_EPOCH_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether a time service has established the wall clock.
+static WALL_CLOCK_SET: AtomicBool = AtomicBool::new(false);
+
+/// Establish the wall clock from a userspace time service.
+///
+/// `wall_ns` is the current real time expressed as nanoseconds since the Unix
+/// epoch (1970-01-01T00:00:00Z). The kernel records the implied boot epoch so
+/// that subsequent [`wall_clock_ns`] calls advance with the monotonic counter.
+pub fn set_wall_clock_ns(wall_ns: u64) {
+    let epoch_ns = wall_ns.saturating_sub(now_ns());
+    WALL_CLOCK_EPOCH_NS.store(epoch_ns, Ordering::Relaxed);
+    WALL_CLOCK_SET.store(true, Ordering::Release);
+}
+
+/// Current wall-clock time in nanoseconds since the Unix epoch.
+///
+/// Returns `None` if no time service has set the clock yet.
+pub fn wall_clock_ns() -> Option<u64> {
+    if !WALL_CLOCK_SET.load(Ordering::Acquire) {
+        return None;
+    }
+    let epoch_ns = WALL_CLOCK_EPOCH_NS.load(Ordering::Relaxed);
+    Some(now_ns().saturating_add(epoch_ns))
+}
+
+/// Whether a time service has established the wall clock.
+pub fn wall_clock_is_set() -> bool {
+    WALL_CLOCK_SET.load(Ordering::Acquire)
 }
 
 /// Set the timer to fire after a given number of ticks

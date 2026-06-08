@@ -67,6 +67,24 @@ pub fn handle_get_random(args: &SyscallArgs) -> SyscallResult {
     Ok(buf_len as i64)
 }
 
+/// Handle GetTime syscall.
+///
+/// Returns the current wall-clock time in nanoseconds since the Unix epoch.
+///
+/// Reading the clock is unprivileged (a self-invocation), mirroring the
+/// directly-readable monotonic counter. The wall clock must first have been
+/// established by a time service via SetTime; until then this returns
+/// `InvalidState`.
+pub fn handle_get_time(_args: &SyscallArgs) -> SyscallResult {
+    match m6_pal::timer::wall_clock_ns() {
+        // Nanoseconds since the Unix epoch fit comfortably in the positive
+        // range of an i64 until the year 2262, so this never collides with the
+        // negative error encoding.
+        Some(ns) => Ok(ns as i64),
+        None => Err(SyscallError::InvalidState),
+    }
+}
+
 /// Fill buffer with random bytes.
 ///
 /// Uses ARMv8.5 RNDR instruction if available, with fallback to

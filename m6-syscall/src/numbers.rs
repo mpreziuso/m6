@@ -36,6 +36,8 @@ pub mod method {
         pub const CACHE_INVALIDATE: u64 = 4;
         pub const CACHE_FLUSH: u64 = 5;
         pub const RESTRICTED_BIND: u64 = 6;
+        /// Read the wall clock (nanoseconds since the Unix epoch). Unprivileged.
+        pub const GET_TIME: u64 = 7;
     }
 
     /// Untyped memory operations.
@@ -111,6 +113,9 @@ pub mod method {
     /// Timer control operations.
     pub mod timer_control {
         pub const GET: u64 = 0;
+        /// Set the system wall clock (nanoseconds since the Unix epoch).
+        /// Requires the TimerControl capability — the timekeeping authority.
+        pub const SET_TIME: u64 = 1;
     }
 
     /// Timer operations.

@@ -162,6 +162,7 @@ fn dispatch_self(label: u64, args: &SyscallArgs) -> SyscallResult {
         method::current::EXIT => tcb_ops::handle_tcb_exit(&repacked),
         method::current::SLEEP => tcb_ops::handle_tcb_sleep(&repacked),
         method::current::GET_RANDOM => misc_ops::handle_get_random(&repacked),
+        method::current::GET_TIME => misc_ops::handle_get_time(&repacked),
         method::current::CACHE_CLEAN => cache_ops::handle_cache_clean(&repacked),
         method::current::CACHE_INVALIDATE => cache_ops::handle_cache_invalidate(&repacked),
         method::current::CACHE_FLUSH => cache_ops::handle_cache_flush(&repacked),
@@ -254,6 +255,7 @@ fn dispatch_irq_control(
 fn dispatch_timer_control(label: u64, args: &SyscallArgs) -> SyscallResult {
     match label {
         method::timer_control::GET => timer_ops::handle_timer_control_get(&shift_args(args)),
+        method::timer_control::SET_TIME => timer_ops::handle_set_time(&shift_args(args)),
         _ => Err(SyscallError::InvalidArg),
     }
 }
