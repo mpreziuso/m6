@@ -146,6 +146,31 @@ fn mkdir(
     Ok(())
 }
 
+/// Create a character-device node at an absolute path on the root tmpfs. Opening
+/// it routes through the device registry to the ops registered by
+/// [`mem_device_init`](crate::device::mem::mem_device_init).
+fn mknod_char(
+    locked: &mut starnix_sync::Locked<Unlocked>,
+    current_task: &CurrentTask,
+    path: &[u8],
+    dev: DeviceType,
+) -> Result<(), Errno> {
+    let (parent, basename) = current_task.lookup_parent_at(
+        locked,
+        &mut LookupContext::default(),
+        FdNumber::AT_FDCWD,
+        path.into(),
+    )?;
+    parent.create_node(
+        locked,
+        current_task,
+        basename,
+        FileMode::from_bits(0o666).with_type(FileMode::IFCHR),
+        dev,
+    )?;
+    Ok(())
+}
+
 /// Create a regular file with `content` at an absolute path on the root tmpfs.
 /// Write `content` to `path`, creating any missing parent directories first
 /// (`mkdir -p` semantics). `path` must be absolute (leading `/`).
@@ -290,6 +315,27 @@ pub fn run_linux_binary_via_starnix(
     // 6b. Lay down a small directory tree so a Linux `ls /` (or `cat`) has
     //     real entries to enumerate. Best-effort.
     populate_rootfs(locked, &current_task);
+
+    // 6b'. Register the standard character "mem" devices and create their nodes
+    //      under /dev. Opening an IFCHR node routes through the device registry
+    //      to the ops registered here, so binaries that touch /dev/null,
+    //      /dev/urandom, etc. work. Best-effort — a failure surfaces as the
+    //      binary's own ENOENT/ENODEV, not a panic.
+    if crate::device::mem::mem_device_init(locked, &current_task).is_err() {
+        m6_syscall::invoke::debug_puts("[starnix] mem_device_init failed\n");
+    }
+    let dev_nodes: &[(&[u8], starnix_uapi::device_type::DeviceType)] = &[
+        (b"/dev/null", DeviceType::NULL),
+        (b"/dev/zero", DeviceType::ZERO),
+        (b"/dev/full", DeviceType::FULL),
+        (b"/dev/random", DeviceType::RANDOM),
+        (b"/dev/urandom", DeviceType::URANDOM),
+    ];
+    for (path, dev) in dev_nodes {
+        if mknod_char(locked, &current_task, path, *dev).is_err() {
+            m6_syscall::invoke::debug_puts("[starnix] mknod failed for a /dev node\n");
+        }
+    }
 
     // 6c. Lay down any caller-provided files (an ELF interpreter, shared
     //     libraries, data) into the tmpfs at their absolute path, creating parent
