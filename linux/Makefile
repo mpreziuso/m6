@@ -17,7 +17,7 @@ ifeq ($(CROSS_GCC),)
 $(error No aarch64 cross toolchain found. Install aarch64-linux-musl-gcc or aarch64-linux-gnu-gcc.)
 endif
 
-BINARIES := hello hellopie
+BINARIES := hello hellopie hellodyn
 
 .PHONY: all clean busybox
 
@@ -31,6 +31,15 @@ hello: hello.S
 # the libc startup self-relocates. Exercises the PIE / load-bias path.
 hellopie: hellopie.c
 	$(CROSS_GCC) -static-pie -Wl,--build-id=none -o $@ $<
+	@printf "Built %s (%s bytes)\n" "$@" "$$(stat -c%s $@)"
+
+# Dynamically linked (PT_INTERP = /lib/ld-musl-aarch64.so.1): the loader loads
+# both this and the interpreter. The interpreter (committed as
+# ld-musl-aarch64.so.1, laid into the initrd rootfs/lib by the top Makefile)
+# relocates and resolves symbols, then jumps to main. Exercises the PT_INTERP
+# / AT_BASE path.
+hellodyn: hellodyn.c
+	$(CROSS_GCC) -Wl,--build-id=none -o $@ $<
 	@printf "Built %s (%s bytes)\n" "$@" "$$(stat -c%s $@)"
 
 # busybox is fetched + cross-compiled (static, non-PIE) by a helper script
