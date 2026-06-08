@@ -102,12 +102,15 @@ unsafe fn get_linux_argv() -> std::vec::Vec<&'static [u8]> {
 
 // -- Boot ELF hand-off
 
-/// Read the Linux ELF the shell mapped into our VSpace.
+/// Read the Linux ELF (and any rootfs files) the shell mapped into our VSpace.
 ///
 /// The shell resolves the binary from the initrd and maps it at
 /// `STARNIX_BOOTELF_DATA_ADDR`, with a boot-info page at
-/// `STARNIX_BOOTELF_INFO_ADDR` holding `[magic, elf vaddr, elf len]`.
-fn read_boot_elf() -> Result<&'static [u8], &'static str> {
+/// `STARNIX_BOOTELF_INFO_ADDR` holding `[magic, elf vaddr, elf len, rootfs count,
+/// then count × (path vaddr, path len, data vaddr, data len)]`. Each rootfs file's
+/// bytes and path string are mapped read-only at the vaddrs the table names.
+fn read_boot_info()
+-> Result<(&'static [u8], std::vec::Vec<(&'static [u8], &'static [u8])>), &'static str> {
     let info = m6_system::STARNIX_BOOTELF_INFO_ADDR as *const u64;
     // SAFETY: the shell maps the info page R before resuming us.
     let (magic, data_addr, len) = unsafe { (*info, *info.add(1), *info.add(2) as usize) };
@@ -115,7 +118,30 @@ fn read_boot_elf() -> Result<&'static [u8], &'static str> {
         return Err("boot-info magic mismatch (shell did not hand over an ELF)");
     }
     // SAFETY: the shell maps `len` bytes of the ELF at `data_addr` R.
-    Ok(unsafe { core::slice::from_raw_parts(data_addr as *const u8, len) })
+    let elf = unsafe { core::slice::from_raw_parts(data_addr as *const u8, len) };
+
+    // SAFETY: count lives at index 3; the table starts at index 4. Both are within
+    // the 4 KiB info page (≤127 entries × 4 u64 = 4064 bytes < 4096).
+    let count = unsafe { *info.add(3) } as usize;
+    let mut files: std::vec::Vec<(&'static [u8], &'static [u8])> = std::vec::Vec::new();
+    for i in 0..count {
+        let base = 4 + i * 4;
+        // SAFETY: entry `i` occupies indices [base, base+4); within the info page.
+        let (path_addr, path_len, d_addr, d_len) = unsafe {
+            (
+                *info.add(base),
+                *info.add(base + 1) as usize,
+                *info.add(base + 2),
+                *info.add(base + 3) as usize,
+            )
+        };
+        // SAFETY: the shell maps `path_len` path bytes and `d_len` data bytes R at
+        // the named vaddrs before resuming us.
+        let path = unsafe { core::slice::from_raw_parts(path_addr as *const u8, path_len) };
+        let data = unsafe { core::slice::from_raw_parts(d_addr as *const u8, d_len) };
+        files.push((path, data));
+    }
+    Ok((elf, files))
 }
 
 // -- Capability allocation for the Linux process
@@ -200,13 +226,16 @@ fn main() -> i32 {
 
     println!("[svc-starnix] Loading Linux binary: {}", filename);
 
-    let elf_data = match read_boot_elf() {
+    let (elf_data, extra_files) = match read_boot_info() {
         Ok(b) => b,
         Err(e) => {
             println!("[svc-starnix] {}", e);
             return 1;
         }
     };
+    if !extra_files.is_empty() {
+        println!("[svc-starnix] laying down {} rootfs file(s)", extra_files.len());
+    }
 
     if let Err(e) = allocate_linux_resources() {
         println!("[svc-starnix] {}", e);
@@ -226,7 +255,7 @@ fn main() -> i32 {
 
     let env: &[&[u8]] = &[b"PATH=/bin", b"HOME=/", b"TERM=linux", b"PWD=/"];
 
-    match run_linux_binary_via_starnix(&config, elf_data, &linux_argv, env) {
+    match run_linux_binary_via_starnix(&config, elf_data, &linux_argv, env, &extra_files) {
         Ok(code) => {
             println!("[svc-starnix] Linux process exited with code {}", code);
             code

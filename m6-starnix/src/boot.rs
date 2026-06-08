@@ -147,6 +147,47 @@ fn mkdir(
 }
 
 /// Create a regular file with `content` at an absolute path on the root tmpfs.
+/// Write `content` to `path`, creating any missing parent directories first
+/// (`mkdir -p` semantics). `path` must be absolute (leading `/`).
+fn lay_down_file(
+    locked: &mut starnix_sync::Locked<Unlocked>,
+    current_task: &CurrentTask,
+    path: &[u8],
+    content: &[u8],
+) -> Result<(), Errno> {
+    // Create each parent component in turn, ignoring "already exists".
+    let mut prefix: Vec<u8> = Vec::with_capacity(path.len());
+    let mut start = 0;
+    while start < path.len() && path[start] == b'/' {
+        start += 1;
+    }
+    // Walk components except the final (basename) one.
+    let mut i = start;
+    let mut last_sep = start;
+    while i < path.len() {
+        if path[i] == b'/' {
+            // Component path[last_sep..i] is a directory to ensure.
+            prefix.clear();
+            prefix.extend_from_slice(&path[..i]);
+            if let Err(e) = mkdir(locked, current_task, &prefix) {
+                // EEXIST is fine; anything else is a real failure.
+                if e != errno!(EEXIST) {
+                    return Err(e);
+                }
+            }
+            // Skip consecutive separators.
+            while i < path.len() && path[i] == b'/' {
+                i += 1;
+            }
+            last_sep = i;
+            continue;
+        }
+        i += 1;
+    }
+    let _ = last_sep;
+    write_file(locked, current_task, path, content)
+}
+
 fn write_file(
     locked: &mut starnix_sync::Locked<Unlocked>,
     current_task: &CurrentTask,
@@ -198,6 +239,7 @@ pub fn run_linux_binary_via_starnix(
     elf_data: &[u8],
     argv: &[&[u8]],
     envp: &[&[u8]],
+    extra_files: &[(&[u8], &[u8])],
 ) -> Result<i32, Errno> {
     // 1. Install the M6 allocator context the VMO/VMAR shim draws from.
     zx::mem_context::init(
@@ -248,6 +290,16 @@ pub fn run_linux_binary_via_starnix(
     // 6b. Lay down a small directory tree so a Linux `ls /` (or `cat`) has
     //     real entries to enumerate. Best-effort.
     populate_rootfs(locked, &current_task);
+
+    // 6c. Lay down any caller-provided files (an ELF interpreter, shared
+    //     libraries, data) into the tmpfs at their absolute path, creating parent
+    //     directories as needed. Empty for a plain static binary. Best-effort: a
+    //     failure here surfaces later as the binary's own ENOENT, not a panic.
+    for (path, data) in extra_files {
+        if lay_down_file(locked, &current_task, path, data).is_err() {
+            m6_syscall::invoke::debug_puts("[starnix] failed to lay down a rootfs file\n");
+        }
+    }
 
     // 7. Materialise the ELF as a VFS file under the tmpfs root, then open it
     //    executable so the forked loader can resolve + map it.

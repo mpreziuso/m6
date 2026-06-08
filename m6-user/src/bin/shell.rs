@@ -837,20 +837,73 @@ fn cmd_linux(args: &[String], ctx: &mut ShellContext) {
         return;
     };
 
-    // Boot-info page: magic, ELF vaddr, ELF length.
+    // Gather any `rootfs/`-prefixed initrd entries (an ELF interpreter, shared
+    // libraries, data) to lay into the Starnix tmpfs. `ctx.initrd` is 'static, so
+    // the file data references outlive the spawn; copy the path strings out.
+    let initrd = ctx.initrd;
+    let mut rootfs: Vec<(String, &'static [u8])> = Vec::new();
+    m6_system::for_each_rootfs_entry(initrd, |path, data| {
+        rootfs.push((String::from(path), data));
+    });
+    // The info page holds the table inline: 4 header u64s + 4 per entry, in 4 KiB.
+    const MAX_ROOTFS: usize = (4096 - 32) / 32;
+    if rootfs.len() > MAX_ROOTFS {
+        println!("linux: too many rootfs/ files ({}), using first {}", rootfs.len(), MAX_ROOTFS);
+        rootfs.truncate(MAX_ROOTFS);
+    }
+
+    // Pack the path strings into one blob, and give each file's bytes a distinct
+    // page-aligned vaddr. Build the info-page table entry for each.
+    let mut paths_blob: Vec<u8> = Vec::new();
+    let mut file_regions: Vec<(u64, &'static [u8])> = Vec::new();
+    let mut table: Vec<[u64; 4]> = Vec::new();
+    let mut next_data_vaddr = m6_system::STARNIX_ROOTFS_DATA_BASE;
+    for (path, data) in &rootfs {
+        let span = (data.len() as u64).div_ceil(4096) * 4096;
+        if next_data_vaddr + span > m6_system::STARNIX_ROOTFS_DATA_LIMIT {
+            println!(
+                "linux: rootfs files exceed the {} MiB data window; skipping '{}' onward",
+                (m6_system::STARNIX_ROOTFS_DATA_LIMIT - m6_system::STARNIX_ROOTFS_DATA_BASE)
+                    / (1024 * 1024),
+                path
+            );
+            break;
+        }
+        let path_addr = m6_system::STARNIX_ROOTFS_PATHS_ADDR + paths_blob.len() as u64;
+        paths_blob.extend_from_slice(path.as_bytes());
+        let data_addr = next_data_vaddr;
+        next_data_vaddr += span;
+        table.push([path_addr, path.len() as u64, data_addr, data.len() as u64]);
+        file_regions.push((data_addr, *data));
+    }
+
+    // Boot-info page: magic, ELF vaddr, ELF length, rootfs count, then the table.
     let mut info: Vec<u8> = vec![0u8; 4096];
     info[0..8].copy_from_slice(&m6_system::STARNIX_BOOTELF_MAGIC.to_le_bytes());
     info[8..16].copy_from_slice(&m6_system::STARNIX_BOOTELF_DATA_ADDR.to_le_bytes());
     info[16..24].copy_from_slice(&(elf.len() as u64).to_le_bytes());
+    info[24..32].copy_from_slice(&(table.len() as u64).to_le_bytes());
+    for (i, entry) in table.iter().enumerate() {
+        let base = 32 + i * 32;
+        for (j, v) in entry.iter().enumerate() {
+            info[base + j * 8..base + j * 8 + 8].copy_from_slice(&v.to_le_bytes());
+        }
+    }
 
     let extras = [InitialCap {
         src_slot: ASID_POOL_SLOT,
         dst_slot: ASID_POOL_SLOT,
     }];
-    let data: [(u64, &[u8]); 2] = [
+    let mut data: Vec<(u64, &[u8])> = vec![
         (m6_system::STARNIX_BOOTELF_INFO_ADDR, info.as_slice()),
         (m6_system::STARNIX_BOOTELF_DATA_ADDR, elf),
     ];
+    if !paths_blob.is_empty() {
+        data.push((m6_system::STARNIX_ROOTFS_PATHS_ADDR, paths_blob.as_slice()));
+    }
+    for &(vaddr, bytes) in &file_regions {
+        data.push((vaddr, bytes));
+    }
     spawn_external_with("svc-starnix", args, ctx, &extras, &data);
 }
 
