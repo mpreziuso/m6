@@ -766,7 +766,7 @@ fn clear_mapping(root_table: PhysAddr, vaddr: u64, asid: u16) -> Result<(), Sysc
         // SAFETY: We're clearing a valid mapping
         unsafe { l2.set_desc(va, L2Descriptor::invalid()) };
 
-        log::debug!("UnmapFrame: cleared 2MB block at va={:#x}", vaddr);
+        log::trace!("UnmapFrame: cleared 2MB block at va={:#x}", vaddr);
     } else {
         // Walk L2 -> L3
         let Some(mut l3) = l2.get_next_table(va) else {
@@ -782,7 +782,7 @@ fn clear_mapping(root_table: PhysAddr, vaddr: u64, asid: u16) -> Result<(), Sysc
         // SAFETY: We're clearing a valid mapping
         unsafe { l3.set_desc(va, L3Descriptor::invalid()) };
 
-        log::debug!("UnmapFrame: cleared 4KB page at va={:#x}", vaddr);
+        log::trace!("UnmapFrame: cleared 4KB page at va={:#x}", vaddr);
     }
 
     // Break-Before-Make: after invalidating the descriptor, ensure the
