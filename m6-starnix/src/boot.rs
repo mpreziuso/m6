@@ -316,14 +316,13 @@ pub fn run_linux_binary_via_starnix(
     //     real entries to enumerate. Best-effort.
     populate_rootfs(locked, &current_task);
 
-    // 6b'. Register the standard character "mem" devices and create their nodes
-    //      under /dev. Opening an IFCHR node routes through the device registry
-    //      to the ops registered here, so binaries that touch /dev/null,
-    //      /dev/urandom, etc. work. Best-effort — a failure surfaces as the
-    //      binary's own ENOENT/ENODEV, not a panic.
-    if crate::device::mem::mem_device_init(locked, &current_task).is_err() {
-        m6_syscall::invoke::debug_puts("[starnix] mem_device_init failed\n");
-    }
+    // 6b'. Register the standard character "mem" device ops and create their
+    //      nodes under /dev. Opening an IFCHR node routes through the device
+    //      registry to the ops registered here, so binaries that touch
+    //      /dev/null, /dev/urandom, etc. work. We register ops only (no
+    //      sysfs/devtmpfs) because the full path spawns a kthread the minimal
+    //      core lacks; we create the nodes directly on the tmpfs below.
+    crate::device::mem::mem_device_ops_only(locked, &current_task);
     let dev_nodes: &[(&[u8], starnix_uapi::device_type::DeviceType)] = &[
         (b"/dev/null", DeviceType::NULL),
         (b"/dev/zero", DeviceType::ZERO),

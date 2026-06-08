@@ -390,6 +390,29 @@ impl DeviceRegistry {
         self.add_device(locked, kernel_or_task, name, metadata, class, build_directory)
     }
 
+    /// Register only the minor→ops mapping for a character device, skipping the
+    /// kobject/sysfs/devtmpfs/uevent machinery that `register_device` runs.
+    ///
+    /// That machinery (`add_device` → `notify_device` → `devtmpfs_create_device`)
+    /// spawns a worker on the kernel thread pool and blocks until it completes,
+    /// which the minimal bring-up core cannot do (it has no `KernelThreads`
+    /// spawner or system task). This path only makes the device openable via
+    /// [`open_device`](Self::open_device); the caller is responsible for creating
+    /// the `/dev` node itself (e.g. `mknod` on a tmpfs root).
+    pub fn register_char_device_ops_only<L>(
+        &self,
+        locked: &mut Locked<L>,
+        name: &FsStr,
+        device_type: DeviceType,
+        dev_ops: impl DeviceOps,
+    ) where
+        L: LockEqualOrBefore<FileOpsCore>,
+    {
+        let locked = locked.cast_locked::<FileOpsCore>();
+        let entry = DeviceEntry::new(name.into(), dev_ops);
+        self.devices(locked, DeviceMode::Char).register_minor(device_type, entry);
+    }
+
     /// Register a dynamic device in the `MISC_MAJOR` major device number.
     ///
     /// MISC devices (major number 10) with minor numbers in the range 52..128 are dynamically

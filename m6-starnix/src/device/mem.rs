@@ -506,3 +506,46 @@ where
     let _ = mem_class;
     Ok(())
 }
+
+/// Like [`mem_device_init`], but registers only the device *ops* — it skips the
+/// sysfs/devtmpfs node creation, which spawns a worker on the kernel thread pool
+/// and blocks until it finishes. The minimal bring-up core has no such thread
+/// pool, so that path panics there. The caller creates the `/dev` nodes itself
+/// (e.g. `mknod` on the tmpfs root); opening them routes through `open_device`
+/// to the ops registered here. Covers null/zero/full/random/urandom.
+pub fn mem_device_ops_only<'a, L>(locked: &mut Locked<L>, kernel_or_task: impl KernelOrTask<'a>)
+where
+    L: LockEqualOrBefore<FileOpsCore>,
+{
+    let registry = &kernel_or_task.kernel().device_registry;
+    registry.register_char_device_ops_only(
+        locked,
+        "null".into(),
+        DeviceType::NULL,
+        simple_device_ops::<DevNull>,
+    );
+    registry.register_char_device_ops_only(
+        locked,
+        "zero".into(),
+        DeviceType::ZERO,
+        simple_device_ops::<DevZero>,
+    );
+    registry.register_char_device_ops_only(
+        locked,
+        "full".into(),
+        DeviceType::FULL,
+        simple_device_ops::<DevFull>,
+    );
+    registry.register_char_device_ops_only(
+        locked,
+        "random".into(),
+        DeviceType::RANDOM,
+        simple_device_ops::<DevRandom>,
+    );
+    registry.register_char_device_ops_only(
+        locked,
+        "urandom".into(),
+        DeviceType::URANDOM,
+        simple_device_ops::<DevRandom>,
+    );
+}
