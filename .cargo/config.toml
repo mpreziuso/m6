@@ -8,8 +8,24 @@ rustc-wrapper = "sccache"
 linker = "rust-lld"
 
 # Common linker flags (kernel crate has its own linker script)
+#
+# `target-feature=+aes,+sha2` enables the ARMv8-A Cryptographic Extensions.
+# Combined with `--cfg aes_armv8` it switches RustCrypto's `aes` (used by
+# m6-crypto in userspace) to its hardware AESE/AESMC intrinsic backend — verified
+# emitting `aese`/`aesimc`. Harmless for the kernel/bootloader: target features
+# only permit codegen — no crypto instruction is emitted unless code uses it, and
+# only m6-crypto does. RK3588 (A76/A55) and QEMU cortex-a72 implement these.
+#
+# `sha2` is intentionally left on its software backend: enabling its `asm`
+# feature drags in the `sha2-asm` cc/assembler build dep (fragile to cross-build)
+# for little gain (design hashes small metadata via HMAC; BLAKE3 does content
+# hashing). `+sha2` stays as a prerequisite should we revisit that.
 rustflags = [
     "-C", "link-arg=--gc-sections",
+    "-C", "target-feature=+aes,+sha2",
+    # RustCrypto `aes` gates its ARMv8 backend behind this cfg (pure intrinsics,
+    # no extra crate, no runtime detection). Only the `aes` crate reads it.
+    "--cfg", "aes_armv8",
 ]
 
 # Runner for QEMU (used by cargo run)

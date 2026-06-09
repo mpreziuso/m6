@@ -1,0 +1,41 @@
+[package]
+name = "m6-crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "M6 userspace cryptography facade over audited RustCrypto implementations"
+
+[lib]
+name = "m6_crypto"
+path = "src/lib.rs"
+
+[dependencies]
+# Entropy: the kernel GetRandom self-invocation (mechanism); crypto stays in userspace (policy).
+m6-syscall = { path = "../m6-syscall", features = ["userspace"] }
+
+# -- Hashes
+sha2 = { version = "0.10", default-features = false }
+blake3 = { version = "1", default-features = false, features = ["pure"] }
+
+# -- MAC / KDF
+hmac = { version = "0.12", default-features = false }
+hkdf = { version = "0.12", default-features = false }
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+
+# -- AEAD (network/TLS payloads). Block-cipher AES-XTS for M6FS is deferred;
+#    when added, pull `aes` directly and layer XTS over it.
+aes-gcm = { version = "0.10", default-features = false, features = ["aes", "alloc"] }
+
+# -- Signatures / key exchange (cryptographer-authored dalek crates)
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc", "zeroize", "rand_core"] }
+x25519-dalek = { version = "2", default-features = false, features = ["zeroize", "static_secrets"] }
+
+# -- RNG (rand_core 0.6 line, shared by dalek + rand_chacha)
+rand_core = { version = "0.6", default-features = false }
+rand_chacha = { version = "0.3", default-features = false }
+
+# -- Key hygiene
+zeroize = { version = "1", default-features = false, features = ["alloc"] }
+subtle = { version = "2", default-features = false }
