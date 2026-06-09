@@ -112,6 +112,20 @@ fn map_kernel_segments(
             continue;
         }
 
+        // W^X invariant: a kernel segment must never be both writable and
+        // executable. The linker script enforces this by separating RX and RW
+        // sections onto distinct ALIGN(4096) page boundaries — but that is an
+        // emergent property of the link, not something the loader may assume.
+        // Assert it explicitly so a mis-linked kernel fails loudly here rather
+        // than silently mapping a W+X page that would defeat W^X hardening.
+        assert!(
+            !(seg.write && seg.execute),
+            "W^X violation: kernel segment {} (VA offset {:#x}, size {:#x}) is both writable and executable",
+            i,
+            seg.virt_offset,
+            seg.size
+        );
+
         // Calculate page-aligned boundaries
         let seg_start = seg.virt_offset;
         let seg_end = seg.virt_offset + seg.size;
@@ -153,17 +167,19 @@ fn map_kernel_segments(
             // Read-only data: Read only
             PtePermissions::ro(false)
         } else {
-            // Fallback for unusual combinations (e.g., RWX - log warning but allow)
-            // This handles legacy ELF files or combined segments
+            // With the W^X assertion above, `write && execute` is unreachable
+            // here; this only catches malformed segments with no R/W/X flags.
+            // Map them read-only — the safe, minimal choice that can never
+            // produce a W+X page.
             log::warn!(
-                "Segment {} at {:#x} has unusual permissions R={} W={} X={}, using RWX",
+                "Segment {} at {:#x} has no R/W/X flags (R={} W={} X={}), mapping read-only",
                 i,
                 seg_virt,
                 seg.read,
                 seg.write,
                 seg.execute
             );
-            PtePermissions::rwx(false)
+            PtePermissions::ro(false)
         };
 
         log::debug!(
