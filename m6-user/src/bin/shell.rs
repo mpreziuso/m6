@@ -958,10 +958,12 @@ fn main() -> i32 {
 
     if hid_ep.is_none() {
         println!("No HID driver available - running stage-1 self-test\n");
-        // Auto-execute `linux hello` so the m6-starnix trap path can be
-        // exercised end-to-end on headless QEMU runs where the xHCI/HID
-        // chain isn't available. Remove once interactive HID input works.
-        let test_tokens: Vec<String> = vec!["linux".into(), "hello".into()];
+        // Auto-execute `linux busybox ls` so the m6-starnix trap path (and the
+        // dynamic-linker path — busybox is dynamically linked) is exercised
+        // end-to-end on headless QEMU runs where the xHCI/HID chain isn't
+        // available. Remove once interactive HID input works.
+        let test_tokens: Vec<String> =
+            vec!["linux".into(), "busybox".into(), "ls".into()];
         execute_line(&test_tokens, &mut ctx);
         println!("\n[shell] self-test complete; idling.");
         loop {

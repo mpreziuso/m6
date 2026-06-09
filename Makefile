@@ -1,5 +1,5 @@
 .PHONY: clean check clippy clippy-fork run debug fmt fmt-check sysroot system user image test \
-        linux-binaries busybox fat32-image flash flash-full
+        busybox fat32-image flash flash-full
 
 all: boot kernel initrd-full
 
@@ -60,24 +60,6 @@ initrd-full: system user
 	@cp target/aarch64-unknown-m6/release/svc-starnix target/initrd/
 	@# Bundle the Linux test binaries so svc-starnix can load them from the
 	@# initrd (the boot SD is not runtime-readable; see scripts/build-sysroot.sh).
-	@if [ -f linux/hello ]; then \
-	    cp linux/hello target/initrd/hello; \
-	    echo "Bundled linux/hello into initrd"; \
-	else \
-	    echo "Note: linux/hello not built (run 'make linux-binaries'); 'linux hello' will be unavailable"; \
-	fi
-	@if [ -f linux/hellopie ]; then \
-	    cp linux/hellopie target/initrd/hellopie; \
-	    echo "Bundled linux/hellopie into initrd"; \
-	else \
-	    echo "Note: linux/hellopie not built (run 'make linux-binaries'); 'linux hellopie' will be unavailable"; \
-	fi
-	@if [ -f linux/hellodyn ]; then \
-	    cp linux/hellodyn target/initrd/hellodyn; \
-	    echo "Bundled linux/hellodyn into initrd"; \
-	else \
-	    echo "Note: linux/hellodyn not built (run 'make linux-binaries'); 'linux hellodyn' will be unavailable"; \
-	fi
 	@# Lay the musl dynamic linker under rootfs/ so dynamic binaries resolve
 	@# their PT_INTERP (/lib/ld-musl-aarch64.so.1). svc-starnix seeds every
 	@# rootfs/* entry into the Starnix tmpfs at the stripped path before exec.
@@ -86,8 +68,15 @@ initrd-full: system user
 	    cp linux/ld-musl-aarch64.so.1 target/initrd/rootfs/lib/ld-musl-aarch64.so.1; \
 	    echo "Bundled musl dynamic linker into initrd rootfs/lib"; \
 	else \
-	    echo "Note: linux/ld-musl-aarch64.so.1 missing; 'linux hellodyn' will fail to resolve its interpreter"; \
+	    echo "Note: linux/ld-musl-aarch64.so.1 missing; 'linux busybox' will fail to resolve its interpreter"; \
 	fi
+	@# busybox is dynamically linked (PT_INTERP=/lib/ld-musl-aarch64.so.1); it
+	@# resolves its interpreter via the rootfs/lib ld-musl seeded above.
+	@# NOTE: init maps the WHOLE initrd into the shell's VSpace as one 4KB frame
+	@# cap per page, all held in init's 4096-slot root CNode (see process.rs
+	@# map_data_to_child). That budget fits ONE large Linux binary alongside the
+	@# system binaries + ld-musl. To ship more, huge-page the initrd mapping
+	@# (2 MiB frames -> ~4 caps instead of ~1740).
 	@if [ -f linux/busybox ]; then \
 	    cp linux/busybox target/initrd/busybox; \
 	    echo "Bundled linux/busybox into initrd"; \
@@ -99,9 +88,6 @@ initrd-full: system user
 		tar --format=ustar -cf INITRD \
 		init device-mgr drv-uart-pl011 drv-uart-dw drv-smmu drv-virtio-blk drv-nvme drv-usb-xhci drv-usb-dwc3 drv-usb-hid svc-fat32 \
 		shell ls cat cp echo mkdir mkfs-fat32 svc-starnix \
-		$$([ -f hello ] && echo hello) \
-		$$([ -f hellopie ] && echo hellopie) \
-		$$([ -f hellodyn ] && echo hellodyn) \
 		$$([ -f busybox ] && echo busybox) \
 		$$([ -d rootfs ] && echo rootfs)
 	@echo "Created full initrd TAR archive ($$(stat -c%s target/initrd/INITRD) bytes)"
@@ -198,37 +184,28 @@ fmt:
 fmt-check:
 	cargo fmt --all -- --check
 
-# -- Linux test binaries (m6-starnix bring-up)
+# -- busybox (dynamically linked aarch64) for `linux busybox ls` under svc-starnix
 #
-# Builds static aarch64 ELFs (e.g. linux/hello) that run under
-# svc-starnix. Requires aarch64-linux-musl-gcc or aarch64-linux-gnu-gcc.
-linux-binaries:
-	$(MAKE) -C linux all
-
-# -- busybox (static aarch64) for `linux busybox ls` under svc-starnix
-#
-# Fetches + cross-compiles a static, non-PIE busybox into linux/busybox, which
-# initrd-full then bundles. Separate from linux-binaries because it downloads
-# the busybox source.
+# Fetches + cross-compiles a dynamically-linked PIE busybox into linux/busybox,
+# which initrd-full then bundles. Downloads the busybox source on first run.
 busybox:
 	$(MAKE) -C linux busybox
 
-# -- FAT32 virtio-blk disk image, pre-populated with Linux binaries
+# -- FAT32 virtio-blk disk image, pre-populated with a Linux binary
 #
-# Wipes target/disk.img and rebuilds it as a FAT32 volume. If
-# linux/hello exists, it is copied to the root. Run this after
-# `make linux-binaries` to make Linux test binaries available to
-# svc-starnix at runtime.
+# Wipes target/disk.img and rebuilds it as a FAT32 volume. If linux/busybox
+# exists, it is copied to the root. Run `make busybox` first to make a Linux
+# test binary available to svc-starnix at runtime.
 #
 # Requires: mkfs.vfat, mtools (mcopy).
 fat32-image:
 	@mkdir -p target
 	dd if=/dev/zero of=target/disk.img bs=1M count=64 status=none
 	mkfs.vfat -F 32 target/disk.img >/dev/null 2>&1
-	@if [ -f linux/hello ]; then \
-	    mcopy -i target/disk.img linux/hello ::hello && \
-	    printf "FAT32 disk.img populated with linux/hello (%s bytes)\n" \
-	      "$$(stat -c%s linux/hello)"; \
+	@if [ -f linux/busybox ]; then \
+	    mcopy -i target/disk.img linux/busybox ::busybox && \
+	    printf "FAT32 disk.img populated with linux/busybox (%s bytes)\n" \
+	      "$$(stat -c%s linux/busybox)"; \
 	else \
-	    echo "FAT32 disk.img created empty (run 'make linux-binaries' first)"; \
+	    echo "FAT32 disk.img created empty (run 'make busybox' first)"; \
 	fi
