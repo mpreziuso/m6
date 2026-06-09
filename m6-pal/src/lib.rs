@@ -21,6 +21,6 @@ pub mod psci;
 pub mod timer;
 
 pub use dtb::get_parsed_dtb;
-pub use dtb_platform::{GicVersion, UartType};
+pub use dtb_platform::{GicVersion, PeripheralRegion, UartType};
 pub use framebuffer::FramebufferConfig;
 pub use platform::{Platform, PlatformInfo, current_platform};

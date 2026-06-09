@@ -82,6 +82,45 @@ impl SmmuConfig {
     }
 }
 
+/// A memory-mapped peripheral region (base + size + optional interrupt).
+///
+/// Presence descriptor for the optional platform-feature accessors
+/// ([`Platform::pcie`], [`Platform::thermal`], [`Platform::trng`],
+/// [`Platform::crypto_engine`]) covering the hardware blocks the design
+/// (spec §2) expects a platform to expose. The kernel only needs to know
+/// whether a block exists and where its registers live — the drivers for
+/// these blocks are userspace policy. Populated from the DTB as support
+/// lands; until then the accessors default to `None`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PeripheralRegion {
+    /// Physical base address of the register region.
+    pub base_addr: u64,
+    /// Size of the register region in bytes.
+    pub size: u64,
+    /// Primary interrupt (SPI number), or 0 if none / not applicable.
+    pub irq: u32,
+}
+
+impl PeripheralRegion {
+    /// Create a new peripheral region descriptor.
+    #[inline]
+    #[must_use]
+    pub const fn new(base_addr: u64, size: u64) -> Self {
+        Self {
+            base_addr,
+            size,
+            irq: 0,
+        }
+    }
+
+    /// Check if this descriptor refers to a real region.
+    #[inline]
+    #[must_use]
+    pub const fn is_valid(&self) -> bool {
+        self.base_addr != 0
+    }
+}
+
 /// Platform configuration derived from Device Tree Blob
 pub struct DtbPlatform {
     pub(crate) name: &'static str,

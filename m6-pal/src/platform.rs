@@ -78,6 +78,43 @@ pub trait Platform: Send + Sync {
     fn psci_method(&self) -> crate::dtb_platform::PsciMethod {
         crate::dtb_platform::PsciMethod::Hvc
     }
+
+    // -- Optional hardware feature blocks (spec §2)
+    //
+    // These return a presence descriptor so the rest of the system can
+    // discover platform capabilities explicitly instead of hard-coding them.
+    // Drivers/services for each block live in userspace; the kernel only
+    // surfaces "does this exist and where". Default `None` until DTB parsing
+    // for the block is wired up.
+
+    /// PCIe controller registers, if the platform has one.
+    ///
+    /// Spec §2: "PCIe controller operations". RK3588 routes NVMe and WiFi
+    /// through PCIe; QEMU virt exposes an ECAM host bridge.
+    fn pcie(&self) -> Option<crate::dtb_platform::PeripheralRegion> {
+        None
+    }
+
+    /// Thermal sensor (e.g. RK3588 TS-ADC) registers, if present.
+    ///
+    /// Spec §2 "Thermal sensor operations" / §9 thermal management.
+    fn thermal(&self) -> Option<crate::dtb_platform::PeripheralRegion> {
+        None
+    }
+
+    /// Hardware TRNG registers, if present.
+    ///
+    /// Spec §2 "Hardware TRNG operations" / §12 random number generation.
+    fn trng(&self) -> Option<crate::dtb_platform::PeripheralRegion> {
+        None
+    }
+
+    /// Hardware crypto/AES engine registers, if present.
+    ///
+    /// Spec §2 "Crypto engine operations (AES acceleration)" / §12.
+    fn crypto_engine(&self) -> Option<crate::dtb_platform::PeripheralRegion> {
+        None
+    }
 }
 
 pub struct PlatformInfo {
