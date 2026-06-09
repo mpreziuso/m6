@@ -196,8 +196,16 @@ pub fn read_random() -> Option<u64> {
 /// Per-thread Pointer Authentication (PAC) keys.
 ///
 /// Five 128-bit keys — instruction A/B, data A/B, and generic — stored per
-/// thread and reloaded on every context switch so PAC-signed pointers cannot be
-/// forged across thread boundaries (spec §1 "PAC key management per thread").
+/// thread and reloaded on every context switch (spec §1 "PAC key management
+/// per thread").
+///
+/// NOTE: the kernel does not yet *use* these keys to protect anything. Pointer
+/// signing is not enabled: the build emits no `pac-ret` (`branch-protection`
+/// is unset in `.cargo/config.toml`) and `SCTLR_EL1.En{I,D}{A,B}` are never
+/// set, so no `paciasp`/`autiasp` instructions are generated and the loaded
+/// keys authenticate nothing. The per-thread key management is wired up so
+/// that enabling signing later yields cross-thread key isolation without
+/// further scheduler changes; until then it is inert even on FEAT_PAuth CPUs.
 ///
 /// The key registers only exist on CPUs implementing FEAT_PAuth; accessing them
 /// is UNDEFINED otherwise (e.g. the QEMU cortex-a72 dev target), so every load

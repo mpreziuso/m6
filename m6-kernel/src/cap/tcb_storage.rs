@@ -86,9 +86,11 @@ pub struct TcbFull {
     /// Kick-pending flag: set by another thread to force restricted exit.
     pub restricted_kick_pending: bool,
 
-    /// Per-thread Pointer Authentication keys, reloaded on context switch so
-    /// PAC-signed pointers cannot be forged across thread boundaries. Inert on
-    /// CPUs without FEAT_PAuth (kept zeroed and never loaded).
+    /// Per-thread Pointer Authentication keys, reloaded on context switch.
+    /// Inert on CPUs without FEAT_PAuth (kept zeroed and never loaded), and
+    /// currently inert everywhere because pointer signing is not enabled in
+    /// the build — see [`m6_arch::cpu::PacKeys`]. Managed per-thread so that
+    /// turning signing on later gives cross-thread key isolation for free.
     pub pac_keys: m6_arch::cpu::PacKeys,
 }
 

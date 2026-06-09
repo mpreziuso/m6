@@ -39,8 +39,11 @@ use crate::cap::object_table::{self, KernelObjectType};
 /// Load a thread's per-thread PAC keys into the EL1 key registers.
 ///
 /// No-op on CPUs without FEAT_PAuth (the keys are zero and the registers do not
-/// exist). Reloading whenever a thread is switched in gives per-thread PAC key
-/// isolation so signed pointers cannot be forged across thread boundaries.
+/// exist). Reloading on every switch-in is intended to give per-thread PAC key
+/// isolation — but only once pointer signing is actually enabled. Today the
+/// build emits no `pac-ret` and never sets `SCTLR_EL1.En{I,D}{A,B}`, so nothing
+/// is signed or authenticated and this reload is currently inert. See
+/// [`m6_arch::cpu::PacKeys`] for the full picture.
 #[inline]
 fn load_thread_pac_keys(tcb: &crate::cap::tcb_storage::TcbFull) {
     if m6_arch::cpu::features::has_pac() {
