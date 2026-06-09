@@ -55,7 +55,19 @@ impl VmProvider for M6VmProvider {
             rights_bits,
             attr,
         ) {
-            dbg_hex("[m6-std] VMPROVIDER map_frame FAILED vaddr=", vaddr as u64);
+            // A map failure here is almost always a missing page table: this
+            // provider does NOT create page tables on demand, so the heap region
+            // must have been pre-mapped by whoever spawned us. If the parent
+            // under-provisioned (or a spawn-slot collision clobbered a page-table
+            // frame), the kernel logs "install_mapping: L<n> table missing" for
+            // this vaddr and the next heap allocation aborts. Surface it loudly
+            // and attributably rather than letting it become an opaque
+            // handle_alloc_error panic.
+            m6_syscall::invoke::debug_puts(
+                "[m6-std] VMPROVIDER map_frame FAILED — heap page tables not provisioned by parent\n",
+            );
+            dbg_hex("[m6-std]   vaddr=", vaddr as u64);
+            dbg_hex("[m6-std]   vspace_cptr=", self.vspace_cptr);
             return Err(e);
         }
         Ok(())

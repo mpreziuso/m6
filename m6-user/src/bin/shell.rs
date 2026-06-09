@@ -28,7 +28,21 @@ const FAT32_EP_SLOT: u64 = 12;
 const ASID_POOL_SLOT: u64 = 13;
 const MEM_SERVER_SLOT: u64 = 14;
 const UNTYPED_SLOT: u64 = 15;
-const FIRST_FREE_SLOT: u64 = 16;
+
+/// Floor for all per-spawn allocations (the reusable spawn untyped, the exit
+/// notification, and every child object/page-table the shell retypes into its
+/// OWN root CNode during `spawn_external_with`).
+///
+/// The shell is itself an m6-std process: its own heap frames are retyped into
+/// this same root CNode from slot 136 upward (`HEAP_SLOTS_START` in m6-std). If
+/// per-spawn allocations started low (the old `FIRST_FREE_SLOT`) their slot
+/// counter climbed straight through the heap band, so a large child (svc-starnix
+/// is ~640 objects) overlapped the shell's live heap-frame slots — a clobbered
+/// page-table frame then surfaced downstream as "L1 table missing" and an opaque
+/// child heap panic. Basing spawns at 1024 keeps them in [1024, 4096), disjoint
+/// by construction from the shell's heap band [136, 1024) (888 frames / ~3.5 MB
+/// of peak shell heap, far more than a command shell ever needs).
+const SPAWN_OBJ_BASE: u64 = 1024;
 
 const SHELL_INITRD_ADDR: u64 = m6_system::SHELL_INITRD_ADDR;
 const ARGS_PAGE_ADDR: u64 = 0x3FFF_E000;
@@ -815,8 +829,11 @@ fn spawn_external_with(
     // 8. Reclaim memory: revoke the untyped, destroying all derived objects (notification,
     //    TCB, CNode, VSpace, frames, page tables) and returning their memory to the untyped.
     //    Then reset the slot counter past the untyped slot so it's ready for the next spawn.
+    //    `ram_untyped` is reused (revoke resets its watermark) and always sits in the spawn
+    //    band, so `ram_untyped + 1` keeps the next spawn at/above SPAWN_OBJ_BASE; floor it
+    //    explicitly so the band invariant holds even if a future change moves the untyped.
     let _ = invoke::cap_revoke(cptr(0), ctx.ram_untyped, CNODE_RADIX as u64);
-    ctx.next_slot = ctx.ram_untyped + 1;
+    ctx.next_slot = core::cmp::max(SPAWN_OBJ_BASE, ctx.ram_untyped + 1);
 }
 
 /// `linux <binary> [args...]` — run a Linux binary under svc-starnix.
@@ -948,7 +965,9 @@ fn main() -> i32 {
     };
 
     let mut ctx = ShellContext {
-        next_slot: FIRST_FREE_SLOT,
+        // Spawn-cycle allocations live in the high band [SPAWN_OBJ_BASE, 4096),
+        // disjoint from the shell's own heap-frame band [136, SPAWN_OBJ_BASE).
+        next_slot: SPAWN_OBJ_BASE,
         ram_untyped: UNTYPED_SLOT,
         initrd,
         fat32_ep: None,
