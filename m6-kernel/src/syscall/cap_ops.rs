@@ -335,11 +335,16 @@ impl RevocationCallback for SlotClearCallback {
             if obj.obj_type != KernelObjectType::CNode {
                 return;
             }
+            // SAFETY: obj_type was just confirmed CNode, so the cnode_ptr
+            // variant of the data union is the active member.
             let cnode_ptr = unsafe { obj.data.cnode_ptr };
             if cnode_ptr.is_null() {
                 return;
             }
 
+            // SAFETY: a live CNode object owns valid CNodeStorage at cnode_ptr
+            // (non-null checked); the held object-table lock keeps it alive, and
+            // only this single &mut is created within the closure.
             let cnode = unsafe { &mut *cnode_ptr };
             if let Some(slot) = cnode.get_slot_mut(node.slot_index as usize)
                 && !slot.is_empty()
@@ -363,6 +368,8 @@ impl RevocationCallback for SlotClearCallback {
                     if let Some(obj) = t.get(obj_ref) {
                         match obj.obj_type {
                             KernelObjectType::Tcb => {
+                                // SAFETY: obj_type was just matched as Tcb, so
+                                // the tcb_ptr variant of the union is active.
                                 let ptr = unsafe { obj.data.tcb_ptr };
                                 if !ptr.is_null() {
                                     // SAFETY: TCB allocated by create_tcb; ref count is zero

@@ -159,31 +159,55 @@ unsafe impl Sync for SmmuInstance {}
 
 impl SmmuInstance {
     /// Read a 32-bit register.
+    ///
+    /// # Safety
+    /// `offset` must be a 4-byte-aligned offset within the mapped SMMU MMIO
+    /// region (`self.base`).
     #[inline]
     unsafe fn read32(&self, offset: usize) -> u32 {
+        // SAFETY: caller guarantees `offset` lies within the mapped region.
         let ptr = unsafe { self.base.as_ptr().add(offset) as *const u32 };
+        // SAFETY: `ptr` is a valid, aligned pointer into device MMIO.
         unsafe { core::ptr::read_volatile(ptr) }
     }
 
     /// Write a 32-bit register.
+    ///
+    /// # Safety
+    /// `offset` must be a 4-byte-aligned offset within the mapped SMMU MMIO
+    /// region (`self.base`).
     #[inline]
     unsafe fn write32(&self, offset: usize, value: u32) {
+        // SAFETY: caller guarantees `offset` lies within the mapped region.
         let ptr = unsafe { self.base.as_ptr().add(offset) as *mut u32 };
+        // SAFETY: `ptr` is a valid, aligned pointer into device MMIO.
         unsafe { core::ptr::write_volatile(ptr, value) }
     }
 
     /// Read a 64-bit register.
+    ///
+    /// # Safety
+    /// `offset` must be an 8-byte-aligned offset within the mapped SMMU MMIO
+    /// region (`self.base`).
     #[inline]
     #[allow(dead_code)]
     unsafe fn read64(&self, offset: usize) -> u64 {
+        // SAFETY: caller guarantees `offset` lies within the mapped region.
         let ptr = unsafe { self.base.as_ptr().add(offset) as *const u64 };
+        // SAFETY: `ptr` is a valid, aligned pointer into device MMIO.
         unsafe { core::ptr::read_volatile(ptr) }
     }
 
     /// Write a 64-bit register.
+    ///
+    /// # Safety
+    /// `offset` must be an 8-byte-aligned offset within the mapped SMMU MMIO
+    /// region (`self.base`).
     #[inline]
     unsafe fn write64(&self, offset: usize, value: u64) {
+        // SAFETY: caller guarantees `offset` lies within the mapped region.
         let ptr = unsafe { self.base.as_ptr().add(offset) as *mut u64 };
+        // SAFETY: `ptr` is a valid, aligned pointer into device MMIO.
         unsafe { core::ptr::write_volatile(ptr, value) }
     }
 
@@ -317,6 +341,8 @@ impl SmmuInstance {
 
         // Diagnostic: read back STE from DRAM (after cache invalidate) to verify
         m6_arch::cache::cache_invalidate_range(ste_vaddr, StreamTableEntry::SIZE);
+        // SAFETY: `ste_ptr` is the same in-bounds stream-table entry pointer
+        // written just above; we own the stream table.
         let readback = unsafe { core::ptr::read_volatile(ste_ptr) };
         m6_pal::console::puts("[SMMU] STE write: sid=0x");
         put_hex_u32(stream_id);
@@ -407,6 +433,8 @@ impl SmmuInstance {
 
             // Invalidate cache to read what SMMU sees in DRAM
             m6_arch::cache::cache_invalidate_range(ste_vaddr, StreamTableEntry::SIZE);
+            // SAFETY: `stream_id < max_streams` was checked, so `ste_vaddr` is
+            // an in-bounds, correctly aligned entry in the stream table we own.
             let ste = unsafe { core::ptr::read_volatile(ste_vaddr as *const StreamTableEntry) };
 
             m6_pal::console::puts("[SMMU]   STE[0x");

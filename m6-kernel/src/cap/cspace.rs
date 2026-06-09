@@ -85,10 +85,15 @@ pub fn resolve_cptr_from_root(
             if obj.obj_type != KernelObjectType::CNode {
                 return 0u8;
             }
+            // SAFETY: obj_type was just confirmed CNode, so the cnode_ptr
+            // variant of the data union is the active member.
             let cnode_ptr = unsafe { obj.data.cnode_ptr };
             if cnode_ptr.is_null() {
                 return 0u8;
             }
+            // SAFETY: a live CNode object owns valid CNodeStorage at cnode_ptr
+            // (non-null checked); the held object-table lock keeps it alive for
+            // this borrow.
             let cnode = unsafe { &*cnode_ptr };
             cnode.meta().radix()
         })
@@ -138,12 +143,17 @@ pub fn resolve_cnode_slot(
             return Err(SyscallError::TypeMismatch);
         }
 
+        // SAFETY: obj_type was just confirmed CNode, so the cnode_ptr variant
+        // of the data union is the active member.
         let cnode_ptr = unsafe { obj.data.cnode_ptr };
         if cnode_ptr.is_null() {
             log::warn!("resolve_cnode_slot: cnode_ptr is null");
             return Err(SyscallError::InvalidCap);
         }
 
+        // SAFETY: a live CNode object owns valid CNodeStorage at cnode_ptr
+        // (non-null checked); the held object-table lock keeps it alive for
+        // this borrow.
         let cnode = unsafe { &*cnode_ptr };
         let num_slots = cnode.meta().num_slots();
 
@@ -199,12 +209,17 @@ fn get_cnode_from_slot(loc: SlotLocation) -> Result<ObjectRef, SyscallError> {
             return Err(SyscallError::TypeMismatch);
         }
 
+        // SAFETY: obj_type was just confirmed CNode, so the cnode_ptr variant
+        // of the data union is the active member.
         let cnode_ptr = unsafe { obj.data.cnode_ptr };
         if cnode_ptr.is_null() {
             log::warn!("get_cnode_from_slot: cnode_ptr is null");
             return Err(SyscallError::InvalidCap);
         }
 
+        // SAFETY: a live CNode object owns valid CNodeStorage at cnode_ptr
+        // (non-null checked); the held object-table lock keeps it alive for
+        // this borrow.
         let cnode = unsafe { &*cnode_ptr };
         let slot = cnode.get_slot(loc.slot_index).ok_or_else(|| {
             log::warn!("get_cnode_from_slot: slot {} not found", loc.slot_index);
@@ -265,12 +280,16 @@ fn resolve_recursive(
             return Err(SyscallError::TypeMismatch);
         }
 
+        // SAFETY: obj_type was just confirmed CNode, so the cnode_ptr variant
+        // of the data union is the active member.
         let cnode_ptr = unsafe { obj.data.cnode_ptr };
         if cnode_ptr.is_null() {
             return Err(SyscallError::InvalidCap);
         }
 
-        // SAFETY: CNode was allocated properly.
+        // SAFETY: a live CNode object owns valid CNodeStorage at cnode_ptr
+        // (non-null checked); the held object-table lock keeps it alive for
+        // this borrow.
         let cnode = unsafe { &*cnode_ptr };
 
         // Use the m6-cap resolution logic
@@ -321,11 +340,16 @@ where
             return Err(SyscallError::TypeMismatch);
         }
 
+        // SAFETY: obj_type was just confirmed CNode, so the cnode_ptr variant
+        // of the data union is the active member.
         let cnode_ptr = unsafe { obj.data.cnode_ptr };
         if cnode_ptr.is_null() {
             return Err(SyscallError::InvalidCap);
         }
 
+        // SAFETY: a live CNode object owns valid CNodeStorage at cnode_ptr
+        // (non-null checked); the held object-table lock keeps it alive for
+        // this borrow.
         let cnode = unsafe { &*cnode_ptr };
         let slot = cnode
             .get_slot(loc.slot_index)
@@ -346,11 +370,16 @@ where
             return Err(SyscallError::TypeMismatch);
         }
 
+        // SAFETY: obj_type was just confirmed CNode, so the cnode_ptr variant
+        // of the data union is the active member.
         let cnode_ptr = unsafe { obj.data.cnode_ptr };
         if cnode_ptr.is_null() {
             return Err(SyscallError::InvalidCap);
         }
 
+        // SAFETY: a live CNode object owns valid CNodeStorage at cnode_ptr
+        // (non-null checked); the held object-table lock keeps it alive, and
+        // only this single &mut is created within the closure.
         let cnode = unsafe { &mut *cnode_ptr };
         let slot = cnode
             .get_slot_mut(loc.slot_index)
@@ -371,11 +400,16 @@ where
             return Err(SyscallError::TypeMismatch);
         }
 
+        // SAFETY: obj_type was just confirmed CNode, so the cnode_ptr variant
+        // of the data union is the active member.
         let cnode_ptr = unsafe { obj.data.cnode_ptr };
         if cnode_ptr.is_null() {
             return Err(SyscallError::InvalidCap);
         }
 
+        // SAFETY: a live CNode object owns valid CNodeStorage at cnode_ptr
+        // (non-null checked); the held object-table lock keeps it alive for
+        // this borrow.
         let cnode = unsafe { &*cnode_ptr };
         f(cnode)
     })
@@ -392,11 +426,16 @@ where
             return Err(SyscallError::TypeMismatch);
         }
 
+        // SAFETY: obj_type was just confirmed CNode, so the cnode_ptr variant
+        // of the data union is the active member.
         let cnode_ptr = unsafe { obj.data.cnode_ptr };
         if cnode_ptr.is_null() {
             return Err(SyscallError::InvalidCap);
         }
 
+        // SAFETY: a live CNode object owns valid CNodeStorage at cnode_ptr
+        // (non-null checked); the held object-table lock keeps it alive, and
+        // only this single &mut is created within the closure.
         let cnode = unsafe { &mut *cnode_ptr };
         f(cnode)
     })
@@ -434,6 +473,8 @@ where
             if obj.obj_type != KernelObjectType::CNode {
                 return Err(SyscallError::TypeMismatch);
             }
+            // SAFETY: obj_type was just confirmed CNode, so the cnode_ptr
+            // variant of the data union is the active member.
             let ptr = unsafe { obj.data.cnode_ptr };
             if ptr.is_null() {
                 return Err(SyscallError::InvalidCap);
@@ -454,6 +495,8 @@ where
         if obj1.obj_type != KernelObjectType::CNode {
             return Err(SyscallError::TypeMismatch);
         }
+        // SAFETY: obj1.obj_type was just confirmed CNode, so the cnode_ptr
+        // variant of the data union is the active member.
         let ptr1 = unsafe { obj1.data.cnode_ptr };
         if ptr1.is_null() {
             return Err(SyscallError::InvalidCap);
@@ -463,6 +506,8 @@ where
         if obj2.obj_type != KernelObjectType::CNode {
             return Err(SyscallError::TypeMismatch);
         }
+        // SAFETY: obj2.obj_type was just confirmed CNode, so the cnode_ptr
+        // variant of the data union is the active member.
         let ptr2 = unsafe { obj2.data.cnode_ptr };
         if ptr2.is_null() {
             return Err(SyscallError::InvalidCap);

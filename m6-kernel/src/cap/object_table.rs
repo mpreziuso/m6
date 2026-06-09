@@ -1267,6 +1267,8 @@ where
     if let Some(obj) = table.get_mut(asid_pool_ref)
         && obj.obj_type == KernelObjectType::AsidPool
     {
+        // SAFETY: obj_type was just confirmed AsidPool, so the asid_pool_ptr
+        // variant of the data union is the active member.
         let asid_pool_ptr = unsafe { obj.data.asid_pool_ptr };
         if !asid_pool_ptr.is_null() {
             // SAFETY: We verified the object type and null checked the pointer.

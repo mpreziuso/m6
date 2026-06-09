@@ -15,6 +15,11 @@ static VTABLE: RawWakerVTable =
     RawWakerVTable::new(waker_clone, waker_wake, waker_wake_by_ref, waker_drop);
 
 /// Clone the waker (just copy the task ID pointer).
+///
+/// # Safety
+///
+/// `data` must be a `TaskId` encoded as a pointer (as produced by
+/// [`create_waker`]); it is never dereferenced, only copied.
 unsafe fn waker_clone(data: *const ()) -> RawWaker {
     RawWaker::new(data, &VTABLE)
 }
@@ -24,6 +29,11 @@ unsafe fn waker_clone(data: *const ()) -> RawWaker {
 /// This is the core of the waker pattern:
 /// - If task is Sleeping → mark as Runnable
 /// - If task is Running → mark as Woken (prevents lost wakeup)
+///
+/// # Safety
+///
+/// `data` must be a `TaskId` encoded as a pointer (as produced by
+/// [`create_waker`]).
 unsafe fn waker_wake(data: *const ()) {
     // SAFETY: data is a valid TaskId encoded as pointer
     unsafe { waker_wake_by_ref(data) };
@@ -51,6 +61,11 @@ unsafe fn waker_wake_by_ref(data: *const ()) {
 }
 
 /// Drop the waker (no-op, we don't allocate).
+///
+/// # Safety
+///
+/// `data` must be a `TaskId` encoded as a pointer; there is nothing to free
+/// (the id is a plain `u64`), so this is unconditionally a no-op.
 unsafe fn waker_drop(_data: *const ()) {
     // Nothing to do - TaskId is just a u64, no allocation
 }

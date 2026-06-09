@@ -833,6 +833,9 @@ pub fn alloc_frames_zeroed(count: usize) -> Option<u64> {
     if let Some(virt) = phys_to_virt_checked(phys) {
         // Also verify the end is in range
         if phys_to_virt_checked(phys + total_size as u64 - 1).is_some() {
+            // SAFETY: `virt` is the freshly allocated frame run mapped through
+            // the kernel direct map; both its start and last byte were just
+            // confirmed in range, so the whole `total_size` span is writable.
             unsafe {
                 core::ptr::write_bytes(virt as *mut u8, 0, total_size);
             }

@@ -128,6 +128,8 @@ impl KernelHeap {
         // Get the L0 page table from TTBR1
         let ttbr1_phys = ttbr1_base_address();
         let l0_tpa: TPA<L0Table> = TPA::new(ttbr1_phys);
+        // SAFETY: `ttbr1_phys` is the live kernel L0 table base read from TTBR1,
+        // a valid L0 page table accessible through the direct map.
         let mut l0 = unsafe { L0Table::from_pa(l0_tpa) };
 
         // Create a page allocator for intermediate page tables

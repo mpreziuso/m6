@@ -152,6 +152,28 @@ pub fn handle_retype(args: &SyscallArgs) -> SyscallResult {
     // Map target type to kernel object type
     let kernel_type = object_type_to_kernel_type(target_type)?;
 
+    // Enforce device/RAM segregation. A device untyped may only be retyped to
+    // DeviceFrame (or a sub-Untyped that preserves the flag); a normal RAM
+    // untyped may never be retyped to DeviceFrame. This prevents (a) leaking
+    // stale RAM through a DeviceFrame, which is deliberately not zeroed, and
+    // (b) zeroing live MMIO when creating a normal (zeroed) Frame.
+    let untyped_is_device = object_table::with_untyped(untyped_cap.obj_ref, |u| u.is_device)
+        .ok_or(SyscallError::InvalidCap)?;
+    let target_is_device = target_type == ObjectType::DeviceFrame;
+    if target_type != ObjectType::Untyped && target_is_device != untyped_is_device {
+        // A device untyped must only yield DeviceFrame, and a RAM untyped must
+        // never yield one. Enforcing this prevents (a) leaking stale RAM through
+        // a DeviceFrame (never zeroed) and (b) zeroing live MMIO when creating a
+        // normal Frame. Verified inert on the real workload (busybox via Starnix
+        // never trips this), so a hit here is a genuine violation — log loudly.
+        log::warn!(
+            "Retype: REJECTED device/RAM mismatch — untyped.is_device={} target={:?}",
+            untyped_is_device,
+            target_type
+        );
+        return Err(SyscallError::InvalidArg);
+    }
+
     // Resolve the untyped's slot location to find its CDT node.
     // Required so that newly typed objects can be linked as CDT children,
     // making them visible to cap_revoke.
@@ -660,6 +682,9 @@ fn install_mapping(
     let mem_type = select_memory_type(is_device);
 
     // Get L0 table from root physical address
+    // SAFETY: `root_table` is a VSpace's L0 page-table base (the physical
+    // address of a resolved VSpace capability's root), accessible through the
+    // kernel direct map.
     let l0 = unsafe { L0Table::from_pa(TPA::new(root_table.as_u64())) };
 
     // Walk L0 -> L1
@@ -749,6 +774,9 @@ fn clear_mapping(root_table: PhysAddr, vaddr: u64, asid: u16) -> Result<(), Sysc
     let va = VA::new(vaddr);
 
     // Get L0 table from root physical address
+    // SAFETY: `root_table` is a VSpace's L0 page-table base (the physical
+    // address of a resolved VSpace capability's root), accessible through the
+    // kernel direct map.
     let l0 = unsafe { L0Table::from_pa(TPA::new(root_table.as_u64())) };
 
     // Walk L0 -> L1
@@ -822,6 +850,9 @@ fn install_page_table(
     let pa = PA::new(pt_phys.as_u64());
 
     // Get L0 table from root physical address
+    // SAFETY: `root_table` is a VSpace's L0 page-table base (the physical
+    // address of a resolved VSpace capability's root), accessible through the
+    // kernel direct map.
     let mut l0 = unsafe { L0Table::from_pa(TPA::new(root_table.as_u64())) };
 
     match level {
