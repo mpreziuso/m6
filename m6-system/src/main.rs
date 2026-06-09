@@ -178,8 +178,8 @@ fn serve_memory_requests(boot_info: &UserBootInfo, radix: u8, _next_slot: u64) -
         let mut best: Option<usize> = None;
         let mut best_size = 0u64;
         let count = boot_info.untyped_count as usize;
-        for i in 0..count {
-            if used[i] || boot_info.untyped_is_device(i) {
+        for (i, &is_used) in used.iter().enumerate().take(count) {
+            if is_used || boot_info.untyped_is_device(i) {
                 continue;
             }
             let size = boot_info.untyped_size(i);

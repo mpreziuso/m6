@@ -188,12 +188,13 @@ impl Vmo {
             // Commit the page on demand by allocating a (zeroed) frame from the
             // M6 allocator context. If the context is not installed this returns
             // ERR_BAD_STATE — the same "no backing memory" outcome as before.
-            if !inner.pages.contains_key(&page_idx) {
-                let frame_cptr = crate::mem_context::alloc_frame()?;
-                inner.pages.insert(page_idx, PageEntry { frame_cptr, phys_addr: 0 });
-            }
-
-            let page = inner.pages.get(&page_idx).unwrap();
+            let page = match inner.pages.entry(page_idx) {
+                alloc::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                alloc::collections::btree_map::Entry::Vacant(e) => {
+                    let frame_cptr = crate::mem_context::alloc_frame()?;
+                    e.insert(PageEntry { frame_cptr, phys_addr: 0 })
+                }
+            };
             let result = frame_write(page.frame_cptr, page_offset, &data[pos..pos + chunk_len]);
             if result.is_err() {
                 return Err(Status::ERR_IO);

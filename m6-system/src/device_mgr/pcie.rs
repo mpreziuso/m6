@@ -645,21 +645,17 @@ fn parse_ranges_property(data: &[u8], host: &mut PcieHostBridge) {
         let size = ((size_hi as u64) << 32) | (size_lo as u64);
 
         match space_type {
-            0x02 => {
-                // 32-bit non-prefetchable memory window
-                if size > host.mem32_size {
-                    host.mem32_pci = pci_addr;
-                    host.mem32_cpu = cpu_addr;
-                    host.mem32_size = size;
-                }
+            // 32-bit non-prefetchable memory window: keep the largest
+            0x02 if size > host.mem32_size => {
+                host.mem32_pci = pci_addr;
+                host.mem32_cpu = cpu_addr;
+                host.mem32_size = size;
             }
-            0x03 => {
-                // 64-bit prefetchable memory window
-                if size > host.mem64_size {
-                    host.mem64_pci = pci_addr;
-                    host.mem64_cpu = cpu_addr;
-                    host.mem64_size = size;
-                }
+            // 64-bit prefetchable memory window: keep the largest
+            0x03 if size > host.mem64_size => {
+                host.mem64_pci = pci_addr;
+                host.mem64_cpu = cpu_addr;
+                host.mem64_size = size;
             }
             _ => {}
         }

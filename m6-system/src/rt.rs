@@ -67,6 +67,7 @@ fn print_u32(mut n: u32) {
     }
 }
 
+#[allow(dead_code)] // diagnostic helper; not every driver bin uses it
 fn print_u64(mut n: u64) {
     if n == 0 {
         debug_putc(b'0');
@@ -88,6 +89,7 @@ fn print_u64(mut n: u64) {
     }
 }
 
+#[allow(dead_code)] // diagnostic helper; not every driver bin uses it
 fn print_error(e: m6_syscall::error::SyscallError) {
     // Print the error name
     for c in e.name().bytes() {

@@ -42,7 +42,6 @@
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
-#![feature(linkage)]
 
 // Re-export alloc crate
 #[cfg(feature = "alloc")]

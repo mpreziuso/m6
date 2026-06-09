@@ -188,7 +188,7 @@ fn iospace_map_page(
         // Allocate L1 table
         let new_table = alloc_frame_zeroed().ok_or(SyscallError::NoMemory)?;
         // Flush zeroed table to DRAM — SMMU page walker is non-coherent
-        cache_clean_range(phys_to_virt(new_table) as u64, PAGE_SIZE as usize);
+        cache_clean_range(phys_to_virt(new_table), PAGE_SIZE as usize);
         let desc = make_table_descriptor(new_table);
         // SAFETY: Writing to a valid page table entry
         unsafe { l0_table.add(l0_idx).write_volatile(desc) };
@@ -210,7 +210,7 @@ fn iospace_map_page(
     } else {
         // Allocate L2 table
         let new_table = alloc_frame_zeroed().ok_or(SyscallError::NoMemory)?;
-        cache_clean_range(phys_to_virt(new_table) as u64, PAGE_SIZE as usize);
+        cache_clean_range(phys_to_virt(new_table), PAGE_SIZE as usize);
         let desc = make_table_descriptor(new_table);
         // SAFETY: Writing to a valid page table entry
         unsafe { l1_table.add(l1_idx).write_volatile(desc) };
@@ -232,7 +232,7 @@ fn iospace_map_page(
     } else {
         // Allocate L3 table
         let new_table = alloc_frame_zeroed().ok_or(SyscallError::NoMemory)?;
-        cache_clean_range(phys_to_virt(new_table) as u64, PAGE_SIZE as usize);
+        cache_clean_range(phys_to_virt(new_table), PAGE_SIZE as usize);
         let desc = make_table_descriptor(new_table);
         // SAFETY: Writing to a valid page table entry
         unsafe { l2_table.add(l2_idx).write_volatile(desc) };
@@ -428,7 +428,7 @@ pub fn handle_iospace_create(args: &SyscallArgs) -> SyscallResult {
         core::ptr::write_bytes(root_table_virt as *mut u8, 0, 4096);
     }
     // Flush zeros to DRAM — SMMU page walker is non-coherent
-    cache_clean_range(root_table_virt as u64, 4096);
+    cache_clean_range(root_table_virt, 4096);
 
     // Get SMMU index from SmmuControl
     let smmu_index =
@@ -767,10 +767,7 @@ pub fn handle_iospace_bind_stream(args: &SyscallArgs) -> SyscallResult {
         }
 
         // Flush CD to DRAM — SMMU is non-coherent and reads CD from memory
-        cache_clean_range(
-            cd_table_virt as u64,
-            core::mem::size_of::<ContextDescriptor>(),
-        );
+        cache_clean_range(cd_table_virt, core::mem::size_of::<ContextDescriptor>());
 
         // Memory barrier to ensure CD is written before STE
         core::sync::atomic::fence(Ordering::Release);

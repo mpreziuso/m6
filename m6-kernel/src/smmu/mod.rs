@@ -966,7 +966,7 @@ pub unsafe fn init(smmu_phys: u64, smmu_virt: u64, index: u8) -> Result<(), Smmu
 
     // Diagnostic: log stream table address and alignment
     m6_pal::console::puts("[SMMU] Stream table: phys=0x");
-    put_hex_u64(strtab_phys as u64);
+    put_hex_u64(strtab_phys);
     m6_pal::console::puts(" size=0x");
     put_hex_u64(strtab_size as u64);
     m6_pal::console::puts(" align=");

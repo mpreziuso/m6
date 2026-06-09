@@ -1,4 +1,4 @@
-.PHONY: clean check clippy run debug fmt fmt-check sysroot system user image test \
+.PHONY: clean check clippy clippy-fork run debug fmt fmt-check sysroot system user image test \
         linux-binaries busybox fat32-image flash flash-full
 
 all: boot kernel initrd-full
@@ -120,14 +120,25 @@ check:
 		--package m6-user \
 		--target targets/aarch64-unknown-m6.json
 
+# M6-authored crates held to the strict clippy bar (-D warnings). The vendored
+# Starnix fork (m6-starnix*, m6-linux-uapi, fuchsia/zircon shims) is NOT gated
+# here: it tracks upstream Fuchsia (BSD-2-Clause) and must not be churned to
+# satisfy our lints. Use `make clippy-fork` to see its warnings informationally.
+M6_CRATES := m6-alloc m6-arch m6-boot m6-cap m6-common m6-kernel m6-mmio \
+	m6-paging m6-pal m6-std m6-syscall m6-system m6-testlib m6-zx-shim
+
 clippy:
-	cargo clippy --workspace --exclude m6-user -- -D warnings
+	cargo clippy $(addprefix -p ,$(M6_CRATES)) -- -D warnings
 	@# m6-user needs the custom sysroot
 	RUSTFLAGS="--sysroot=$(CURDIR)/target/sysroot" cargo +nightly clippy \
 		-Zjson-target-spec \
 		--package m6-user \
 		--target targets/aarch64-unknown-m6.json \
 		-- -D warnings
+
+# Informational clippy over the vendored Starnix fork — NOT gated on warnings.
+clippy-fork:
+	cargo clippy -p m6-starnix
 
 run: #all
 	./scripts/run-qemu.sh -device VGA
